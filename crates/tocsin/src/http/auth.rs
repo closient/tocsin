@@ -1,0 +1,126 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//! Bearer-token authorization for write routes.
+//!
+//! A handler takes [`Authorized<S>`] for the scope `S` it needs:
+//!
+//! ```ignore
+//! async fn create(State(state): State<AppState>, auth: Authorized<scope::Incident>, ...)
+//! ```
+//!
+//! The extractor compares `Authorization: Bearer <secret>` with every
+//! `[[token]]` in constant time, answers 401 when the header is missing or
+//! the secret is unknown and 403 when the token lacks the scope, and gives
+//! the handler the token as the [`Actor`] to record. The secret is never
+//! logged or echoed.
+
+use std::marker::PhantomData;
+
+use axum::extract::FromRequestParts;
+use axum::http::header;
+use axum::http::request::Parts;
+use subtle::ConstantTimeEq;
+use tocsin_core::config::{Token, TokenScope};
+use tocsin_core::incident::Actor;
+
+use super::AppState;
+use super::error::ApiError;
+
+/// A scope a route requires, as a type so the route states it once.
+pub trait Scope {
+    /// The `[[token]]` scope required.
+    const SCOPE: TokenScope;
+    /// Its name in the configuration, for messages.
+    const NAME: &'static str;
+}
+
+/// The scopes, one marker type each.
+pub mod scope {
+    use tocsin_core::config::TokenScope;
+
+    /// `incident`: incidents and maintenance.
+    pub struct Incident;
+    /// `heartbeat`: heartbeat pings.
+    #[allow(dead_code, reason = "used by the heartbeat API")]
+    pub struct Heartbeat;
+    /// `release`: releases and deploys.
+    #[allow(dead_code, reason = "used by the release API")]
+    pub struct Release;
+
+    impl super::Scope for Incident {
+        const SCOPE: TokenScope = TokenScope::Incident;
+        const NAME: &'static str = "incident";
+    }
+    impl super::Scope for Heartbeat {
+        const SCOPE: TokenScope = TokenScope::Heartbeat;
+        const NAME: &'static str = "heartbeat";
+    }
+    impl super::Scope for Release {
+        const SCOPE: TokenScope = TokenScope::Release;
+        const NAME: &'static str = "release";
+    }
+}
+
+/// A request from a writer holding scope `S`.
+pub struct Authorized<S> {
+    /// Who is writing, to record with the change.
+    pub actor: Actor,
+    scope: PhantomData<fn() -> S>,
+}
+
+impl<S: Scope> FromRequestParts<AppState> for Authorized<S> {
+    type Rejection = ApiError;
+
+    // Nothing to wait for: the answer is ready at once.
+    fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> impl Future<Output = Result<Self, ApiError>> + Send {
+        std::future::ready(authorize(parts, state))
+    }
+}
+
+/// 401 without a known token, 403 without scope `S`.
+fn authorize<S: Scope>(parts: &Parts, state: &AppState) -> Result<Authorized<S>, ApiError> {
+    let secret = bearer(parts)
+        .ok_or_else(|| ApiError::unauthorized("send a token as `Authorization: Bearer <token>`"))?;
+    let token = find_token(&state.config.tokens, secret.as_bytes())
+        .ok_or_else(|| ApiError::unauthorized("unknown token"))?;
+    if !token.scopes.contains(&S::SCOPE) {
+        tracing::warn!(token = %token.id, scope = S::NAME, "token lacks the scope");
+        return Err(ApiError::forbidden(format!(
+            "token {} does not have the `{}` scope",
+            token.id.as_str(),
+            S::NAME
+        )));
+    }
+    Ok(Authorized {
+        actor: Actor::token(token.id.as_str()),
+        scope: PhantomData,
+    })
+}
+
+/// The credentials of an `Authorization: Bearer` header; the scheme is
+/// case-insensitive. `None` if absent, of another scheme, or empty.
+fn bearer(parts: &Parts) -> Option<&str> {
+    let value = parts.headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, credentials) = value.split_once(' ')?;
+    let credentials = credentials.trim();
+    (scheme.eq_ignore_ascii_case("bearer") && !credentials.is_empty()).then_some(credentials)
+}
+
+/// The token whose secret is `presented`.
+///
+/// Every token is compared, in constant time and without stopping at a
+/// match, so the response time says nothing about which secrets exist or
+/// how much of one was guessed; only a secret's length can show. Secrets
+/// are unique (`config check` enforces it), so at most one matches.
+fn find_token<'a>(tokens: &'a [Token], presented: &[u8]) -> Option<&'a Token> {
+    let mut found = None;
+    for token in tokens {
+        if bool::from(token.secret.expose().as_bytes().ct_eq(presented)) {
+            found = Some(token);
+        }
+    }
+    found
+}

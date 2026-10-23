@@ -13,9 +13,11 @@ workspace = true
 
 [dependencies]
 http.workspace = true
+jiff.workspace = true
 regex.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_json_path.workspace = true
 toml.workspace = true
+utoipa.workspace = true

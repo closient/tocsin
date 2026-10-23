@@ -4,6 +4,8 @@
 
 use std::fmt;
 
+use tocsin_core::incident::FieldError;
+
 /// Anything that stopped a store operation.
 #[derive(Debug)]
 pub enum Error {
@@ -15,6 +17,8 @@ pub enum Error {
     Io(std::io::Error),
     /// The transaction a write was batched into could not commit.
     Batch(String),
+    /// An incident edit could not be encoded as JSON for the edit log.
+    Encode(serde_json::Error),
     /// SQLite would not switch the database to write-ahead logging, for
     /// example because the filesystem cannot share memory between processes.
     NotWal(String),
@@ -34,6 +38,9 @@ pub enum Error {
         /// This node's clock when it was refused.
         now_ms: i64,
     },
+    /// A write broke a rule that depends on what is already stored, such as
+    /// an update whose status does not suit the incident's kind.
+    Invalid(Vec<FieldError>),
 }
 
 /// The result of a store operation.
@@ -46,6 +53,7 @@ impl fmt::Display for Error {
             Error::Migration(error) => write!(f, "migrating the database: {error}"),
             Error::Io(error) => write!(f, "database file: {error}"),
             Error::Batch(message) => write!(f, "committing a write batch: {message}"),
+            Error::Encode(error) => write!(f, "encoding the edit log entry: {error}"),
             Error::NotWal(mode) => write!(
                 f,
                 "the database could not use write-ahead logging (journal mode is {mode})"
@@ -61,6 +69,14 @@ impl fmt::Display for Error {
                 "a check result starts at {started_at_ms} ms, more than an hour after now \
                  ({now_ms} ms); check the clock of the node that ran it"
             ),
+            Error::Invalid(errors) => {
+                f.write_str("invalid write")?;
+                for (index, error) in errors.iter().enumerate() {
+                    f.write_str(if index == 0 { ": " } else { "; " })?;
+                    write!(f, "{error}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -71,6 +87,7 @@ impl std::error::Error for Error {
             Error::Sqlite(error) => Some(error),
             Error::Migration(error) => Some(error),
             Error::Io(error) => Some(error),
+            Error::Encode(error) => Some(error),
             _ => None,
         }
     }

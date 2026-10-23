@@ -16,10 +16,14 @@ fn tocsin(args: &[&str]) -> Output {
         .expect("tocsin runs")
 }
 
+/// The smallest valid file, on a port the system picks so tests running
+/// at once never collide.
+const LISTEN_ANY_PORT: &str = "[server]\nlisten = \"127.0.0.1:0\"\n";
+
 /// A configuration folder holding the smallest valid file.
 fn config_folder() -> tempfile::TempDir {
     let config = tempfile::tempdir().unwrap();
-    std::fs::write(config.path().join("server.toml"), "[server]\n").unwrap();
+    std::fs::write(config.path().join("server.toml"), LISTEN_ANY_PORT).unwrap();
     config
 }
 
@@ -340,7 +344,7 @@ fn db_info_reports_rows_and_the_oldest_result() {
     let info = json_stdout(&output);
     assert_eq!(info["rows"]["check_result"], 4);
     assert_eq!(info["rows"]["daily_rollup"], 0);
-    assert_eq!(info["schema_version"], 1);
+    assert_eq!(info["schema_version"], 2);
     assert!(info["size_bytes"].as_u64().unwrap() > 0);
     assert_eq!(
         info["oldest_result"],
@@ -444,13 +448,13 @@ fn db_info_reports_a_newer_schema_without_touching_it() {
     );
     let info = json_stdout(&output);
     assert_eq!(info["schema_version"], 99);
-    assert_eq!(info["supported_schema_version"], 1);
+    assert_eq!(info["supported_schema_version"], 2);
     assert_eq!(info["rows"]["check_result"], 4);
     assert_eq!(user_version(&data), 99);
 
     let text = tocsin(&["db", "info", "--data", data_arg(&data)]);
     assert!(
-        String::from_utf8_lossy(&text.stdout).contains("newer than this build's 1"),
+        String::from_utf8_lossy(&text.stdout).contains("newer than this build's 2"),
         "{}",
         String::from_utf8_lossy(&text.stdout)
     );
@@ -540,7 +544,7 @@ fn serve_refuses_an_invalid_configuration() {
     let data = tempfile::tempdir().unwrap();
     std::fs::write(
         config.path().join("server.toml"),
-        "[server]\nretention_days = 0\n",
+        "[server]\nlisten = \"127.0.0.1:0\"\nretention_days = 0\n",
     )
     .unwrap();
     let output = tocsin(&[
@@ -554,7 +558,7 @@ fn serve_refuses_an_invalid_configuration() {
     assert_eq!(output.status.code(), Some(2));
     let error = &json_stdout(&output)["error"];
     assert_eq!(error["kind"], "invalid_input");
-    assert_eq!(error["errors"][0]["line"], 2);
+    assert_eq!(error["errors"][0]["line"], 3);
     assert_eq!(error["errors"][0]["path"], "server.retention_days");
 }
 
@@ -576,7 +580,7 @@ fn serve_needs_a_data_folder_from_the_flag_or_the_configuration() {
     std::fs::write(config.path().join("taken"), "").unwrap();
     std::fs::write(
         config.path().join("server.toml"),
-        "[server]\ndata_dir = \"taken\"\n",
+        "[server]\nlisten = \"127.0.0.1:0\"\ndata_dir = \"taken\"\n",
     )
     .unwrap();
     let output = tocsin(&[
@@ -601,7 +605,7 @@ fn serve_applies_retention_at_startup() {
     let config = tempfile::tempdir().unwrap();
     std::fs::write(
         config.path().join("server.toml"),
-        "[server]\nretention_days = 1\n",
+        "[server]\nlisten = \"127.0.0.1:0\"\nretention_days = 1\n",
     )
     .unwrap();
     let data = seeded_database();

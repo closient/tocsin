@@ -21,7 +21,7 @@ WAL, and runs any pending migrations before doing anything else.
 |---|---|---|
 | `journal_mode` | `WAL` | Readers never wait for the writer, and the writer never waits for readers. `Store::open` fails if WAL cannot be enabled (for example, on a network filesystem). |
 | `synchronous` | `NORMAL` | Safe under WAL: a power cut can lose the last few commits but never corrupts the file. Probe results are cheap to lose; a full fsync per commit is not cheap. |
-| `foreign_keys` | `ON` | `incident_update` cascades with its incident. |
+| `foreign_keys` | `ON` | An incident's components, updates and edits cascade with it. |
 | `busy_timeout` | 5 s | Covers a checkpoint or a hand-run `sqlite3` holding a lock briefly. |
 
 **One writer.** Every write goes through a single dedicated thread fed by a
@@ -126,14 +126,38 @@ and the `source` address. Append-only (trigger `heartbeat_ping_append_only`).
 Indexed by `(check_id, received_at)`. Its shape belongs to the heartbeat
 work, which extends it with a new migration.
 
-### `incident` and `incident_update`
+### `incident`, `incident_component`, `incident_update` and `incident_edit`
 
-A human-declared incident or scheduled maintenance (`kind`: `incident` or
-`maintenance`) with a `title`, an `impact` (`none`, `degraded`, `down`),
-`starts_at`, an optional scheduled `ends_at`, `resolved_at` and `created_at`.
-Each `incident_update` belongs to one incident (deleted with it) and carries a
-`status` (`investigating`, `identified`, `monitoring`, `resolved`, `scheduled`,
-`in_progress`, `completed`), a Markdown `body` and `created_at`.
+Migration 0002 replaced the placeholder incident tables 0001 created (no
+code path ever wrote them). The API that writes these tables is in
+[`incidents.md`](incidents.md).
+
+`incident` is one incident or scheduled maintenance: `kind` (`incident` or
+`maintenance`), `title`, `impact` (`none`, `minor`, `major`, `critical`),
+`status`, `scheduled_start` and `scheduled_end` (maintenance only, end after
+start), `resolved_at`, and `created_at`/`created_by` and
+`updated_at`/`updated_by`. Each `*_by` column has a `*_by_kind` beside it:
+`token` (a configured `[[token]]`, by id) or `person` (reserved for a name an
+authenticating proxy supplies). The id is `AUTOINCREMENT`, so it is never
+reused and links to an incident stay true. `CHECK`s hold each kind to its own
+statuses (`investigating`, `identified`, `monitoring`, `resolved` for an
+incident; `scheduled`, `in_progress`, `completed` for maintenance), keep a
+schedule on maintenance and off incidents, and set `resolved_at` exactly
+when the status is `resolved` or `completed`. A trigger fixes the id, kind
+and creation fields.
+
+**An edit (`PATCH`) changes the `incident` row in place** (title, impact,
+schedule, and the component set in `incident_component`), moves
+`updated_at`/`updated_by`, and appends one `incident_edit` row holding the
+fields it set as JSON with who sent it. The JSON is for people reading the
+audit trail; the `incident` row is the source of truth.
+
+**Updates are append-only.** Each `incident_update` row is one entry on the
+timeline: `status`, a Markdown `message`, `created_at` and its author. The
+first is the opening message. Posting one moves the incident's `status` to
+it; `resolved_at` keeps the first resolution and clears if an update
+reopens the incident. Triggers refuse an `UPDATE` of `incident_update` or
+`incident_edit`. All four tables cascade with their incident.
 
 ### `release`
 

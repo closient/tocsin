@@ -10,9 +10,13 @@
 compile_error!("tocsin supports Unix-like systems (Linux, macOS) only");
 
 mod cli;
+mod client;
 mod config;
 mod db;
 mod exit;
+mod export;
+mod http;
+mod incident;
 mod lock;
 mod output;
 mod probe;
@@ -63,6 +67,14 @@ fn run(cli: Cli) -> Result<Report, Failure> {
         Some(Command::Probe { command }) => match command {
             ProbeCommand::Run { check, config } => probe::run(&check, &config),
         },
+        Some(Command::Incident { command }) => incident::run(command),
+        Some(Command::Maintenance { command }) => incident::run_maintenance(command),
+        Some(Command::Openapi) => Ok(Report {
+            exit: Exit::Ok,
+            json: serde_json::to_value(http::openapi::spec())
+                .expect("the OpenAPI document serializes"),
+            text: http::openapi::pretty().trim_end().to_owned(),
+        }),
         None => Err(Failure::new(
             Exit::InvalidInput,
             "no command given; run `tocsin --help` for usage",

@@ -1,0 +1,2 @@
+# `..` keeps clippy's default list; OpenAPI is a name, not code.
+doc-valid-idents = ["OpenAPI", ".."]

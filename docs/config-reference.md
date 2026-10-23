@@ -349,7 +349,7 @@ A destination for operator alerts. Every alert it sends is followed by a resolve
 
 ### `[page]`
 
-`[page]`.
+`[page]`: how the public status page looks, its title, logo, links, the order of its groups and components, and the time zone it shows times in.
 
 | Key | Type | Required | Default | Description |
 |-----|------|----------|---------|-------------|

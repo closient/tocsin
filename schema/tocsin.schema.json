@@ -1131,7 +1131,7 @@
     },
     "Page": {
       "additionalProperties": false,
-      "description": "`[page]`.",
+      "description": "`[page]`: how the public status page looks, its title, logo, links,\nthe order of its groups and components, and the time zone it shows\ntimes in.",
       "properties": {
         "components": {
           "description": "The order components are shown in within their group, by id.\nComponents not listed follow in the order they are defined.",

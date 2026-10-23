@@ -1101,7 +1101,11 @@ fn json_ld(page: &str) -> Value {
     let start = page.find(r#"<script type="application/ld+json">"#).unwrap()
         + r#"<script type="application/ld+json">"#.len();
     let end = start + page[start..].find("</script>").unwrap();
-    serde_json::from_str(&page[start..end]).unwrap()
+    // Nothing a tokenizer reads as markup: not `</script`, and not `<!--`,
+    // which would change how it reads the rest of the element.
+    let body = &page[start..end];
+    assert!(!body.contains(['<', '>', '&']), "{body}");
+    serde_json::from_str(body).unwrap()
 }
 
 #[tokio::test]

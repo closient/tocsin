@@ -254,7 +254,9 @@ pub enum AuthMode {
     TrustedHeader,
 }
 
-/// `[page]`.
+/// `[page]`: how the public status page looks, its title, logo, links,
+/// the order of its groups and components, and the time zone it shows
+/// times in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Page {

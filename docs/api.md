@@ -68,6 +68,7 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
 | `GET /api/v1/incidents/{id}` | none | 200, the incident |
 | `GET /api/v1/releases?project=&since=&before=&limit=` | none, or `status:read` | 200, `{releases, truncated, next_before}`, newest first |
 | `GET /api/v1/timeline?component=&since=&after=&limit=` | none, or `status:read` | 200, `{since, events, truncated, next_after}`, oldest first |
+| `GET /api/v1/events` | none, or `status:read` | 200, an endless `text/event-stream` |
 | `GET /api/v1/openapi.json` | none | 200, the OpenAPI document |
 | `GET /llms.txt` | none | 200, `text/plain` |
 
@@ -147,6 +148,27 @@ Errors are the same JSON every endpoint returns; the full table is in
 | 403 | `forbidden` | Check results with a token that lacks `status:read`. |
 | 404 | `not_found` | No component, check or incident with that id. |
 | 422 | `invalid` | A query value breaks a rule. `fields[].path` is the parameter (`since`, `limit`); `""` when the query does not parse at all (`limit=x`, an unknown parameter). |
+
+### Events
+
+`GET /api/v1/events` streams every change from the moment you connect, as
+[server-sent events](https://html.spec.whatwg.org/multipage/server-sent-events.html).
+The event name is the change's `type` (`incident_created`,
+`incident_updated`, `incident_edited`, `release_published`,
+`release_deployed`, `check_changed`, `component_changed`) and the data is
+its JSON, as described in [incidents.md](incidents.md#events),
+[releases.md](releases.md#events) and [engine.md](engine.md#events).
+
+The first event on every connection is `resync`, with data `{}`, and so
+is the one after a slow reader fell behind and missed some: on either,
+re-read whatever you show rather than patching it. A comment line every 15
+seconds keeps a quiet connection open through proxies, and the response
+carries `X-Accel-Buffering: no` so nginx passes events through at once.
+The stream ends when the server shuts down; reconnect.
+
+Anyone sees incident, check and component events and the releases of
+public projects; a `status:read` token also sees releases of private
+ones. The status page's live updates are this stream.
 
 ## `/llms.txt`
 

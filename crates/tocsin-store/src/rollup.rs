@@ -6,30 +6,42 @@
 //! retention also checks, under the write lock, for results committed after
 //! the reader's snapshot and recounts the day if there are any.
 
+use std::collections::HashSet;
+
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use tocsin_core::Health;
 
+use crate::SubjectKind;
 use crate::day::{Day, MS_PER_DAY};
 use crate::error::Result;
 
-/// One check's results on one node for one UTC day.
+/// One check's or heartbeat's results on one node for one UTC day.
+///
+/// A check's figures count results. A heartbeat's are milliseconds: each of
+/// its results holds its health until the next result or the end of the
+/// day, whichever comes first (until now, today), and time before the day's
+/// first result is not counted. A heartbeat reports only when its job runs
+/// or a deadline passes, so counting would weigh an hour of pings every
+/// minute against a day of hourly misses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DailyRollup {
-    /// The check the results belong to.
+    /// The check or heartbeat the results belong to.
     pub check_id: String,
-    /// The node that ran the check.
+    /// The node that recorded them.
     pub node_id: String,
     /// The UTC day.
     pub date: Day,
-    /// Results that day: `up + degraded + down`.
+    /// Whether the figures are result counts or milliseconds.
+    pub kind: SubjectKind,
+    /// `up + degraded + down`.
     pub total: i64,
-    /// Results that were up.
+    /// Results, or milliseconds, up.
     pub up: i64,
-    /// Results that were degraded.
+    /// Results, or milliseconds, degraded.
     pub degraded: i64,
-    /// Results that were down.
+    /// Results, or milliseconds, down.
     pub down: i64,
-    /// The worst health seen that day.
+    /// The worst health of any result that day.
     pub worst: Health,
 }
 
@@ -49,13 +61,75 @@ impl DailyRollup {
     }
 }
 
-/// Counts results with `from_ms <= started_at < until_ms` per check, node and
-/// UTC day. `started_at` is never negative, so integer division is the floor.
+/// Rolls up results with `from_ms <= started_at < until_ms` per check, node
+/// and UTC day: counted for checks, weighed by time for heartbeats, whose
+/// last state today holds until `now_ms`. `from_ms` is a day boundary.
 pub(crate) fn aggregate(
     conn: &Connection,
     from_ms: i64,
     until_ms: i64,
+    now_ms: i64,
 ) -> Result<Vec<DailyRollup>> {
+    let heartbeats = weigh_heartbeats(&heartbeat_results(conn, from_ms, until_ms)?, now_ms);
+    let mut rollups = count_checks(conn, from_ms, until_ms, &heartbeats)?;
+    rollups.extend(heartbeats);
+    Ok(rollups)
+}
+
+/// One heartbeat result, as its rollup reads it.
+struct HeartbeatResult {
+    check_id: String,
+    node_id: String,
+    started_at: i64,
+    health: Health,
+}
+
+/// Heartbeat results, ordered by heartbeat, node and time, from an index
+/// that holds only heartbeats' rows: on a store of checks alone it is empty.
+fn heartbeat_results(
+    conn: &Connection,
+    from_ms: i64,
+    until_ms: i64,
+) -> Result<Vec<HeartbeatResult>> {
+    let mut statement = conn.prepare_cached(
+        "SELECT check_id, node_id, started_at, health FROM check_result
+         WHERE started_at >= ?1 AND started_at < ?2 AND kind = 'heartbeat'
+         ORDER BY check_id, node_id, started_at, id",
+    )?;
+    let rows = statement.query_map(params![from_ms, until_ms], |row| {
+        Ok(HeartbeatResult {
+            check_id: row.get(0)?,
+            node_id: row.get(1)?,
+            started_at: row.get(2)?,
+            health: parse_column(3, &row.get::<_, String>(3)?)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Counts check results, skipping each day `heartbeats` has a rollup for:
+/// any heartbeat result makes a day a heartbeat's (the two share one id
+/// space, so both kinds land on one day only when an id changes kind).
+/// Counting every result scans the time index, which has an entry for each;
+/// filtering by kind there would widen every entry, and every write and
+/// every purge would pay for it. `started_at` is never negative, so integer
+/// division is the floor.
+fn count_checks(
+    conn: &Connection,
+    from_ms: i64,
+    until_ms: i64,
+    heartbeats: &[DailyRollup],
+) -> Result<Vec<DailyRollup>> {
+    let weighed: HashSet<(&str, &str, Day)> = heartbeats
+        .iter()
+        .map(|rollup| {
+            (
+                rollup.check_id.as_str(),
+                rollup.node_id.as_str(),
+                rollup.date,
+            )
+        })
+        .collect();
     let mut statement = conn.prepare_cached(&format!(
         "SELECT check_id, node_id, started_at / {MS_PER_DAY} AS day, count(*),
                 sum(health = 'up'), sum(health = 'degraded'), sum(health = 'down')
@@ -69,6 +143,7 @@ pub(crate) fn aggregate(
             check_id: row.get(0)?,
             node_id: row.get(1)?,
             date: Day::from_epoch_days(row.get(2)?),
+            kind: SubjectKind::Check,
             total: row.get(3)?,
             up,
             degraded,
@@ -76,7 +151,64 @@ pub(crate) fn aggregate(
             worst: DailyRollup::worst_of(up, degraded, down),
         })
     })?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+    let mut rollups = Vec::new();
+    for rollup in rows {
+        let rollup = rollup?;
+        if !weighed.contains(&(
+            rollup.check_id.as_str(),
+            rollup.node_id.as_str(),
+            rollup.date,
+        )) {
+            rollups.push(rollup);
+        }
+    }
+    Ok(rollups)
+}
+
+/// Weighs heartbeat results by how long each held: until the next result
+/// that day, or the end of the day, or `now_ms`, whichever comes first.
+fn weigh_heartbeats(heartbeats: &[HeartbeatResult], now_ms: i64) -> Vec<DailyRollup> {
+    let mut rollups: Vec<DailyRollup> = Vec::new();
+    for (index, heartbeat) in heartbeats.iter().enumerate() {
+        let date = Day::containing(heartbeat.started_at);
+        let next = heartbeats
+            .get(index + 1)
+            .filter(|next| {
+                next.check_id == heartbeat.check_id
+                    && next.node_id == heartbeat.node_id
+                    && Day::containing(next.started_at) == date
+            })
+            .map(|next| next.started_at);
+        let end = next.unwrap_or_else(|| date.plus(1).start_ms().min(now_ms));
+        let held = (end - heartbeat.started_at).max(0);
+        let continues = rollups.last().is_some_and(|rollup| {
+            rollup.check_id == heartbeat.check_id
+                && rollup.node_id == heartbeat.node_id
+                && rollup.date == date
+        });
+        if !continues {
+            rollups.push(DailyRollup {
+                check_id: heartbeat.check_id.clone(),
+                node_id: heartbeat.node_id.clone(),
+                date,
+                kind: SubjectKind::Heartbeat,
+                total: 0,
+                up: 0,
+                degraded: 0,
+                down: 0,
+                worst: heartbeat.health,
+            });
+        }
+        let rollup = rollups.last_mut().expect("continued or just pushed");
+        rollup.total += held;
+        match heartbeat.health {
+            Health::Up => rollup.up += held,
+            Health::Degraded => rollup.degraded += held,
+            Health::Down => rollup.down += held,
+        }
+        rollup.worst = rollup.worst.max(heartbeat.health);
+    }
+    rollups
 }
 
 /// Inserts or replaces each rollup, skipping days before the retention
@@ -85,11 +217,11 @@ pub(crate) fn aggregate(
 pub(crate) fn upsert(conn: &Connection, rollups: &[DailyRollup]) -> Result<usize> {
     let floor = purged_before(conn)?.unwrap_or(0);
     let mut statement = conn.prepare_cached(
-        "INSERT INTO daily_rollup (check_id, node_id, date, total, up, degraded, down, worst)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        "INSERT INTO daily_rollup (check_id, node_id, date, total, up, degraded, down, worst, kind)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT (check_id, node_id, date) DO UPDATE SET
              total = excluded.total, up = excluded.up, degraded = excluded.degraded,
-             down = excluded.down, worst = excluded.worst",
+             down = excluded.down, worst = excluded.worst, kind = excluded.kind",
     )?;
     let mut written = 0;
     for rollup in rollups.iter().filter(|r| r.date.start_ms() >= floor) {
@@ -102,6 +234,7 @@ pub(crate) fn upsert(conn: &Connection, rollups: &[DailyRollup]) -> Result<usize
             rollup.degraded,
             rollup.down,
             rollup.worst.as_str(),
+            rollup.kind.as_str(),
         ])?;
     }
     Ok(written)
@@ -110,7 +243,7 @@ pub(crate) fn upsert(conn: &Connection, rollups: &[DailyRollup]) -> Result<usize
 /// Every stored rollup from `since` on, ordered by check, node and day.
 pub(crate) fn since(conn: &Connection, since: Day) -> Result<Vec<DailyRollup>> {
     let mut statement = conn.prepare_cached(
-        "SELECT check_id, node_id, date, total, up, degraded, down, worst
+        "SELECT check_id, node_id, date, total, up, degraded, down, worst, kind
          FROM daily_rollup WHERE date >= ?1 ORDER BY check_id, node_id, date",
     )?;
     let rows = statement.query_map(params![since.to_string()], |row| {
@@ -123,15 +256,17 @@ pub(crate) fn since(conn: &Connection, since: Day) -> Result<Vec<DailyRollup>> {
             row.get(5)?,
             row.get(6)?,
             row.get::<_, String>(7)?,
+            row.get::<_, String>(8)?,
         ))
     })?;
     let mut rollups = Vec::new();
     for row in rows {
-        let (check_id, node_id, date, total, up, degraded, down, worst) = row?;
+        let (check_id, node_id, date, total, up, degraded, down, worst, kind) = row?;
         rollups.push(DailyRollup {
             check_id,
             node_id,
             date: parse_column(2, &date)?,
+            kind: parse_column(8, &kind)?,
             total,
             up,
             degraded,
@@ -191,12 +326,18 @@ pub(crate) struct Finalize {
     /// `max(id)` read before `rollups` was counted, so every result with an
     /// id up to it is in the count.
     seen_id: i64,
+    /// The time a heartbeat's last state holds until, if its day is today.
+    now_ms: i64,
     rollups: Vec<DailyRollup>,
 }
 
 /// Plans the next day to finalize, or `None` once the watermark has reached
 /// `cutoff_ms`. Runs on a reader, so the scan never holds the write lock.
-pub(crate) fn plan_finalize(conn: &Connection, cutoff_ms: i64) -> Result<Option<Finalize>> {
+pub(crate) fn plan_finalize(
+    conn: &Connection,
+    cutoff_ms: i64,
+    now_ms: i64,
+) -> Result<Option<Finalize>> {
     let from_ms = purged_before(conn)?.unwrap_or(0);
     if from_ms >= cutoff_ms {
         return Ok(None);
@@ -217,7 +358,8 @@ pub(crate) fn plan_finalize(conn: &Connection, cutoff_ms: i64) -> Result<Option<
         from_ms,
         until_ms,
         seen_id,
-        rollups: aggregate(conn, from_ms, until_ms)?,
+        now_ms,
+        rollups: aggregate(conn, from_ms, until_ms, now_ms)?,
     }))
 }
 
@@ -241,7 +383,7 @@ pub(crate) fn finalize(conn: &mut Connection, plan: Finalize) -> Result<usize> {
         |row| row.get(0),
     )?;
     let rollups = if late {
-        aggregate(&transaction, plan.from_ms, plan.until_ms)?
+        aggregate(&transaction, plan.from_ms, plan.until_ms, plan.now_ms)?
     } else {
         plan.rollups
     };

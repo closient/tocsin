@@ -16,15 +16,18 @@ use tocsin_core::Health;
 
 use crate::error::Result;
 use crate::rollup::parse_column;
-use crate::writer::apply_outage_change;
-use crate::{NewOutage, OutageChange};
+use crate::writer::{apply_outage_change, insert_result};
+use crate::{NewCheckResult, NewOutage, OutageChange};
 
-/// What an alert is about: the second half of its identity, after the node.
+/// What a result, an outage or an alert is about: the second half of an
+/// alert's identity, after the node. Rollups weigh the two kinds' results
+/// differently (see `docs/storage.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SubjectKind {
-    /// A probe check.
+    /// A probe check: rolled up by counting results.
     Check,
-    /// A heartbeat: a job that pings tocsin.
+    /// A heartbeat, a job that pings tocsin: rolled up by how long each
+    /// state held.
     Heartbeat,
 }
 
@@ -283,6 +286,36 @@ pub(crate) fn change_outage(
     now_ms: i64,
 ) -> Result<OutageAlerts> {
     let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let alerts = apply_alerting_change(&transaction, change, routing, now_ms)?;
+    transaction.commit()?;
+    Ok(alerts)
+}
+
+/// Stores `result` of `kind`, applies the `change` it confirms and queues
+/// the deliveries that causes, in one transaction.
+pub(crate) fn record(
+    conn: &mut Connection,
+    result: &NewCheckResult,
+    kind: SubjectKind,
+    change: &OutageChange,
+    routing: Option<&AlertRouting>,
+    now_ms: i64,
+) -> Result<OutageAlerts> {
+    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    insert_result(&transaction, result, kind)?;
+    let alerts = apply_alerting_change(&transaction, change, routing, now_ms)?;
+    transaction.commit()?;
+    Ok(alerts)
+}
+
+/// Applies `change` and queues the deliveries it causes, inside the
+/// transaction `transaction` is in.
+fn apply_alerting_change(
+    transaction: &Connection,
+    change: &OutageChange,
+    routing: Option<&AlertRouting>,
+    now_ms: i64,
+) -> Result<OutageAlerts> {
     let identity = match (&change.open, &change.end) {
         (Some(open), _) => Some(Identity {
             node_id: open.node_id.clone(),
@@ -301,12 +334,12 @@ pub(crate) fn change_outage(
             .optional()?,
         (None, None) => None,
     };
-    let id = apply_outage_change(&transaction, change)?;
+    let id = apply_outage_change(transaction, change)?;
     let queued = if let Some(identity) = identity {
-        let open_alerts = open_alerts(&transaction, &identity)?;
+        let open_alerts = open_alerts(transaction, &identity)?;
         match &change.open {
             Some(open) if open.alerted => fire_alerts(
-                &transaction,
+                transaction,
                 &FiringOutage {
                     id,
                     open,
@@ -318,13 +351,12 @@ pub(crate) fn change_outage(
             )?,
             _ => {
                 let ended_at_ms = change.end.map_or(now_ms, |end| end.ended_at_ms);
-                end_alerts(&transaction, &open_alerts, ended_at_ms, now_ms)?
+                end_alerts(transaction, &open_alerts, ended_at_ms, now_ms)?
             }
         }
     } else {
         0
     };
-    transaction.commit()?;
     Ok(OutageAlerts {
         opened: change.open.as_ref().map(|_| id),
         queued,

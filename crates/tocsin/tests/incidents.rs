@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The incident and release CLIs against a live `tocsin serve`: the round
-//! trips, the exit codes HTTP failures map to, and serve answering HTTP
-//! until a signal stops it.
+//! The incident, release and heartbeat CLIs against a live `tocsin serve`:
+//! the round trips, the exit codes HTTP failures map to, and serve answering
+//! HTTP until a signal stops it.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -29,6 +29,15 @@ name = "Web"
 id = "api"
 name = "API server"
 components = ["api"]
+
+[[component]]
+id = "jobs"
+name = "Jobs"
+
+[[heartbeat]]
+id = "backup"
+component = "jobs"
+interval = "1h"
 
 [[token]]
 id = "oncall"
@@ -633,5 +642,76 @@ fn the_committed_openapi_document_is_current() {
     assert!(
         String::from_utf8_lossy(&output.stdout) == committed,
         "schema/openapi.json is stale; regenerate it with\n  cargo run -- openapi > schema/openapi.json"
+    );
+}
+
+#[test]
+fn the_heartbeat_cli_pings_a_live_server() {
+    let server = Server::start();
+
+    let receipt = ok(&server.cli(Some(DEPLOYS), &["heartbeat", "ping", "backup"]));
+    assert_eq!(receipt["id"], "backup");
+    assert_eq!(receipt["status"], "up");
+    assert!(receipt["received_at"].is_string(), "{receipt}");
+
+    // A message with characters that mean something in a query arrives
+    // whole; reporting down is still a successful ping.
+    let receipt = ok(&server.cli(
+        Some(DEPLOYS),
+        &[
+            "heartbeat",
+            "ping",
+            "backup",
+            "--status",
+            "down",
+            "--message",
+            "disk full & token=x?",
+        ],
+    ));
+    assert_eq!(receipt["status"], "down");
+
+    for (token, args, status) in [
+        (Some("not-a-configured-token"), vec!["backup"], "401"),
+        (Some(ONCALL), vec!["backup"], "403"),
+        (Some(DEPLOYS), vec!["nonesuch"], "404"),
+    ] {
+        let args: Vec<&str> = [vec!["heartbeat", "ping"], args].concat();
+        let (code, error) = failed(&server.cli(token, &args));
+        assert_eq!(code, Some(2), "{args:?}: {error}");
+        assert!(
+            error["message"].as_str().unwrap().contains(status),
+            "{args:?}: {error}"
+        );
+    }
+    // An id that is not one is refused before any request: the URL here
+    // has nothing listening, so a request would fail with exit 3.
+    for id in ["..", "a/b", "a?b", "Backup", ""] {
+        let (code, error) = failed(&cli(
+            "http://127.0.0.1:9",
+            Some(DEPLOYS),
+            &["heartbeat", "ping", id],
+        ));
+        assert_eq!(code, Some(2), "{id:?}: {error}");
+        assert!(
+            error["message"].as_str().unwrap().contains("invalid id"),
+            "{id:?}: {error}"
+        );
+    }
+    let long = "x".repeat(1025);
+    let (code, error) = failed(&server.cli(
+        Some(DEPLOYS),
+        &["heartbeat", "ping", "backup", "--message", &long],
+    ));
+    assert_eq!(code, Some(2));
+    assert!(
+        error["message"].as_str().unwrap().contains("422"),
+        "{error}"
+    );
+
+    let (code, error) = failed(&server.cli(None, &["heartbeat", "ping", "backup"]));
+    assert_eq!(code, Some(2));
+    assert!(
+        error["message"].as_str().unwrap().contains("TOCSIN_TOKEN"),
+        "{error}"
     );
 }

@@ -4,7 +4,9 @@
 //!
 //! The engine runs every configured check on its own task, at its interval
 //! plus a fixed per-check jitter, never more than
-//! `server.max_concurrent_checks` at once. It stores every result, turns
+//! `server.max_concurrent_checks` at once. Every heartbeat has a task too,
+//! which records each ping it is handed and a down result whenever a
+//! deadline passes without one. It stores every result, turns
 //! results into confirmed state changes ([`tocsin_core::state::Confirmation`]),
 //! opens and ends outage records, derives each component's status from its
 //! checks, open incidents and maintenance windows, and emits one
@@ -25,9 +27,10 @@ mod plan;
 pub mod ports;
 
 pub use crate::engine::{
-    CheckSnapshot, ComponentSnapshot, Engine, LastResult, NoticesHandle, PROBE_BACKSTOP, Parts,
-    Snapshot, StartError, StatusHandle,
+    CheckSnapshot, ComponentSnapshot, Engine, HEARTBEAT_CONFIRM, HeartbeatHandle, LastResult,
+    NoticesHandle, PING_MESSAGE_LIMIT, PROBE_BACKSTOP, Parts, Ping, PingError, Snapshot,
+    StartError, StatusHandle,
 };
-pub use crate::event::{CheckChange, ComponentChange, EngineEvent};
+pub use crate::event::{CheckChange, ComponentChange, EngineEvent, MemberKind};
 pub use crate::notice::{Notice, impact_health};
 pub use crate::plan::{Plan, PlanError};

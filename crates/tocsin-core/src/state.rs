@@ -173,8 +173,9 @@ impl Confirmation {
     }
 }
 
-/// A component's health from the confirmed health of its checks, `None` for
-/// a check with no state yet.
+/// A component's health from the confirmed health of its members, `None`
+/// for a member with no state yet. Checks and heartbeats are members alike;
+/// "check" below means either.
 ///
 /// A component with no checks, or whose checks all lack a state, has no
 /// health yet: nothing measures it, so nothing says it works. Otherwise
@@ -186,8 +187,6 @@ impl Confirmation {
 ///   leaves the component up.
 #[must_use]
 pub fn component_health(rule: ComponentRule, checks: &[Option<Health>]) -> Option<Health> {
-    // TODO(TOC-43): heartbeats join components as members, so a component
-    // whose only members are heartbeats stops being empty here.
     let known: Vec<Health> = checks.iter().flatten().copied().collect();
     if known.is_empty() {
         return None;

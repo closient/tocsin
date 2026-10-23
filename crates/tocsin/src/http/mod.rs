@@ -14,6 +14,7 @@
 pub mod auth;
 pub mod error;
 pub mod events;
+pub mod heartbeats;
 pub mod history;
 pub mod incidents;
 pub mod llms;
@@ -38,7 +39,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use tocsin_core::config::Config;
 use tocsin_core::incident::Timestamp;
-use tocsin_engine::{Snapshot, StatusHandle};
+use tocsin_engine::{HeartbeatHandle, Snapshot, StatusHandle};
 use tocsin_store::Store;
 
 use self::error::ApiError;
@@ -56,6 +57,8 @@ pub struct AppState {
     pub events: EventBus,
     /// The admin pages' authentication; `None` leaves them off.
     pub admin: Option<Arc<AdminAuth>>,
+    /// Takes heartbeat pings to the running engine.
+    pub heartbeats: HeartbeatHandle,
     /// The checks' and components' current state.
     pub live: Arc<dyn LiveStatus>,
 }

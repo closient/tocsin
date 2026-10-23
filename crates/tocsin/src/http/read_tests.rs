@@ -14,7 +14,9 @@ use tocsin_core::Health::{Degraded, Down, Up};
 use tocsin_core::config::{Environment, Source};
 use tocsin_core::incident::Timestamp;
 use tocsin_core::state::{ComponentStatus, Confirmed};
-use tocsin_engine::{CheckSnapshot, ComponentSnapshot, LastResult, Snapshot};
+use tocsin_engine::{
+    CheckSnapshot, ComponentSnapshot, HeartbeatHandle, LastResult, MemberKind, Snapshot,
+};
 use tocsin_store::{NewCheckResult, NewOutage, Store, SubjectKind};
 use tower::ServiceExt;
 
@@ -95,6 +97,7 @@ fn snapshot() -> Snapshot {
         checks: vec![
             CheckSnapshot {
                 id: "api-https".into(),
+                kind: MemberKind::Check,
                 component_id: Some("api".into()),
                 state: Some(Confirmed {
                     health: Down,
@@ -107,6 +110,7 @@ fn snapshot() -> Snapshot {
             },
             CheckSnapshot {
                 id: "db".into(),
+                kind: MemberKind::Check,
                 component_id: Some("api".into()),
                 state: None,
                 last: None,
@@ -151,6 +155,7 @@ fn api() -> Api {
         events: EventBus::new(),
         admin: None,
         live: Arc::new(snapshot()),
+        heartbeats: HeartbeatHandle::default(),
     };
     Api {
         _dir: dir,

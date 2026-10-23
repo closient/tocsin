@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use tocsin_core::incident::{Impact, IncidentStatus, Timestamp};
 
+pub use crate::http::heartbeats::PingStatus;
+
 /// Single-binary uptime monitor, status page and release log.
 #[derive(Debug, Parser)]
 #[command(name = "tocsin", disable_version_flag = true)]
@@ -73,6 +75,11 @@ pub enum Command {
     Notify {
         #[command(subcommand)]
         command: NotifyCommand,
+    },
+    /// Ping a heartbeat on a running server, from the job it watches.
+    Heartbeat {
+        #[command(subcommand)]
+        command: HeartbeatCommand,
     },
     /// Print the OpenAPI document for the HTTP API.
     Openapi,
@@ -155,8 +162,9 @@ pub struct ServerArgs {
     pub url: String,
 
     /// A `[[token]]` secret with the scope the command needs: `incident`
-    /// or `release` to write, `status:read` to read what is not public.
-    /// Prefer the environment variable: arguments show in `ps`.
+    /// for incidents and maintenance, `release` for releases, `heartbeat`
+    /// for pings, `status:read` to read what is not public. Prefer the
+    /// environment variable: arguments show in `ps`.
     #[arg(
         long,
         env = "TOCSIN_TOKEN",
@@ -390,6 +398,32 @@ pub enum ReleaseCommand {
         /// `now` (the default) or RFC 3339.
         #[arg(long, value_name = "TIME", value_parser = crate::release::parse_when)]
         deployed_at: Option<Timestamp>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HeartbeatCommand {
+    /// Record that the job ran. Exits 0 once the server has recorded the
+    /// ping, whichever status it carries.
+    Ping {
+        #[command(flatten)]
+        server: ServerArgs,
+
+        /// The heartbeat's id.
+        #[arg(value_name = "HEARTBEAT_ID")]
+        id: String,
+
+        /// Whether the job succeeded.
+        #[arg(long, value_enum, default_value_t = PingStatus::Up)]
+        status: PingStatus,
+
+        /// A short note stored with the result, such as what failed.
+        #[arg(long, help = concat!(
+            "A short note stored with the result, such as what failed; at most ",
+            tocsin_engine::ping_message_limit!(),
+            " bytes",
+        ))]
+        message: Option<String>,
     },
 }
 

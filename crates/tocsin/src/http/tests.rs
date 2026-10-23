@@ -9,11 +9,13 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use serde_json::{Value, json};
 use tocsin_core::config::{Environment, Source};
+use tocsin_engine::HeartbeatHandle;
 use tocsin_store::Store;
 use tower::ServiceExt;
 
 use super::events::{Event, EventBus};
 use super::{AppState, router};
+use crate::serve::Monitor;
 
 const CONFIG: &str = r#"
 [server]
@@ -26,6 +28,15 @@ name = "API"
 id = "web"
 name = "Web"
 
+[[component]]
+id = "jobs"
+name = "Jobs"
+
+[[heartbeat]]
+id = "backup"
+component = "jobs"
+interval = "1h"
+
 [[token]]
 id = "oncall"
 secret = "${ENV:ONCALL_TOKEN}"
@@ -35,10 +46,17 @@ scopes = ["incident"]
 id = "deploys"
 secret = "${ENV:DEPLOY_TOKEN}"
 scopes = ["release", "heartbeat"]
+
+[[token]]
+id = "cron"
+secret = "${ENV:CRON_TOKEN}"
+scopes = ["heartbeat"]
 "#;
 
 const ONCALL: &str = "oncall-secret-0123456789";
 const DEPLOYS: &str = "deploy-secret-0123456789";
+/// Base64 alphabet, so it has the characters a query string mangles.
+const CRON: &str = "cron+secret/0123456789==";
 
 struct Api {
     _dir: tempfile::TempDir,
@@ -50,6 +68,7 @@ fn api() -> Api {
     let variable = |name: &str| match name {
         "ONCALL_TOKEN" => Some(ONCALL.to_owned()),
         "DEPLOY_TOKEN" => Some(DEPLOYS.to_owned()),
+        "CRON_TOKEN" => Some(CRON.to_owned()),
         _ => None,
     };
     let config = tocsin_core::config::load(
@@ -71,12 +90,29 @@ fn api() -> Api {
         events: EventBus::new(),
         admin: None,
         live: Arc::new(tocsin_engine::Snapshot::default()),
+        heartbeats: HeartbeatHandle::default(),
     };
     Api {
         _dir: dir,
         router: router(state.clone()),
         state,
     }
+}
+
+/// The API with a running engine behind it, so heartbeat pings land.
+async fn running() -> (Api, Monitor) {
+    let mut api = api();
+    let monitor = Monitor::start(
+        &api.state.config,
+        &api.state.store,
+        &api.state.events,
+        &tocsin_alert::AlertMetrics::default(),
+    )
+    .await
+    .unwrap();
+    api.state.heartbeats = monitor.heartbeats();
+    api.router = router(api.state.clone());
+    (api, monitor)
 }
 
 impl Api {
@@ -551,4 +587,401 @@ async fn the_openapi_document_is_served_and_lists_every_incident_route() {
             "schema {schema} missing"
         );
     }
+}
+
+/// The next heartbeat change on the bus.
+async fn heartbeat_change(
+    events: &mut tokio::sync::broadcast::Receiver<Event>,
+) -> tocsin_engine::CheckChange {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Event::CheckChanged(change) = events.recv().await.unwrap() {
+                return change;
+            }
+        }
+    })
+    .await
+    .expect("the ping changed the heartbeat")
+}
+
+#[tokio::test]
+async fn a_ping_is_202_and_recorded_like_a_check_result() {
+    let (api, monitor) = running().await;
+    let mut events = api.state.events.subscribe();
+
+    let (status, receipt, _) = api
+        .send(
+            Method::POST,
+            "/api/v1/heartbeat/backup",
+            Some(DEPLOYS),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{receipt}");
+    assert_eq!(receipt["id"], "backup");
+    assert_eq!(receipt["status"], "up");
+    let change = heartbeat_change(&mut events).await;
+    assert_eq!(
+        (
+            change.check_id.as_str(),
+            change.kind,
+            change.from,
+            change.to
+        ),
+        (
+            "backup",
+            tocsin_engine::MemberKind::Heartbeat,
+            None,
+            tocsin_core::Health::Up
+        )
+    );
+    assert_eq!(change.component_id.as_deref(), Some("jobs"));
+
+    // The job says it failed: down at once, with its message as the error.
+    let (status, receipt, _) = api
+        .send(
+            Method::POST,
+            "/api/v1/heartbeat/backup?status=down&message=disk%20full",
+            Some(DEPLOYS),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{receipt}");
+    assert_eq!(receipt["status"], "down");
+    let change = heartbeat_change(&mut events).await;
+    assert_eq!(
+        (change.from, change.to),
+        (Some(tocsin_core::Health::Up), tocsin_core::Health::Down)
+    );
+    assert!(
+        change.opened_outage_id.is_some(),
+        "a down heartbeat opens an outage"
+    );
+
+    let node = api.state.config.server.node_id.clone().unwrap();
+    let latest = api
+        .state
+        .store
+        .latest_results(&node, vec!["backup".to_owned()])
+        .await
+        .unwrap();
+    assert_eq!(latest.len(), 1);
+    assert_eq!(
+        json!(tocsin_core::incident::Timestamp::from_millis(
+            latest[0].started_at_ms
+        )),
+        receipt["received_at"],
+        "the newest stored result is the ping just answered"
+    );
+    monitor.stop().await;
+}
+
+#[tokio::test]
+async fn a_ping_may_be_a_get_and_carry_its_token_in_the_query() {
+    let (api, monitor) = running().await;
+    let (status, receipt, _) = api
+        .send(
+            Method::GET,
+            &format!("/api/v1/heartbeat/backup?status=down&token={DEPLOYS}&message=disk+full"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{receipt}");
+    assert_eq!(receipt["status"], "down");
+    // The header wins over the query, both ways.
+    let (status, _, _) = api
+        .send(
+            Method::POST,
+            "/api/v1/heartbeat/backup?token=wrong",
+            Some(DEPLOYS),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let (status, _, _) = api
+        .send(
+            Method::POST,
+            &format!("/api/v1/heartbeat/backup?token={DEPLOYS}"),
+            Some("wrong"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    monitor.stop().await;
+}
+
+/// A `?token=` value is percent-decoded, so a secret with `+` must be sent
+/// percent-encoded: a bare `+` decodes to a space and the token is wrong.
+#[tokio::test]
+async fn a_query_token_is_percent_decoded() {
+    let (api, monitor) = running().await;
+    let encoded = CRON
+        .replace('+', "%2B")
+        .replace('/', "%2F")
+        .replace('=', "%3D");
+    let (status, receipt, _) = api
+        .send(
+            Method::GET,
+            &format!("/api/v1/heartbeat/backup?token={encoded}"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{receipt}");
+    let (status, _, _) = api
+        .send(
+            Method::GET,
+            &format!("/api/v1/heartbeat/backup?token={CRON}"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "a raw `+` is a space");
+    monitor.stop().await;
+}
+
+/// `HEAD` is refused and records nothing, so a link checker or unfurler
+/// fetching a ping URL does not ping.
+#[tokio::test]
+async fn a_head_on_a_ping_url_is_405_and_records_nothing() {
+    let (api, monitor) = running().await;
+    let (status, _, headers) = api
+        .send(
+            Method::HEAD,
+            &format!("/api/v1/heartbeat/backup?token={DEPLOYS}"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(headers[header::ALLOW], "GET, POST");
+    // A ping after it is the heartbeat's first change: the HEAD left none.
+    let mut events = api.state.events.subscribe();
+    let (status, _, _) = api
+        .send(
+            Method::POST,
+            "/api/v1/heartbeat/backup",
+            Some(DEPLOYS),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(heartbeat_change(&mut events).await.from, None);
+    monitor.stop().await;
+}
+
+/// Without a valid token, a known and an unknown id answer alike: the
+/// response says nothing about which heartbeats exist.
+#[tokio::test]
+async fn a_ping_without_a_valid_token_is_401_whatever_the_id() {
+    let (api, monitor) = running().await;
+    let truncated = &DEPLOYS[..DEPLOYS.len() - 1];
+    for id in ["backup", "nonesuch"] {
+        for (header, query) in [
+            (None, None),
+            (Some("wrong"), None),
+            (Some(truncated), None),
+            (None, Some("wrong")),
+            (None, Some(truncated)),
+        ] {
+            let uri = match query {
+                Some(token) => format!("/api/v1/heartbeat/{id}?token={token}"),
+                None => format!("/api/v1/heartbeat/{id}"),
+            };
+            let (status, error, headers) = api.send(Method::POST, &uri, header, None).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri} {header:?}");
+            assert_eq!(error["error"], "unauthorized");
+            assert_eq!(headers[header::WWW_AUTHENTICATE], "Bearer");
+            assert!(!error.to_string().contains(truncated));
+        }
+    }
+    // A token without the scope is 403, by header or query.
+    let (status, error, _) = api
+        .send(Method::POST, "/api/v1/heartbeat/backup", Some(ONCALL), None)
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(error["message"].as_str().unwrap().contains("oncall"));
+    let (status, _, _) = api
+        .send(
+            Method::POST,
+            &format!("/api/v1/heartbeat/backup?token={ONCALL}"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    monitor.stop().await;
+}
+
+#[tokio::test]
+async fn only_heartbeat_routes_take_a_token_in_the_query() {
+    let api = api();
+    let (status, _, _) = api
+        .send(
+            Method::POST,
+            &format!("/api/v1/incidents?token={ONCALL}"),
+            None,
+            Some(outage()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_ping_for_an_unknown_id_is_404() {
+    let (api, monitor) = running().await;
+    let (status, error, _) = api
+        .send(
+            Method::POST,
+            "/api/v1/heartbeat/nonesuch",
+            Some(DEPLOYS),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error["error"], "not_found");
+    monitor.stop().await;
+}
+
+#[tokio::test]
+async fn a_bad_status_or_an_oversized_message_is_422() {
+    let (api, monitor) = running().await;
+    let longest = "x".repeat(tocsin_engine::PING_MESSAGE_LIMIT);
+    let (status, receipt, _) = api
+        .send(
+            Method::POST,
+            &format!("/api/v1/heartbeat/backup?message={longest}"),
+            Some(DEPLOYS),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{receipt}");
+    for (query, field) in [
+        (format!("message={longest}x"), "message"),
+        ("status=degraded".to_owned(), ""),
+        ("color=red".to_owned(), ""),
+    ] {
+        let uri = format!("/api/v1/heartbeat/backup?{query}");
+        let (status, error, _) = api.send(Method::POST, &uri, Some(DEPLOYS), None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{query}");
+        assert_eq!(error["error"], "invalid");
+        assert_eq!(error["fields"][0]["path"], field, "{query}: {error}");
+    }
+    monitor.stop().await;
+}
+
+#[tokio::test]
+async fn a_ping_after_the_engine_stopped_is_503() {
+    let (api, monitor) = running().await;
+    monitor.stop().await;
+    let (status, error, _) = api
+        .send(
+            Method::POST,
+            "/api/v1/heartbeat/backup",
+            Some(DEPLOYS),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error["error"], "unavailable");
+}
+
+/// The store, except that every result write fails.
+struct RefusingHistory(Arc<Store>);
+
+impl tocsin_engine::ports::History for RefusingHistory {
+    fn record(
+        &self,
+        _result: tocsin_store::NewCheckResult,
+        _kind: tocsin_store::SubjectKind,
+        _change: Option<tocsin_store::OutageChange>,
+    ) -> tocsin_engine::ports::BoxFuture<'_, tocsin_store::Result<Option<i64>>> {
+        Box::pin(async { Err(tocsin_store::Error::Batch("the disk is full".to_owned())) })
+    }
+
+    fn open_outages<'a>(
+        &'a self,
+        node_id: &'a str,
+    ) -> tocsin_engine::ports::BoxFuture<'a, tocsin_store::Result<Vec<tocsin_store::Outage>>> {
+        Box::pin(self.0.open_outages(node_id))
+    }
+
+    fn last_up<'a>(
+        &'a self,
+        node_id: &'a str,
+        check_ids: Vec<String>,
+    ) -> tocsin_engine::ports::BoxFuture<'a, tocsin_store::Result<Vec<tocsin_store::LastUp>>> {
+        Box::pin(self.0.last_up(node_id, check_ids))
+    }
+
+    fn latest_results<'a>(
+        &'a self,
+        node_id: &'a str,
+        check_ids: Vec<String>,
+    ) -> tocsin_engine::ports::BoxFuture<'a, tocsin_store::Result<Vec<tocsin_store::LatestResult>>>
+    {
+        Box::pin(self.0.latest_results(node_id, check_ids))
+    }
+}
+
+/// A ping is acknowledged only once it is stored: a failed write is a 500,
+/// the heartbeat's state does not move, and nothing is announced.
+#[tokio::test]
+async fn a_ping_that_cannot_be_stored_is_500_and_changes_nothing() {
+    let mut api = api();
+    let store = Arc::clone(&api.state.store);
+    let parts = tocsin_engine::Parts {
+        runner: Arc::new(tocsin_engine::ports::ProbeRunner::new(
+            tocsin_probe::ProbeContext::system_or_without_roots(),
+        )),
+        history: Arc::new(RefusingHistory(Arc::clone(&store))),
+        notices: Arc::clone(&store) as _,
+        sink: Arc::new(api.state.events.clone()),
+        clock: Arc::new(tocsin_engine::ports::SystemClock),
+    };
+    let engine = tocsin_engine::Engine::start(
+        tocsin_engine::Plan::from_config(&api.state.config).unwrap(),
+        parts,
+    )
+    .await
+    .unwrap();
+    api.state.heartbeats = engine.heartbeats();
+    api.router = router(api.state.clone());
+    let mut events = api.state.events.subscribe();
+
+    let (status, error, _) = api
+        .send(
+            Method::POST,
+            "/api/v1/heartbeat/backup",
+            Some(DEPLOYS),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{error}");
+    assert_eq!(error["error"], "internal");
+    let backup = engine
+        .snapshot()
+        .checks
+        .into_iter()
+        .find(|check| check.id == "backup")
+        .unwrap();
+    assert_eq!(backup.state, None, "{backup:?}");
+    assert!(backup.last.is_none(), "{backup:?}");
+    assert!(
+        matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
+        "a refused ping announces nothing"
+    );
+    let node = api.state.config.server.node_id.clone().unwrap();
+    assert_eq!(
+        store
+            .latest_results(&node, vec!["backup".to_owned()])
+            .await
+            .unwrap(),
+        []
+    );
+    engine.shutdown().await;
 }

@@ -51,7 +51,7 @@ A file with a TOML syntax error, or one that cannot be read or is not UTF-8, is 
 
 ## Conventions
 
-- **Ids** are slugs: lowercase letters, digits and hyphens, starting with a letter or digit (`^[a-z0-9][a-z0-9-]*$`). An id is unique among items of its kind across every file: a check and a component may share the id `api`, but two components may not. A duplicate is reported with the location of the first definition.
+- **Ids** are slugs: lowercase letters, digits and hyphens, starting with a letter or digit (`^[a-z0-9][a-z0-9-]*$`). An id is unique among items of its kind across every file: a check and a component may share the id `api`, but two components may not, and neither may a check and a heartbeat (see [heartbeats](heartbeats.md)). A duplicate is reported with the location of the first definition.
 - **References** name an id defined in any file. An unknown id is an error, with the nearest defined id as a hint.
 - **Durations** are strings of number-and-unit parts: `500ms`, `30s`, `5m`, `1h30m`, `1d`.
 - **Unknown fields are errors**, so a misspelled setting never silently does nothing.
@@ -151,7 +151,7 @@ A probe run on an interval.
 
 | Key | Type | Default | |
 |-----|------|---------|-|
-| `id` | id | | Required. |
+| `id` | id | | Required. Unique across checks and heartbeats. |
 | `name` | string | the id | Display name. |
 | `component` | component id | none | The component whose state this check sets. |
 | `type` | `http`, `tcp`, `dns`, `icmp`, `tls` | | Required. |
@@ -252,17 +252,19 @@ url = "https://wiki.example.com/runbooks/api"
 
 ## `[[heartbeat]]`
 
-A ping tocsin expects to receive, such as a cron job reporting in. Pings arrive through the write API with a token that has the `heartbeat` scope.
+A ping tocsin expects to receive, such as a cron job reporting in. Pings arrive through the write API with a token that has the `heartbeat` scope; [`heartbeats.md`](heartbeats.md) has the endpoint and the deadline rules.
 
 | Key | Type | Default | |
 |-----|------|---------|-|
-| `id` | id | | Required. |
+| `id` | id | | Required. Unique across checks and heartbeats. |
 | `name` | string | the id | |
 | `component` | component id | none | The component whose state this heartbeat sets. |
 | `interval` | duration | | Required. How often a ping is expected. At least `1s`. |
-| `grace` | duration | `"60s"` | How late a ping may be before the heartbeat is down. |
+| `grace` | duration | `"60s"` | How late a ping may be before the heartbeat is down: it is missed once `interval + grace` passes after its last result. |
 
 A heartbeat takes `[[heartbeat.link]]` tables, the same as [check links](#links-checklink-and-heartbeatlink).
+
+`interval + grace` must be at most half of `[server] retention_days`, so retention never deletes the result a deadline runs from; see [`heartbeats.md`](heartbeats.md#configuration).
 
 ## `[[project]]`
 

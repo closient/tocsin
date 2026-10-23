@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use rusqlite::{Connection, params};
 use tocsin_core::Health;
 use tocsin_store::{
-    Day, LastUp, NewCheckResult, NewOutage, OutageChange, OutageEnd, Retention, Store, SubjectKind,
-    latest_schema_version,
+    AlertRouting, AlertTarget, Day, LastUp, LatestResult, NewCheckResult, NewOutage, OutageChange,
+    OutageEnd, Retention, Store, SubjectKind, latest_schema_version,
 };
 
 fn day(text: &str) -> Day {
@@ -392,6 +392,123 @@ async fn changing_an_outage_ends_and_opens_together_or_not_at_all() {
 }
 
 #[tokio::test]
+async fn a_result_is_stored_with_its_outage_change_or_not_at_all() {
+    let fixture = open();
+    let down = NewOutage {
+        node_id: "node-a".into(),
+        subject_kind: SubjectKind::Heartbeat,
+        check_id: "backup".into(),
+        component_id: None,
+        health: Health::Down,
+        started_at_ms: 1_000,
+        alerted: true,
+    };
+    let opened = fixture
+        .store
+        .record(
+            result("backup", 1_000, Health::Down),
+            SubjectKind::Heartbeat,
+            Some(OutageChange {
+                end: None,
+                open: Some(down.clone()),
+            }),
+        )
+        .await
+        .unwrap()
+        .expect("opened one");
+
+    // The change fails (the outage is already open), so the result goes too.
+    let failed = fixture
+        .store
+        .record(
+            result("backup", 2_000, Health::Down),
+            SubjectKind::Heartbeat,
+            Some(OutageChange {
+                end: None,
+                open: Some(NewOutage {
+                    started_at_ms: 2_000,
+                    ..down
+                }),
+            }),
+        )
+        .await;
+    assert!(failed.is_err());
+    assert_eq!(
+        count_results(&fixture.path),
+        1,
+        "a result without its change"
+    );
+    let open = fixture.store.open_outages("node-a").await.unwrap();
+    assert_eq!(
+        open.iter().map(|outage| outage.id).collect::<Vec<_>>(),
+        [opened]
+    );
+}
+
+#[tokio::test]
+async fn an_alerting_result_is_stored_with_its_change_and_deliveries_or_not_at_all() {
+    let fixture = open();
+    let routing = || AlertRouting {
+        targets: vec![AlertTarget {
+            notifier_id: "slack".into(),
+            route_id: "ops".into(),
+            repeat_ms: None,
+        }],
+        ringing: Vec::new(),
+    };
+    let down = NewOutage {
+        node_id: "node-a".into(),
+        subject_kind: SubjectKind::Heartbeat,
+        check_id: "backup".into(),
+        component_id: None,
+        health: Health::Down,
+        started_at_ms: 1_000,
+        alerted: true,
+    };
+    let change = |down: NewOutage| OutageChange {
+        end: None,
+        open: Some(down),
+    };
+    let alerts = fixture
+        .store
+        .record_alerting(
+            result("backup", 1_000, Health::Down),
+            SubjectKind::Heartbeat,
+            change(down.clone()),
+            Some(routing()),
+            1_000,
+        )
+        .await
+        .unwrap();
+    assert!(alerts.opened.is_some());
+    assert_eq!(alerts.queued, 1, "the fire is queued with the result");
+    assert_eq!(count_results(&fixture.path), 1);
+
+    // The change fails (the outage is already open): no result, no alert.
+    let failed = fixture
+        .store
+        .record_alerting(
+            result("backup", 2_000, Health::Down),
+            SubjectKind::Heartbeat,
+            change(NewOutage {
+                started_at_ms: 2_000,
+                ..down
+            }),
+            Some(routing()),
+            2_000,
+        )
+        .await;
+    assert!(failed.is_err());
+    assert_eq!(
+        count_results(&fixture.path),
+        1,
+        "a result without its change"
+    );
+    assert_eq!(fixture.store.alerts().await.unwrap().len(), 1);
+    assert_eq!(fixture.store.outbox().await.unwrap().pending.len(), 1);
+}
+
+#[tokio::test]
 async fn last_up_is_the_latest_up_result_since_the_last_outage() {
     let fixture = open();
     let on = |node: &str, check: &str, started_at_ms, health| NewCheckResult {
@@ -442,6 +559,39 @@ async fn last_up_is_the_latest_up_result_since_the_last_outage() {
                 check_id: "api".into(),
                 last_up_ms: 2_500,
                 since_ms: 2_500,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn latest_results_are_the_newest_result_of_any_health_on_the_node() {
+    let fixture = open();
+    for (node, check, at, health) in [
+        ("node-a", "backup", 1_000, Health::Up),
+        ("node-a", "backup", 3_000, Health::Down),
+        ("node-a", "backup", 2_000, Health::Up),
+        ("node-a", "web", 1_500, Health::Up),
+        ("node-b", "web", 9_000, Health::Up),
+    ] {
+        let row = NewCheckResult {
+            node_id: node.into(),
+            ..result(check, at, health)
+        };
+        fixture.store.append(row).await.unwrap();
+    }
+    let ids = ["backup", "web", "never"].map(String::from).to_vec();
+    let found = fixture.store.latest_results("node-a", ids).await.unwrap();
+    assert_eq!(
+        found,
+        [
+            LatestResult {
+                check_id: "backup".into(),
+                started_at_ms: 3_000,
+            },
+            LatestResult {
+                check_id: "web".into(),
+                started_at_ms: 1_500,
             },
         ]
     );
@@ -537,6 +687,61 @@ async fn rollups_are_recomputable_from_raw_results() {
     // Idempotent.
     fixture.store.rollup_since(first).await.unwrap();
     assert_eq!(fixture.store.daily_rollups(first).await.unwrap(), rolled);
+}
+
+#[tokio::test]
+async fn a_heartbeat_rollup_weighs_each_result_by_the_time_it_held() {
+    let fixture = open();
+    let first = day("2026-10-01");
+    let hour = 3_600_000;
+    // Sixty pings in the first hour, then a miss every hour for the other 23:
+    // counted, the day would be 60 / 83 up; held, it is one hour in 24.
+    for minute in 0..60 {
+        fixture
+            .store
+            .record(
+                result("backup", first.start_ms() + minute * 60_000, Health::Up),
+                SubjectKind::Heartbeat,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    for h in 1..24 {
+        fixture
+            .store
+            .record(
+                result("backup", first.start_ms() + h * hour, Health::Down),
+                SubjectKind::Heartbeat,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    // A check on the same day keeps counting results.
+    fixture
+        .store
+        .append(result("web", first.start_ms() + hour, Health::Up))
+        .await
+        .unwrap();
+
+    let report = fixture.store.rollup_since(first).await.unwrap();
+    assert_eq!(
+        report.rows, 2,
+        "the heartbeat's results are not counted as a check's too"
+    );
+    let rolled = fixture.store.daily_rollups(first).await.unwrap();
+    let backup = rolled.iter().find(|r| r.check_id == "backup").unwrap();
+    assert_eq!(backup.kind, SubjectKind::Heartbeat);
+    assert_eq!(backup.total, 24 * hour);
+    assert_eq!(
+        (backup.up, backup.degraded, backup.down),
+        (hour, 0, 23 * hour)
+    );
+    assert_eq!(backup.worst, Health::Down);
+    assert_eq!(backup.up * 24, backup.total, "one hour in 24, about 4% up");
+    let web = rolled.iter().find(|r| r.check_id == "web").unwrap();
+    assert_eq!((web.kind, web.total, web.up), (SubjectKind::Check, 1, 1));
 }
 
 #[tokio::test]

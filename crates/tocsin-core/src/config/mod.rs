@@ -329,11 +329,13 @@ pub struct Group {
 
 /// `[[heartbeat]]`: a ping tocsin expects to receive, such as a cron job
 /// reporting in. Pings are sent to the write API with a token that has the
-/// `heartbeat` scope.
+/// `heartbeat` scope. A heartbeat with no ping for `interval + grace` is
+/// down; it is a member of its component exactly as a check is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Heartbeat {
-    /// Unique among heartbeats in every file.
+    /// Unique among checks and heartbeats in every file: they share one
+    /// history.
     pub id: Id,
     /// Display name; the id is shown when it is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -343,7 +345,8 @@ pub struct Heartbeat {
     pub component: Option<Id>,
     /// How often a ping is expected.
     pub interval: Duration,
-    /// How late a ping may be before the heartbeat is down.
+    /// How late a ping may be before the heartbeat is down: it is down once
+    /// `interval + grace` passes without one.
     #[serde(default = "default_grace")]
     pub grace: Duration,
     /// Links shown with the heartbeat, such as the job's logs or runbook,

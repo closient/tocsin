@@ -6,7 +6,7 @@
 //! for a year as immutable.
 //!
 //! To add a file: put it in `crates/tocsin/static/`, add it to [`FILES`],
-//! and link to it with [`url`].
+//! and link to it with [`url`](fn@url).
 
 use std::sync::LazyLock;
 

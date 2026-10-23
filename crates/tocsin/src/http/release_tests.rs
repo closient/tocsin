@@ -11,6 +11,7 @@ use axum::http::{Method, Request, StatusCode, header};
 use serde_json::{Value, json};
 use tocsin_core::Health;
 use tocsin_core::config::{Environment, Source};
+use tocsin_engine::HeartbeatHandle;
 use tocsin_store::{NewOutage, Store, SubjectKind};
 use tower::ServiceExt;
 
@@ -97,6 +98,7 @@ fn api() -> Api {
         events: EventBus::new(),
         admin: None,
         live: Arc::new(tocsin_engine::Snapshot::default()),
+        heartbeats: HeartbeatHandle::default(),
     };
     Api {
         _dir: dir,

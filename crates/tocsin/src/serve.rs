@@ -12,7 +12,7 @@ use serde_json::json;
 use tocsin_alert::{AlertMetrics, Alerter, AlertingHistory, HTTP_TIMEOUT, Router, WorkerSettings};
 use tocsin_core::config::Config;
 use tocsin_engine::ports::{Clock, ProbeRunner, SystemClock};
-use tocsin_engine::{Engine, Parts, Plan};
+use tocsin_engine::{Engine, HeartbeatHandle, Parts, Plan};
 use tocsin_probe::ProbeContext;
 use tocsin_store::{DB_FILE, Retention, Store};
 use tokio::signal::unix::{Signal, SignalKind, signal};
@@ -123,23 +123,28 @@ async fn serve(
     })?;
     let events = EventBus::new();
     let metrics = Metrics::new();
-    let monitor = match Monitor::start(config, &store, &events, &metrics.alerting).await {
-        Ok(monitor) => monitor,
+    let (monitor, maintenance) = match start_checks(
+        config,
+        &store,
+        &events,
+        &metrics.alerting,
+        Retention::days(retention_days),
+    )
+    .await
+    {
+        Ok(started) => started,
         Err(failure) => {
             close(store).await;
             return Err(failure);
         }
     };
-    let maintenance = tokio::spawn(maintain(
-        Arc::clone(&store),
-        Retention::days(retention_days),
-    ));
     let app = http::router(AppState {
         store: Arc::clone(&store),
         config: Arc::clone(config),
         events,
         admin,
         live: Arc::new(monitor.engine.status_handle()),
+        heartbeats: monitor.heartbeats(),
     });
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(async move {
@@ -180,7 +185,7 @@ async fn serve(
 
 /// The running checks: the engine, the task that wakes it when an
 /// incident or maintenance window changes, and the alert delivery worker.
-struct Monitor {
+pub(crate) struct Monitor {
     engine: Engine,
     wake: JoinHandle<()>,
     alerter: Alerter,
@@ -190,7 +195,7 @@ impl Monitor {
     /// Starts the alert delivery worker and the engine on `store`,
     /// publishing on `events`. The engine records outages through
     /// [`AlertingHistory`], which queues each alert in the same transaction.
-    async fn start(
+    pub(crate) async fn start(
         config: &Config,
         store: &Arc<Store>,
         events: &EventBus,
@@ -264,11 +269,16 @@ impl Monitor {
         })
     }
 
+    /// Takes heartbeat pings to the engine.
+    pub(crate) fn heartbeats(&self) -> HeartbeatHandle {
+        self.engine.heartbeats()
+    }
+
     /// Stops the checks, then the alert delivery worker, and waits for
     /// both, so nothing still holds the store afterwards. The engine goes
     /// first so no alert is queued after the worker has gone; a send still
     /// in flight past the worker's grace is abandoned and stays queued.
-    async fn stop(self) {
+    pub(crate) async fn stop(self) {
         self.wake.abort();
         let _ = self.wake.await;
         self.engine.shutdown().await;
@@ -406,31 +416,61 @@ const RELEASE_FOR: Duration = Duration::from_secs(1);
 /// How often rollups are brought up to date and retention runs.
 const MAINTENANCE_EVERY: Duration = Duration::from_hours(1);
 
-/// Hourly: roll up the days since the last pass, then delete results older
-/// than the retention window. The first pass runs at startup. Failures are
-/// logged and retried on the next tick; a pass never stops the monitor.
+/// Starts the checks, and the hourly maintenance behind them.
+///
+/// One maintenance pass runs first, so the engine reads history retention
+/// has finished with. A heartbeat's deadline runs from its latest stored
+/// result, and a missed one is stamped at that deadline. Were the result
+/// due for deletion (behind a watermark a part-way pass left, or moved by a
+/// pass racing the engine's first reads), the miss could fall behind the
+/// watermark too: the store would refuse it on every retry, and every ping
+/// after it, which records the overdue miss first.
+pub(crate) async fn start_checks(
+    config: &Config,
+    store: &Arc<Store>,
+    events: &EventBus,
+    metrics: &AlertMetrics,
+    retention: Retention,
+) -> Result<(Monitor, JoinHandle<()>), Failure> {
+    maintenance_pass(store, retention).await;
+    let monitor = Monitor::start(config, store, events, metrics).await?;
+    let maintenance = tokio::spawn(maintain(Arc::clone(store), retention));
+    Ok((monitor, maintenance))
+}
+
+/// Hourly after the pass [`start_checks`] runs: see [`maintenance_pass`].
 async fn maintain(store: Arc<Store>, retention: Retention) {
-    let mut ticks = tokio::time::interval(MAINTENANCE_EVERY);
+    let mut ticks = tokio::time::interval_at(
+        tokio::time::Instant::now() + MAINTENANCE_EVERY,
+        MAINTENANCE_EVERY,
+    );
     ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         ticks.tick().await;
-        match store.rollup_recent().await {
-            Ok(report) => tracing::debug!(rows = report.rows, "daily rollups updated"),
-            Err(error) => tracing::error!(%error, "daily rollup failed"),
-        }
-        match store
-            .apply_retention(retention, tocsin_store::now_ms())
-            .await
-        {
-            Ok(report) if report.deleted > 0 => tracing::info!(
-                deleted = report.deleted,
-                chunks = report.chunks,
-                rolled_up = report.rolled_up,
-                "retention purged old check results"
-            ),
-            Ok(_) => {}
-            Err(error) => tracing::error!(%error, "retention failed"),
-        }
+        maintenance_pass(&store, retention).await;
+    }
+}
+
+/// Rolls up the days since the last pass, then deletes results older than
+/// the retention window. Failures are logged and retried on the next pass;
+/// a pass never stops the monitor.
+async fn maintenance_pass(store: &Store, retention: Retention) {
+    match store.rollup_recent().await {
+        Ok(report) => tracing::debug!(rows = report.rows, "daily rollups updated"),
+        Err(error) => tracing::error!(%error, "daily rollup failed"),
+    }
+    match store
+        .apply_retention(retention, tocsin_store::now_ms())
+        .await
+    {
+        Ok(report) if report.deleted > 0 => tracing::info!(
+            deleted = report.deleted,
+            chunks = report.chunks,
+            rolled_up = report.rolled_up,
+            "retention purged old check results"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::error!(%error, "retention failed"),
     }
 }
 
@@ -474,13 +514,15 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
     use serde_json::json;
+    use tocsin_core::Health;
     use tocsin_core::config::{Environment, Source};
     use tocsin_core::state::ComponentStatus;
-    use tocsin_store::{DB_FILE, Store};
+    use tocsin_engine::Ping;
+    use tocsin_store::{DB_FILE, NewCheckResult, Retention, Store, SubjectKind};
     use tokio::sync::oneshot;
     use tower::ServiceExt;
 
-    use super::{AlertMetrics, Monitor, close, io, supervise};
+    use super::{AlertMetrics, Monitor, close, io, start_checks, supervise};
     use crate::exit::Exit;
     use crate::http::events::{Event, EventBus};
     use crate::http::{self, AppState};
@@ -593,6 +635,7 @@ mod tests {
             events,
             admin: None,
             live: Arc::new(monitor.engine.status_handle()),
+            heartbeats: monitor.heartbeats(),
         });
 
         let body = json!({
@@ -628,5 +671,80 @@ mod tests {
 
         monitor.stop().await;
         assert!(close(store).await, "the stopped engine released the store");
+    }
+
+    /// A pass that moved the retention watermark and stopped before its
+    /// delete leaves a heartbeat's last result behind the watermark. The
+    /// checks start only once retention has finished, so the heartbeat
+    /// starts fresh rather than owing a miss the store must refuse, which
+    /// would refuse every ping after it.
+    #[tokio::test]
+    async fn retention_finishes_before_heartbeats_read_their_deadlines() {
+        const DAY: i64 = 86_400_000;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DB_FILE);
+        let toml = "[[heartbeat]]\nid = \"backup\"\ninterval = \"1h\"\n";
+        let config = tocsin_core::config::load(
+            &[Source {
+                name: "tocsin.toml".into(),
+                text: Ok(toml.into()),
+            }],
+            &Environment {
+                hostname: "test".into(),
+                variable: &|_| None,
+            },
+        )
+        .unwrap();
+        let node = config.server.node_id.clone().unwrap();
+        let today = tocsin_store::now_ms() / DAY * DAY;
+        let store = Arc::new(Store::open(&path).unwrap());
+        store
+            .record(
+                NewCheckResult {
+                    node_id: node,
+                    check_id: "backup".to_owned(),
+                    started_at_ms: today - 100 * DAY,
+                    duration_ms: 0,
+                    health: Health::Up,
+                    detail: None,
+                    error: None,
+                    status_code: None,
+                },
+                SubjectKind::Heartbeat,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(close(store).await);
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute(
+                "INSERT INTO retention (id, purged_before) VALUES (1, ?1)
+                 ON CONFLICT (id) DO UPDATE SET purged_before = excluded.purged_before",
+                [today - 95 * DAY],
+            )
+            .unwrap();
+
+        let store = Arc::new(Store::open(&path).unwrap());
+        let (monitor, maintenance) = start_checks(
+            &config,
+            &store,
+            &EventBus::new(),
+            &AlertMetrics::default(),
+            Retention::days(90),
+        )
+        .await
+        .unwrap();
+        let ping = Ping {
+            health: Health::Up,
+            message: None,
+        };
+        let pinged = monitor.heartbeats().ping("backup", ping).await;
+
+        maintenance.abort();
+        let _ = maintenance.await;
+        monitor.stop().await;
+        assert!(close(store).await);
+        pinged.expect("the ping is stored");
     }
 }

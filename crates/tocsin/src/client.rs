@@ -65,13 +65,13 @@ impl Client {
 
     /// `GET path`, unauthenticated.
     pub fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Failure> {
-        self.request(&Method::GET, path, None::<&()>, false)
+        self.request(&Method::GET, path, &[], None::<&()>, false)
     }
 
     /// `GET path`, with the token when one is set: the server answers
     /// without one as it does the public.
     pub fn read<T: DeserializeOwned>(&self, path: &str) -> Result<T, Failure> {
-        self.request(&Method::GET, path, None::<&()>, self.token.is_some())
+        self.request(&Method::GET, path, &[], None::<&()>, self.token.is_some())
     }
 
     /// A write: `method path` with a JSON body and the token.
@@ -81,13 +81,30 @@ impl Client {
         path: &str,
         body: &B,
     ) -> Result<T, Failure> {
-        self.request(method, path, Some(body), true)
+        self.request(method, path, &[], Some(body), true)
+    }
+
+    /// A write with no body: `POST` with the token to the path made of
+    /// `segments` under the base, plus `query`. Each segment is pushed
+    /// percent-encoded, so a `/` or `?` in one stays inside it.
+    pub fn post_query<T: DeserializeOwned>(
+        &self,
+        segments: &[&str],
+        query: &[(&str, &str)],
+    ) -> Result<T, Failure> {
+        let mut url = self.base.clone();
+        url.path_segments_mut()
+            .expect("new() accepts only a URL that can be a base")
+            .pop_if_empty()
+            .extend(segments);
+        self.send(&Method::POST, url, query, None::<&()>, true)
     }
 
     fn request<B: Serialize, T: DeserializeOwned>(
         &self,
         method: &Method,
         path: &str,
+        query: &[(&str, &str)],
         body: Option<&B>,
         authenticated: bool,
     ) -> Result<T, Failure> {
@@ -97,6 +114,20 @@ impl Client {
                 format!("bad request path {path}: {error}"),
             )
         })?;
+        self.send(method, url, query, body, authenticated)
+    }
+
+    fn send<B: Serialize, T: DeserializeOwned>(
+        &self,
+        method: &Method,
+        mut url: Url,
+        query: &[(&str, &str)],
+        body: Option<&B>,
+        authenticated: bool,
+    ) -> Result<T, Failure> {
+        if !query.is_empty() {
+            url.query_pairs_mut().extend_pairs(query);
+        }
         let mut request = self.http.request(method.clone(), url.clone());
         if authenticated {
             let Some(token) = &self.token else {

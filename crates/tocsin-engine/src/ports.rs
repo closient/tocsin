@@ -10,7 +10,9 @@ use std::pin::Pin;
 
 use tocsin_core::probe::{CompiledCheck, ProbeOutcome};
 use tocsin_probe::ProbeContext;
-use tocsin_store::{LastUp, NewCheckResult, Outage, OutageChange, Result, Store};
+use tocsin_store::{
+    LastUp, LatestResult, NewCheckResult, Outage, OutageChange, Result, Store, SubjectKind,
+};
 
 use crate::event::EngineEvent;
 use crate::notice::Notice;
@@ -50,12 +52,16 @@ impl Runner for ProbeRunner {
 
 /// Where results and outages are kept.
 pub trait History: Send + Sync + 'static {
-    /// Stores one raw result.
-    fn append(&self, result: NewCheckResult) -> BoxFuture<'_, Result<i64>>;
-    /// Ends an outage and opens another, either or both, in one
-    /// transaction: both happen or neither does. Resolves with the opened
-    /// outage's id, if one was opened.
-    fn change_outage(&self, change: OutageChange) -> BoxFuture<'_, Result<Option<i64>>>;
+    /// Stores one raw result of `kind` and the outage change it confirms,
+    /// if any (ending an outage, opening one, or both), in one transaction:
+    /// all of it happens or none does. Resolves with the opened outage's id,
+    /// if one was opened.
+    fn record(
+        &self,
+        result: NewCheckResult,
+        kind: SubjectKind,
+        change: Option<OutageChange>,
+    ) -> BoxFuture<'_, Result<Option<i64>>>;
     /// Every outage `node_id` still has open.
     fn open_outages<'a>(&'a self, node_id: &'a str) -> BoxFuture<'a, Result<Vec<Outage>>>;
     /// For each of `check_ids` with an `up` result on `node_id` since its
@@ -66,15 +72,23 @@ pub trait History: Send + Sync + 'static {
         node_id: &'a str,
         check_ids: Vec<String>,
     ) -> BoxFuture<'a, Result<Vec<LastUp>>>;
+    /// For each of `check_ids` with any result on `node_id`: when the
+    /// latest one started.
+    fn latest_results<'a>(
+        &'a self,
+        node_id: &'a str,
+        check_ids: Vec<String>,
+    ) -> BoxFuture<'a, Result<Vec<LatestResult>>>;
 }
 
 impl History for Store {
-    fn append(&self, result: NewCheckResult) -> BoxFuture<'_, Result<i64>> {
-        Box::pin(Store::append(self, result))
-    }
-
-    fn change_outage(&self, change: OutageChange) -> BoxFuture<'_, Result<Option<i64>>> {
-        Box::pin(Store::change_outage(self, change))
+    fn record(
+        &self,
+        result: NewCheckResult,
+        kind: SubjectKind,
+        change: Option<OutageChange>,
+    ) -> BoxFuture<'_, Result<Option<i64>>> {
+        Box::pin(Store::record(self, result, kind, change))
     }
 
     fn open_outages<'a>(&'a self, node_id: &'a str) -> BoxFuture<'a, Result<Vec<Outage>>> {
@@ -87,6 +101,14 @@ impl History for Store {
         check_ids: Vec<String>,
     ) -> BoxFuture<'a, Result<Vec<LastUp>>> {
         Box::pin(Store::last_up(self, node_id, check_ids))
+    }
+
+    fn latest_results<'a>(
+        &'a self,
+        node_id: &'a str,
+        check_ids: Vec<String>,
+    ) -> BoxFuture<'a, Result<Vec<LatestResult>>> {
+        Box::pin(Store::latest_results(self, node_id, check_ids))
     }
 }
 

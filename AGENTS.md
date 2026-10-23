@@ -23,6 +23,7 @@ CI (`.github/workflows/ci.yml`) runs exactly these on linux x86_64 and aarch64, 
 | `crates/tocsin` | the binary: CLI (clap), server, output rendering, exit codes | hold domain logic other crates need |
 | `crates/tocsin-core` | domain types, config model, assertions | do I/O |
 | `crates/tocsin-store` | SQLite persistence of history | store configuration |
+| `crates/tocsin-engine` | the scheduler and state engine: runs checks, confirms state changes, keeps outages, derives component status, emits change events; behind ports (`Runner`, `History`, `Notices`, `Sink`, `Clock`) | hold the rules themselves (pure functions in `tocsin-core::state`) or know about HTTP |
 
 ## Conventions
 

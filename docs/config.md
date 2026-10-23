@@ -82,6 +82,7 @@ Fields marked **may be secret** take either a value written in the file or an en
 | `node_id` | string | the hostname | This node's name in every result it records. No whitespace. |
 | `data_dir` | path | none | Folder for the SQLite database. A relative path is relative to the config folder. `tocsin serve --data` overrides it; one of the two is required. |
 | `retention_days` | integer | `90` | Whole UTC days of raw check results kept before today; daily rollups are kept forever. At least 1. See [storage.md](storage.md#retention). |
+| `max_concurrent_checks` | integer | `64` | Most probes running at once across all checks; the rest wait for a slot. At least 1. See [engine.md](engine.md#scheduling). |
 
 ### `[server.email]`
 
@@ -117,6 +118,7 @@ Components are what the status page shows, each with a health state. Groups are 
 | `name` | string | Required. Display name. |
 | `description` | string | Optional. |
 | `group` | group id | Components only: the group it is shown under. |
+| `rule` | `"worst"` or `"majority"` | Components only. How its checks combine into its health: the worst check (the default), or the worst state more than half of them are in or beyond. See [engine.md](engine.md#component-status). |
 
 ## `[[check]]`
 

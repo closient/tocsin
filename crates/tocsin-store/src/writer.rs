@@ -213,11 +213,10 @@ fn run(mut session: Session, mut receiver: mpsc::Receiver<Command>) {
                     .counters()
                     .committed(answers.iter().map(|&(at, _)| at), Instant::now());
                 let mut refused = Vec::new();
+                let mut replies = Vec::new();
                 for ((insert, (_, reply)), outcome) in inserts.iter().zip(answers).zip(outcomes) {
                     match reply {
-                        Some(reply) => {
-                            let _ = reply.send(outcome);
-                        }
+                        Some(reply) => replies.push((reply, outcome)),
                         None => {
                             if let Err(error) = outcome {
                                 refused.push((insert, error));
@@ -225,7 +224,12 @@ fn run(mut session: Session, mut receiver: mpsc::Receiver<Command>) {
                         }
                     }
                 }
+                // Counted before anyone in the batch is answered, so a caller
+                // answered after a refused result sees it counted.
                 refuse(nudge, &refused);
+                for (reply, outcome) in replies {
+                    let _ = reply.send(outcome);
+                }
             }
         }
         nudge.after_write(conn);

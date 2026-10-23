@@ -935,9 +935,16 @@ mod tests {
 
     /// A status page holds `/api/v1/events` open for as long as it is
     /// shown. Shutting down ends the stream, so the drain finishes at once
-    /// rather than waiting out its 10 seconds and dropping the connection.
+    /// rather than waiting out its 10 seconds and aborting the connection.
     #[tokio::test]
     async fn a_signal_ends_open_event_streams_so_the_drain_is_quick() {
+        let log = Captured::default();
+        let _log = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(log.clone())
+                .with_ansi(false)
+                .finish(),
+        );
         let (_dir, store) = open();
         let weak = Arc::downgrade(&store);
         let config = tocsin_core::config::load(
@@ -993,6 +1000,11 @@ mod tests {
             started.elapsed() < Duration::from_secs(3),
             "the drain waited {:?} on an open event stream",
             started.elapsed()
+        );
+        assert!(
+            !log.text().contains("aborting them"),
+            "the event stream was aborted, not ended: {}",
+            log.text()
         );
         assert!(closed, "the store was not closed");
         assert!(weak.upgrade().is_none(), "something still holds the store");

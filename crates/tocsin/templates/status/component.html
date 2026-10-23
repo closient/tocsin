@@ -1,0 +1,50 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{% extends "status/layout.html" %}
+{% block content %}
+<p><a href="/">Current status</a></p>
+<h1>{{ name }}</h1>
+<p><span class="status {{ status.class }}"><span class="glyph" aria-hidden="true">{{ status.glyph }}</span> {{ status.text }}</span>
+{%- if let Some(group) = group %} <span class="muted">· {{ group }}</span>{% endif %}</p>
+{%- if let Some(description) = description %}
+<p class="muted">{{ description }}</p>
+{%- endif %}
+
+<h2>Uptime, last 90 days</h2>
+{% include "status/bar.html" %}
+
+<h2>Active incidents and maintenance</h2>
+{%- if active.is_empty() %}
+<p class="muted">No incidents or maintenance in progress.</p>
+{%- else %}
+<ul class="items">
+  {%- for card in active %}
+  {%- include "status/card.html" %}
+  {%- endfor %}
+</ul>
+{%- endif %}
+
+<h2>Timeline</h2>
+<p class="muted">Outages, incidents and deploys since <time datetime="{{ since.iso }}">{{ since.text }}</time>, newest first.</p>
+{%- if truncated %}
+<p class="notice">More happened than one page shows; these are the newest {{ timeline.len() }}.</p>
+{%- endif %}
+{%- if timeline.is_empty() %}
+<p class="muted">Nothing in this window.</p>
+{%- else %}
+<ul class="items">
+  {%- for event in timeline %}
+  <li>
+    {%- if let Some(link) = event.href %}
+    <a class="item-title" href="{{ link }}">{{ event.text }}</a>
+    {%- else %}
+    <span class="item-title">{{ event.text }}</span>
+    {%- endif %}
+    <div class="meta">
+      <span class="badge {{ event.tone }}">{{ event.kind }}</span>
+      <span class="muted"><time datetime="{{ event.at.iso }}">{{ event.at.text }}</time> · {{ event.detail }}</span>
+    </div>
+  </li>
+  {%- endfor %}
+</ul>
+{%- endif %}
+{% endblock %}

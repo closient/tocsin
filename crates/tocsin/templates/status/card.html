@@ -1,0 +1,21 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{#- One incident in a list; the including template binds `card`. -#}
+<li>
+  <a class="item-title" href="{{ card.href }}">{{ card.title }}</a>
+  <div class="meta">
+    <span class="badge {{ card.status }}">{{ card.status_text }}</span>
+    {%- if let Some(impact) = card.impact %}
+    <span class="badge {{ impact }}">{{ impact }} impact</span>
+    {%- else %}
+    <span class="badge maintenance">maintenance</span>
+    {%- endif %}
+    <span class="muted">
+      {%- if let Some(window) = card.window %}scheduled {{ window }}{% else %}started <time datetime="{{ card.started.iso }}">{{ card.started.text }}</time>{% endif %}
+      {%- if let Some(ended) = card.ended %} · ended <time datetime="{{ ended.iso }}">{{ ended.text }}</time>{% endif %}
+      {%- if !card.components.is_empty() %} · {{ card.components }}{% endif -%}
+    </span>
+  </div>
+  {%- if let Some(latest) = card.latest_html %}
+  <div class="markdown">{{ latest|safe }}</div>
+  {%- endif %}
+</li>

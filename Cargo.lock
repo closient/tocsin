@@ -1169,6 +1169,7 @@ dependencies = [
  "defmt",
  "jiff-core",
  "jiff-static",
+ "jiff-tzdb",
  "log",
  "portable-atomic",
  "portable-atomic-util",
@@ -1196,6 +1197,12 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "jiff-tzdb"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa8377070c6bae868759445e5a77f66d84f0b72f3a054bfb00e6d038b8282da7"
 
 [[package]]
 name = "jni"
@@ -2628,11 +2635,14 @@ dependencies = [
  "axum",
  "base64",
  "clap",
+ "futures-util",
  "gethostname",
+ "html5ever",
  "insta",
  "jiff",
  "prometheus-client",
  "pulldown-cmark",
+ "regex",
  "reqwest",
  "ring",
  "rusqlite",

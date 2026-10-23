@@ -11,6 +11,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::get;
+use jiff::tz::TimeZone;
 use serde::Deserialize;
 use tocsin_core::release::{Release, TimelineEvent};
 use tocsin_store::Order;
@@ -28,15 +29,24 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/admin/timeline", get(page))
 }
 
-/// One event, ready to show.
-struct Row {
-    at: Stamp,
-    kind: &'static str,
+/// One event, ready to show. The status page's component page shows the
+/// same rows.
+pub(super) struct Row {
+    pub at: Stamp,
+    pub kind: &'static str,
     /// A badge class: the event's severity or state.
-    tone: String,
-    text: String,
-    href: Option<String>,
-    detail: String,
+    pub tone: String,
+    pub text: String,
+    pub href: Option<String>,
+    pub detail: String,
+}
+
+/// Where a row links and how it shows instants.
+pub(super) struct Rows<'a> {
+    /// Incident links: `{incidents}/{id}`.
+    pub incidents: &'a str,
+    /// The zone instants are shown in.
+    pub zone: &'a TimeZone,
 }
 
 /// One component in the filter.
@@ -93,13 +103,25 @@ async fn page(
             })
             .collect(),
         since: Stamp::new(found.since),
-        events: found.events.iter().map(row).collect(),
+        events: found
+            .events
+            .iter()
+            .map(|event| {
+                row(
+                    event,
+                    &Rows {
+                        incidents: "/admin/incidents",
+                        zone: &TimeZone::UTC,
+                    },
+                )
+            })
+            .collect(),
         truncated: found.truncated,
     };
     Ok(render(StatusCode::OK, &page))
 }
 
-fn row(event: &TimelineEvent) -> Row {
+pub(super) fn row(event: &TimelineEvent, rows: &Rows<'_>) -> Row {
     match event {
         TimelineEvent::Outage {
             at,
@@ -110,7 +132,7 @@ fn row(event: &TimelineEvent) -> Row {
             ended_at,
             ..
         } => Row {
-            at: Stamp::new(*at),
+            at: Stamp::zoned(*at, rows.zone),
             kind: "outage",
             tone: health.to_string(),
             text: format!("{check_id} {health}"),
@@ -122,7 +144,7 @@ fn row(event: &TimelineEvent) -> Row {
                     .map_or_else(String::new, |component| format!(" · {component}")),
                 ended_at.map_or_else(
                     || " · ongoing".to_owned(),
-                    |ended| format!(" · ended {}", super::page::when(ended))
+                    |ended| format!(" · ended {}", super::page::when_in(ended, rows.zone))
                 ),
             ),
         },
@@ -135,21 +157,25 @@ fn row(event: &TimelineEvent) -> Row {
             status,
             components,
         } => Row {
-            at: Stamp::new(*at),
+            at: Stamp::zoned(*at, rows.zone),
             kind: incident_kind.as_str(),
             tone: impact.as_str().to_owned(),
             text: title.clone(),
-            href: Some(format!("/admin/incidents/{id}")),
+            href: Some(format!("{}/{id}", rows.incidents)),
             detail: format!("{status} · {}", components.join(", ")),
         },
-        TimelineEvent::Deploy { at, release, .. } => release_row(*at, "deploy", release),
-        TimelineEvent::Release { at, release, .. } => release_row(*at, "release", release),
+        TimelineEvent::Deploy { at, release, .. } => {
+            release_row(Stamp::zoned(*at, rows.zone), "deploy", release)
+        }
+        TimelineEvent::Release { at, release, .. } => {
+            release_row(Stamp::zoned(*at, rows.zone), "release", release)
+        }
     }
 }
 
-fn release_row(at: tocsin_core::incident::Timestamp, kind: &'static str, release: &Release) -> Row {
+fn release_row(at: Stamp, kind: &'static str, release: &Release) -> Row {
     Row {
-        at: Stamp::new(at),
+        at,
         kind,
         tone: String::new(),
         text: format!(

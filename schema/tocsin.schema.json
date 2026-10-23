@@ -894,7 +894,7 @@
     },
     "Link": {
       "additionalProperties": false,
-      "description": "A `[[check.link]]` or `[[heartbeat.link]]`: a named link to somewhere an\noperator looks next, such as a dashboard, logs or a runbook.",
+      "description": "A `[[check.link]]` or `[[heartbeat.link]]`: a named link to somewhere an\noperator looks next, such as a dashboard, logs or a runbook. Also a\n`[[page.link]]`, shown to everyone in the status page's header.",
       "properties": {
         "name": {
           "description": "The link text.",
@@ -908,6 +908,25 @@
       "required": [
         "name",
         "url"
+      ],
+      "type": "object"
+    },
+    "Logo": {
+      "additionalProperties": false,
+      "description": "`[page.logo]`: an image shown before the page title.",
+      "properties": {
+        "alt": {
+          "description": "The image's text alternative. Leave it empty when the title beside\nthe logo already says what it shows.",
+          "type": "string"
+        },
+        "url": {
+          "description": "A path on this site, such as `\"/brand/logo.svg\"`, that the proxy in\nfront of tocsin serves. The page's content security policy loads\nimages from its own origin only, so a URL on another host would\nnot show.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "alt"
       ],
       "type": "object"
     },
@@ -1114,6 +1133,13 @@
       "additionalProperties": false,
       "description": "`[page]`.",
       "properties": {
+        "components": {
+          "description": "The order components are shown in within their group, by id.\nComponents not listed follow in the order they are defined.",
+          "items": {
+            "$ref": "#/definitions/Id"
+          },
+          "type": "array"
+        },
         "description": {
           "description": "A line shown under the title.",
           "type": [
@@ -1121,12 +1147,42 @@
             "null"
           ]
         },
+        "groups": {
+          "description": "The order groups are shown in, by id. Groups not listed follow in\nthe order they are defined.",
+          "items": {
+            "$ref": "#/definitions/Id"
+          },
+          "type": "array"
+        },
         "homepage_url": {
           "description": "Where the page's logo and title link to.",
           "type": [
             "string",
             "null"
           ]
+        },
+        "link": {
+          "description": "Links in the page's header, such as the main site or a support\naddress, each a `[[page.link]]` table.",
+          "items": {
+            "$ref": "#/definitions/Link"
+          },
+          "type": "array"
+        },
+        "logo": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Logo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The logo shown before the title, as `[page.logo]`."
+        },
+        "timezone": {
+          "default": "UTC",
+          "description": "The time zone the page shows times in: an IANA name such as\n`\"Europe/Berlin\"`. The uptime bars' days are UTC days regardless.",
+          "type": "string"
         },
         "title": {
           "default": "Status",

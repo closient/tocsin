@@ -267,6 +267,25 @@ pub struct Page {
     /// Where the page's logo and title link to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub homepage_url: Option<String>,
+    /// The logo shown before the title, as `[page.logo]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo: Option<Logo>,
+    /// Links in the page's header, such as the main site or a support
+    /// address, each a `[[page.link]]` table.
+    #[serde(default, rename = "link", skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Link>,
+    /// The order groups are shown in, by id. Groups not listed follow in
+    /// the order they are defined.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<Id>,
+    /// The order components are shown in within their group, by id.
+    /// Components not listed follow in the order they are defined.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<Id>,
+    /// The time zone the page shows times in: an IANA name such as
+    /// `"Europe/Berlin"`. The uptime bars' days are UTC days regardless.
+    #[serde(default = "default_timezone")]
+    pub timezone: String,
 }
 
 impl Default for Page {
@@ -275,12 +294,35 @@ impl Default for Page {
             title: default_title(),
             description: None,
             homepage_url: None,
+            logo: None,
+            links: Vec::new(),
+            groups: Vec::new(),
+            components: Vec::new(),
+            timezone: default_timezone(),
         }
     }
 }
 
 fn default_title() -> String {
     "Status".to_owned()
+}
+
+fn default_timezone() -> String {
+    "UTC".to_owned()
+}
+
+/// `[page.logo]`: an image shown before the page title.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Logo {
+    /// A path on this site, such as `"/brand/logo.svg"`, that the proxy in
+    /// front of tocsin serves. The page's content security policy loads
+    /// images from its own origin only, so a URL on another host would
+    /// not show.
+    pub url: String,
+    /// The image's text alternative. Leave it empty when the title beside
+    /// the logo already says what it shows.
+    pub alt: String,
 }
 
 /// `[[component]]`: something the status page shows with a health state.
@@ -356,7 +398,8 @@ pub struct Heartbeat {
 }
 
 /// A `[[check.link]]` or `[[heartbeat.link]]`: a named link to somewhere an
-/// operator looks next, such as a dashboard, logs or a runbook.
+/// operator looks next, such as a dashboard, logs or a runbook. Also a
+/// `[[page.link]]`, shown to everyone in the status page's header.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Link {

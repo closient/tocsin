@@ -1,0 +1,26 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+<h2 id="components-heading">Components</h2>
+{%- if sections.is_empty() %}
+<p class="muted">No components are configured.</p>
+{%- endif %}
+{%- for section in sections %}
+{%- if let Some(name) = section.name %}
+<h3>{{ name }}</h3>
+{%- if let Some(description) = section.description %}
+<p class="muted">{{ description }}</p>
+{%- endif %}
+{%- endif %}
+<ul class="components">
+  {%- for component in section.components %}
+  <li>
+    <div class="component-line">
+      <a href="{{ component.href }}">{{ component.name }}</a>
+      <span class="status {{ component.status.class }}"><span class="glyph" aria-hidden="true">{{ component.status.glyph }}</span> {{ component.status.text }}</span>
+    </div>
+    {%- if let Some(description) = component.description %}
+    <div class="muted">{{ description }}</div>
+    {%- endif %}
+  </li>
+  {%- endfor %}
+</ul>
+{%- endfor %}

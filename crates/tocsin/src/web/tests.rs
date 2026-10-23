@@ -1238,6 +1238,7 @@ async fn assets_are_served_by_content_hash_and_cached_forever() {
     for (name, content_type) in [
         ("tocsin.css", "text/css; charset=utf-8"),
         ("htmx.min.js", "text/javascript; charset=utf-8"),
+        ("htmx-ext-sse.min.js", "text/javascript; charset=utf-8"),
     ] {
         let url = super::assets::url(name);
         let request = Request::get(url).body(Body::empty()).unwrap();
@@ -1271,6 +1272,19 @@ fn vendored_htmx_is_the_pinned_release() {
 }
 
 const HTMX_SHA256: &str = "d6fdc75f204e6bdefa99b69bf1e6d4ac69b8a364f77929f45c13476b4000f717";
+
+#[test]
+fn vendored_htmx_sse_extension_is_the_pinned_release() {
+    // static/README.md: htmx-ext-sse 2.2.4, from the npm tarball. Upgrading
+    // means replacing the file and this hash together.
+    let digest = ring::digest::digest(
+        &ring::digest::SHA256,
+        include_bytes!("../../static/htmx-ext-sse.min.js"),
+    );
+    assert_eq!(super::assets::hex(digest.as_ref()), HTMX_SSE_SHA256);
+}
+
+const HTMX_SSE_SHA256: &str = "98a46496de0c3605fbffdce9167ba427bdd9553184f83f149c261891a92c0136";
 
 #[tokio::test]
 async fn pages_carry_security_headers() {

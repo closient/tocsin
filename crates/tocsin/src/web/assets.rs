@@ -29,6 +29,11 @@ const FILES: &[(&str, &str, &[u8])] = &[
         "text/javascript; charset=utf-8",
         include_bytes!("../../static/htmx.min.js"),
     ),
+    (
+        "htmx-ext-sse.min.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../../static/htmx-ext-sse.min.js"),
+    ),
 ];
 
 struct Asset {

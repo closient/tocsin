@@ -13,7 +13,9 @@ workspace = true
 
 [dependencies]
 http.workspace = true
-jiff.workspace = true
+# `[page] timezone` is checked against a time zone database compiled in:
+# core reads no files, and the container image has no /usr/share/zoneinfo.
+jiff = { workspace = true, features = ["tzdb-bundle-always"] }
 regex.workspace = true
 schemars.workspace = true
 serde.workspace = true

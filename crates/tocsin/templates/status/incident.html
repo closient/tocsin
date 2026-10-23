@@ -1,0 +1,39 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{% extends "status/layout.html" %}
+{% block content %}
+<p><a href="/history">Incident history</a></p>
+<h1>{{ card.title }}</h1>
+<div class="meta">
+  <span class="badge {{ card.status }}">{{ card.status_text }}</span>
+  {%- if let Some(impact) = card.impact %}
+  <span class="badge {{ impact }}">{{ impact }} impact</span>
+  {%- else %}
+  <span class="badge maintenance">maintenance</span>
+  {%- endif %}
+  <span class="muted">
+    {%- if let Some(window) = card.window %}scheduled {{ window }} · {% endif -%}
+    opened <time datetime="{{ card.started.iso }}">{{ card.started.text }}</time>
+    {%- if let Some(ended) = card.ended %} · ended <time datetime="{{ ended.iso }}">{{ ended.text }}</time>{% endif -%}
+  </span>
+</div>
+{%- if !card.components.is_empty() %}
+<p class="muted">Affects {{ card.components }}</p>
+{%- endif %}
+
+<h2>Updates</h2>
+{%- if updates.is_empty() %}
+<p class="muted">No updates yet.</p>
+{%- else %}
+<ol class="items">
+  {%- for update in updates %}
+  <li>
+    <div class="meta">
+      <span class="badge {{ update.status }}">{{ update.status_text }}</span>
+      <span class="muted"><time datetime="{{ update.at.iso }}">{{ update.at.text }}</time></span>
+    </div>
+    <div class="markdown">{{ update.message_html|safe }}</div>
+  </li>
+  {%- endfor %}
+</ol>
+{%- endif %}
+{% endblock %}

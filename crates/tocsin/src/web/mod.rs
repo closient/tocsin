@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Server-rendered HTML pages: the admin pages and the public release
-//! log now, the status page next. `docs/admin.md` describes the pattern for adding a
-//! page.
+//! Server-rendered HTML pages: the public status page, the public release
+//! log, and the admin pages. `docs/admin.md` describes the pattern for
+//! adding a page.
 //!
 //! - **Templates**: askama, in `crates/tocsin/templates/`. Every page
 //!   extends `base.html` and carries a [`page::Layout`]; askama escapes
@@ -27,8 +27,12 @@ pub mod identity;
 pub mod markdown;
 pub mod page;
 pub mod releases;
+pub mod status;
 pub mod timeline;
+pub mod uptime;
 
+#[cfg(test)]
+mod status_tests;
 #[cfg(test)]
 mod tests;
 
@@ -37,7 +41,7 @@ use axum::routing::get;
 
 use crate::http::AppState;
 
-/// The HTML routes: assets and the release log always, the admin pages
+/// The HTML routes: assets, the status page and the release log always, the admin pages
 /// when `[server.auth]` turns them on. Without it, `/admin/` is the same 404 as any unknown
 /// path.
 pub fn router(state: &AppState) -> Router<AppState> {
@@ -46,6 +50,7 @@ pub fn router(state: &AppState) -> Router<AppState> {
             &format!("{}/{{hash}}/{{name}}", assets::PREFIX),
             get(assets::serve),
         )
+        .merge(status::router())
         .merge(releases::router());
     if state.admin.is_some() {
         router = router.merge(admin::router()).merge(timeline::router());

@@ -141,24 +141,13 @@ async fn serve(
     let app = http::router(AppState {
         store: Arc::clone(&store),
         config: Arc::clone(config),
-        events,
+        events: events.clone(),
         admin,
         live: Arc::new(monitor.engine.status_handle()),
         heartbeats: monitor.heartbeats(),
     });
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(async move {
-        // Peer addresses let `trusted_header` auth check where a request
-        // came from.
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async {
-            let _ = stopped.await;
-        })
-        .await
-    });
+    let server = spawn_server(listener, app, stopped, events);
     // Logged only once both handlers exist and the socket is bound, so a
     // signal sent after this line is always handled and a request sent
     // after it is always answered.
@@ -181,6 +170,31 @@ async fn serve(
     )
     .await;
     outcome
+}
+
+/// Serves `app` on `listener` until `stopped` fires, then ends the event
+/// streams on `events` and finishes the requests in flight.
+fn spawn_server(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+    stopped: oneshot::Receiver<()>,
+    events: EventBus,
+) -> JoinHandle<io::Result<()>> {
+    tokio::spawn(async move {
+        // Peer addresses let `trusted_header` auth check where a request
+        // came from.
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = stopped.await;
+            // An event stream never finishes by itself; without this the
+            // drain waits out every open status page.
+            events.close();
+        })
+        .await
+    })
 }
 
 /// The running checks: the engine, the task that wakes it when an
@@ -522,7 +536,7 @@ mod tests {
     use tokio::sync::oneshot;
     use tower::ServiceExt;
 
-    use super::{AlertMetrics, Monitor, close, io, start_checks, supervise};
+    use super::{AlertMetrics, Monitor, close, io, spawn_server, start_checks, supervise};
     use crate::exit::Exit;
     use crate::http::events::{Event, EventBus};
     use crate::http::{self, AppState};
@@ -582,6 +596,64 @@ mod tests {
         assert_eq!(outcome.unwrap(), "SIGTERM");
         assert!(closed, "the store was not closed");
         assert!(weak.upgrade().is_none(), "something still holds the store");
+    }
+
+    /// A status page holds `/api/v1/events` open for as long as it is
+    /// shown. Shutting down ends the stream, so the drain finishes at once
+    /// rather than waiting out its 10 seconds and dropping the connection.
+    #[tokio::test]
+    async fn a_signal_ends_open_event_streams_so_the_drain_is_quick() {
+        let (_dir, store) = open();
+        let weak = Arc::downgrade(&store);
+        let config = tocsin_core::config::load(
+            &[Source {
+                name: "tocsin.toml".into(),
+                text: Ok("[[component]]\nid = \"api\"\nname = \"API\"\n".into()),
+            }],
+            &Environment {
+                hostname: "test".into(),
+                variable: &|_| None,
+            },
+        )
+        .unwrap();
+        let events = EventBus::new();
+        let app = http::router(AppState {
+            store: Arc::clone(&store),
+            config: Arc::new(config),
+            events: events.clone(),
+            admin: None,
+            live: Arc::new(tocsin_engine::Snapshot::default()),
+            heartbeats: tocsin_engine::HeartbeatHandle::default(),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, stopped) = oneshot::channel();
+        let server = spawn_server(listener, app, stopped, events);
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut stream = reqwest::Client::new()
+            .get(format!("http://{address}/api/v1/events"))
+            .send()
+            .await
+            .unwrap();
+        // The opening `resync` is on the wire: the stream is open.
+        let first = stream.chunk().await.unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&first).contains("event: resync"));
+        let maintenance = holding(&store);
+
+        let started = std::time::Instant::now();
+        let (outcome, closed) =
+            supervise(ready("SIGTERM"), stop, server, maintenance, None, store).await;
+
+        assert_eq!(outcome.unwrap(), "SIGTERM");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the drain waited {:?} on an open event stream",
+            started.elapsed()
+        );
+        assert!(closed, "the store was not closed");
+        assert!(weak.upgrade().is_none(), "something still holds the store");
+        // The client sees the stream end, not a reset.
+        assert!(stream.chunk().await.unwrap().is_none());
     }
 
     #[tokio::test]

@@ -165,9 +165,9 @@ A condition on the records a DNS lookup returns. Records are compared as text, i
 
 #### `[[check.link]]`
 
-Also `[[heartbeat.link]]`.
+Also `[[heartbeat.link]]`, `[[page.link]]`.
 
-A `[[check.link]]` or `[[heartbeat.link]]`: a named link to somewhere an operator looks next, such as a dashboard, logs or a runbook.
+A `[[check.link]]` or `[[heartbeat.link]]`: a named link to somewhere an operator looks next, such as a dashboard, logs or a runbook. Also a `[[page.link]]`, shown to everyone in the status page's header.
 
 | Key | Type | Required | Default | Description |
 |-----|------|----------|---------|-------------|
@@ -353,9 +353,25 @@ A destination for operator alerts. Every alert it sends is followed by a resolve
 
 | Key | Type | Required | Default | Description |
 |-----|------|----------|---------|-------------|
+| `components` | array of [`Id`](#type-id) |  |  | The order components are shown in within their group, by id. Components not listed follow in the order they are defined. |
 | `description` | string |  |  | A line shown under the title. |
+| `groups` | array of [`Id`](#type-id) |  |  | The order groups are shown in, by id. Groups not listed follow in the order they are defined. |
 | `homepage_url` | string |  |  | Where the page's logo and title link to. |
+| `link` | [array of tables](#table-link) |  |  | Links in the page's header, such as the main site or a support address, each a `[[page.link]]` table. |
+| `logo` | [table](#table-logo) |  |  | The logo shown before the title, as `[page.logo]`. |
+| `timezone` | string |  | `"UTC"` | The time zone the page shows times in: an IANA name such as `"Europe/Berlin"`. The uptime bars' days are UTC days regardless. |
 | `title` | string |  | `"Status"` | The page title. |
+
+<a id="table-logo"></a>
+
+#### `[page.logo]`
+
+`[page.logo]`: an image shown before the page title.
+
+| Key | Type | Required | Default | Description |
+|-----|------|----------|---------|-------------|
+| `alt` | string | yes |  | The image's text alternative. Leave it empty when the title beside the logo already says what it shows. |
+| `url` | string | yes |  | A path on this site, such as `"/brand/logo.svg"`, that the proxy in front of tocsin serves. The page's content security policy loads images from its own origin only, so a URL on another host would not show. |
 
 <a id="table-project"></a>
 

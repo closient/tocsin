@@ -15,6 +15,7 @@ mod config;
 mod db;
 mod exit;
 mod export;
+mod heartbeat;
 mod http;
 mod incident;
 mod lock;
@@ -78,6 +79,7 @@ fn run(cli: Cli) -> Result<Report, Failure> {
         Some(Command::Notify { command }) => match command {
             NotifyCommand::Test { notifier, config } => notify::test(&notifier, &config),
         },
+        Some(Command::Heartbeat { command }) => heartbeat::run(command),
         Some(Command::Openapi) => Ok(Report {
             exit: Exit::Ok,
             json: serde_json::to_value(http::openapi::spec())

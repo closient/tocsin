@@ -57,8 +57,8 @@ impl CompiledRoute {
 /// Routes alerts, and names their subjects and components.
 #[derive(Debug, Clone, Default)]
 pub struct Router {
-    /// Display names by kind and id: a check and a heartbeat may share an
-    /// id.
+    /// Display names by kind and id, as an alert's identity names its
+    /// subject.
     subjects: HashMap<(SubjectKind, String), String>,
     components: HashMap<String, (String, Option<String>)>,
     notifier_types: HashMap<String, NotifierType>,

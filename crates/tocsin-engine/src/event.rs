@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! What the engine announces: confirmed check state changes and component
-//! status changes. Nothing is emitted for a result that changes nothing.
+//! What the engine announces: confirmed check and heartbeat state changes
+//! and component status changes. Nothing is emitted for a result that changes nothing.
 
 use serde::Serialize;
 use tocsin_core::Health;
@@ -17,12 +17,29 @@ pub enum EngineEvent {
     ComponentChanged(ComponentChange),
 }
 
-/// A check's confirmed state changed: emitted once per change, after
-/// `confirm` agreeing results, never once per result.
+/// What a component member is: a check the engine probes, or a heartbeat
+/// that pings the engine. Both produce results, outages and changes the
+/// same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberKind {
+    /// A `[[check]]`.
+    Check,
+    /// A `[[heartbeat]]`.
+    Heartbeat,
+}
+
+/// A check's (or heartbeat's) confirmed state changed: emitted once per
+/// change, after `confirm` agreeing results, never once per result. A
+/// heartbeat confirms on one result: a ping, or a missed deadline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CheckChange {
-    /// The check.
+    /// The check or heartbeat. Ids are unique across both, so with the
+    /// node this is the alert's identity.
     pub check_id: String,
+    /// Whether `check_id` is a check or a heartbeat, for routes that filter
+    /// on one or the other.
+    pub kind: MemberKind,
     /// The check's component, if it has one.
     pub component_id: Option<String>,
     /// The state before, or `None` when the check had no state yet: the

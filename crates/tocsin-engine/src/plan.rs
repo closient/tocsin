@@ -5,15 +5,16 @@
 use std::fmt;
 use std::sync::Arc;
 
-use tocsin_core::config::{ComponentRule, Config};
+use tocsin_core::config::{ComponentRule, Config, Heartbeat};
 use tocsin_core::probe::CompiledCheck;
 
-/// The checks and components the engine runs, compiled once.
+/// The checks, heartbeats and components the engine runs, compiled once.
 #[derive(Debug, Clone)]
 pub struct Plan {
     pub(crate) node_id: String,
     pub(crate) max_concurrent: usize,
     pub(crate) checks: Vec<Arc<CompiledCheck>>,
+    pub(crate) heartbeats: Vec<Heartbeat>,
     pub(crate) components: Vec<(String, ComponentRule)>,
 }
 
@@ -30,7 +31,7 @@ impl fmt::Display for PlanError {
 impl std::error::Error for PlanError {}
 
 impl Plan {
-    /// Compiles `config`'s checks and components.
+    /// Compiles `config`'s checks, heartbeats and components.
     ///
     /// # Errors
     ///
@@ -68,6 +69,7 @@ impl Plan {
             node_id,
             max_concurrent,
             checks,
+            heartbeats: config.heartbeats.clone(),
             components,
         })
     }
@@ -82,5 +84,11 @@ impl Plan {
     #[must_use]
     pub fn checks(&self) -> &[Arc<CompiledCheck>] {
         &self.checks
+    }
+
+    /// The heartbeats.
+    #[must_use]
+    pub fn heartbeats(&self) -> &[Heartbeat] {
+        &self.heartbeats
     }
 }

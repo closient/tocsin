@@ -944,23 +944,24 @@ fn the_writer_waits_out_the_checkpointers_pass_without_polling() {
         let passes = Arc::clone(&passes);
         move || {
             let _pass = passes.begin().expect("nothing to stand aside for");
-            begun.send(()).unwrap();
+            begun.send(Instant::now()).unwrap();
             std::thread::sleep(PASS);
             // A pass lets go of the lock, then ends.
             holder.join();
         }
     });
-    has_begun.recv().unwrap();
+    // Measured from when the pass began, not from when this thread heard
+    // of it: the pass is already asleep by then.
+    let pass_began = has_begun.recv().unwrap();
     add_row(&conn);
-    let started = Instant::now();
     nudge.after_write(&conn);
-    let took = started.elapsed();
+    let took = pass_began.elapsed();
     pass.join().unwrap();
     assert_eq!(passes.waits(), 1);
     assert_eq!(passes.polls(), 0, "the writer polled");
     assert!(
         took >= PASS && took < schema::BUSY_TIMEOUT,
-        "the writer took {took:?}"
+        "the writer was done {took:?} after the pass began"
     );
     add_row(&conn);
     nudge.after_write(&conn);

@@ -15,7 +15,8 @@ use super::values::{Duration, Id, Secret, Text};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Check {
-    /// Unique among checks in every file.
+    /// Unique among checks and heartbeats in every file: they share one
+    /// history.
     pub id: Id,
     /// Display name; the id is shown when it is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]

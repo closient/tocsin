@@ -16,8 +16,8 @@ use utoipa::ToSchema;
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ErrorBody {
     /// Stable machine-readable code: `unauthorized`, `forbidden`,
-    /// `not_found`, `method_not_allowed`, `bad_request`, `too_large`, `invalid`
-    /// or `internal`.
+    /// `not_found`, `method_not_allowed`, `bad_request`, `too_large`, `invalid`,
+    /// `unavailable` or `internal`.
     pub error: &'static str,
     /// What went wrong, for a person.
     pub message: String,
@@ -89,6 +89,12 @@ impl ApiError {
         let mut error = Self::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid", message);
         error.body.fields = fields;
         error
+    }
+
+    /// 503: the server cannot take the request now, such as while it shuts
+    /// down.
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, "unavailable", message)
     }
 
     /// 500. The cause is logged, not sent.

@@ -14,10 +14,11 @@ windows itself.
 ## Identity
 
 An alert is identified by the node, the subject's kind and the subject's
-id: `node-a/check/api`, or `node-a/heartbeat/backup` for a heartbeat. A check
-and a heartbeat may share an id; they are two alerts. The fire, every repeat and the
-resolve carry the same identity, so a receiver can pair them. A resolve also
-carries when the alert started and ended, and how long it lasted.
+id: `node-a/check/api`, or `node-a/heartbeat/backup` for a heartbeat.
+Configuration keeps a heartbeat from reusing a check's id, since both
+record results under it. The fire, every repeat and the resolve carry the
+same identity, so a receiver can pair them. A resolve also carries when the
+alert started and ended, and how long it lasted.
 
 One alert spans every outage from the change that fires it to the recovery
 that ends it. A check that goes from degraded to down stays one alert; it

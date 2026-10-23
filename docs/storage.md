@@ -153,11 +153,17 @@ trigger aborts every `UPDATE`. `DELETE` stays open for retention. The
 | `detail` | text | Valid JSON or null: per-assertion detail, for display only. |
 | `error` | text | Transport or assertion error, if any. |
 | `status_code` | integer | HTTP status, 0–999, or null. |
+| `kind` | text | `check` (a probe's result) or `heartbeat` (a ping or a missed deadline). Added by 0006; older rows are `check`. |
 
 Indexes: `(check_id, started_at)` for one check's history,
-`(node_id, started_at)` for one node's results, and a covering
-`(started_at, check_id, node_id, health)` so rollups and retention scan by
-time without touching the table.
+`(node_id, started_at)` for one node's results, a covering
+`(started_at, check_id, node_id, health)` so rollups and retention
+scan by time without touching the table, and the same columns over
+heartbeat rows only (`WHERE kind = 'heartbeat'`, added by 0006). A rollup
+weighs a heartbeat's results from that partial index and counts checks
+from the full one, skipping any day a heartbeat has results on: `kind` in
+the full index would widen the entry every result writes and every purge
+deletes.
 
 ### `outage`
 
@@ -179,17 +185,26 @@ they are small and they are the incident history.
 
 ### `daily_rollup`
 
-Per UTC day counts of `check_result`, one row per check, node and day, kept
-forever. The 90-day status bar is drawn from here, never from raw results.
-`total = up + degraded + down` is enforced by a `CHECK`; `worst` is the worst
-health seen that day.
+Per UTC day figures from `check_result`, one row per check, node and day,
+kept forever. The 90-day status bar is drawn from here, never from raw
+results. `total = up + degraded + down` is enforced by a `CHECK`; `worst` is
+the worst health seen that day.
+
+A check's figures are counts of results. A heartbeat's are milliseconds:
+each result holds its health until the next result that day, the end of the
+day, or now, whichever comes first, and time before the day's first result
+is not counted. A heartbeat reports only when its job runs or a deadline
+passes, so counting would weigh an hour of pings every minute against a day
+of hourly misses: sixty pings in one hour followed by 23 hourly misses
+count as 72% up, but held 4% of the day.
 
 | Column | Type | Notes |
 |---|---|---|
 | `check_id`, `node_id` | text | Primary key with `date`. |
 | `date` | text | `YYYY-MM-DD`, UTC; a `CHECK` rejects anything `date()` would not round-trip. |
-| `total`, `up`, `degraded`, `down` | integer | Counts. |
+| `total`, `up`, `degraded`, `down` | integer | Counts for a check, milliseconds for a heartbeat. |
 | `worst` | text | `up`, `degraded` or `down`. |
+| `kind` | text | `check` or `heartbeat`: which of the two the figures are. Added by 0006; older rows are `check`. |
 
 ### `retention`
 
@@ -198,12 +213,18 @@ results before it have been rolled up and are deleted, or being deleted.
 Rollups for days before it are **final**: nothing recomputes them, because
 the raw rows they came from are gone, and no result for them can be stored.
 
-### `heartbeat_ping`
+### Heartbeat results
 
-A push heartbeat received for a check: `node_id`, `check_id`, `received_at`,
-and the `source` address. Append-only (trigger `heartbeat_ping_append_only`).
-Indexed by `(check_id, received_at)`. Its shape belongs to the heartbeat
-work, which extends it with a new migration.
+Heartbeats have no table of their own. Each ping, and each deadline the
+engine records as missed, is a `check_result` row under the heartbeat's id,
+with `kind` `heartbeat` and `duration_ms` 0; a ping's `message` is in
+`detail` as `{"message": ...}` and, on a down ping, in `error` too. Outages
+and retention treat them like any check's; rollups weigh them by time (see
+`daily_rollup`). A result and the outage change it causes are stored in one
+transaction, with the alert deliveries the change queues, so a ping is never
+acknowledged without all of them. Migration
+`0006_heartbeats` drops the `heartbeat_ping` table that `0001` reserved
+for them, unused until then.
 
 ### `incident`, `incident_component`, `incident_update` and `incident_edit`
 

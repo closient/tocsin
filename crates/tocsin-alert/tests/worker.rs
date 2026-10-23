@@ -26,7 +26,7 @@ use tocsin_alert::{
 use tocsin_core::Health;
 use tocsin_core::config::Config;
 use tocsin_engine::ports::{Clock, History, TokioClock};
-use tocsin_store::{DeliveryKind, OutageChange};
+use tocsin_store::{DeliveryKind, NewCheckResult, OutageChange, SubjectKind};
 use tokio::sync::mpsc;
 
 const HOUR_MS: i64 = 3_600_000;
@@ -56,17 +56,39 @@ struct Running {
 }
 
 impl Running {
-    /// Applies an outage change as the engine would, and resolves with the
-    /// opened outage's id. The paused clock stands still meanwhile: run as
-    /// a blocking task, the store write no longer looks idle, so the clock
-    /// cannot leap to the worker's next wake before the write lands.
+    /// Applies an outage change as the engine would, with the result that
+    /// confirmed it, and resolves with the opened outage's id. The paused
+    /// clock stands still meanwhile: run as a blocking task, the store write
+    /// no longer looks idle, so the clock cannot leap to the worker's next
+    /// wake before the write lands.
     async fn change(&self, change: OutageChange) -> Option<i64> {
+        // A recovery is `api`'s (see `common::up`). When the result started
+        // does not matter to alerting; now keeps it inside the store's
+        // tolerance for the future.
+        let (kind, check_id, health) = change
+            .open
+            .as_ref()
+            .map_or((SubjectKind::Check, "api".to_owned(), Health::Up), |open| {
+                (open.subject_kind, open.check_id.clone(), open.health)
+            });
+        let result = NewCheckResult {
+            node_id: "node-a".into(),
+            check_id,
+            started_at_ms: tocsin_store::now_ms(),
+            duration_ms: 1,
+            health,
+            detail: None,
+            error: None,
+            status_code: None,
+        };
         let history = Arc::clone(&self.history);
         let runtime = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || runtime.block_on(history.change_outage(change)))
-            .await
-            .unwrap()
-            .unwrap()
+        tokio::task::spawn_blocking(move || {
+            runtime.block_on(history.record(result, kind, Some(change)))
+        })
+        .await
+        .unwrap()
+        .unwrap()
     }
 }
 

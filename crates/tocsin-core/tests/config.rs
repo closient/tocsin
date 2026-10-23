@@ -1075,6 +1075,28 @@ fn pushover_priorities_run_from_minus_two_to_two() {
 }
 
 #[test]
+fn a_heartbeat_may_not_reuse_a_check_id() {
+    let diagnostic = only_error(&[
+        (
+            "checks.toml",
+            "[[check]]\nid = \"backup\"\ntype = \"icmp\"\ntarget = \"192.0.2.1\"\n",
+        ),
+        (
+            "heartbeats.toml",
+            "[[heartbeat]]\nid = \"backup\"\ninterval = \"1h\"\n",
+        ),
+    ]);
+    assert_eq!(
+        diagnostic.location().as_deref(),
+        Some("heartbeats.toml:2:6")
+    );
+    assert_eq!(
+        diagnostic.message,
+        "heartbeat id `backup` is already a check id, defined at checks.toml:2:6"
+    );
+}
+
+#[test]
 fn routes_repeat_every_four_hours_by_default() {
     let notifier = "[[notifier]]\nid = \"ops\"\ntype = \"slack\"\n[notifier.slack]\nwebhook_url = \"${ENV:SLACK_WEBHOOK_URL}\"\n\n";
     let route =
@@ -1158,5 +1180,43 @@ fn a_webhook_signing_secret_is_required_and_redacted() {
     assert!(
         !pasted.to_string().contains("PASTED-SIGNING-SECRET"),
         "{pasted}"
+    );
+}
+
+#[test]
+fn a_heartbeat_must_wait_well_inside_retention() {
+    let server = "[server]\nretention_days = 7\n";
+    // Exactly half the retention is allowed.
+    run(&[
+        ("server.toml", server),
+        (
+            "heartbeats.toml",
+            "[[heartbeat]]\nid = \"backup\"\ninterval = \"3d\"\ngrace = \"12h\"\n",
+        ),
+    ])
+    .expect("valid");
+    let diagnostic = only_error(&[
+        ("server.toml", server),
+        (
+            "heartbeats.toml",
+            "[[heartbeat]]\nid = \"backup\"\ninterval = \"3d\"\ngrace = \"12h1s\"\n",
+        ),
+    ]);
+    assert_eq!(
+        diagnostic.location().as_deref(),
+        Some("heartbeats.toml:3:12")
+    );
+    assert_eq!(
+        diagnostic.message,
+        "heartbeat `backup`: `interval` (3d) + `grace` (12h1s) must be at most half of `[server] retention_days = 7` (server.toml:2:18)"
+    );
+    // Unset, the default retention applies, and the message says so.
+    let diagnostic = only_error(&[(
+        "heartbeats.toml",
+        "[[heartbeat]]\nid = \"backup\"\ninterval = \"45d\"\n",
+    )]);
+    assert_eq!(
+        diagnostic.message,
+        "heartbeat `backup`: `interval` (45d) + `grace` (1m) must be at most half of the default `[server] retention_days = 90`"
     );
 }

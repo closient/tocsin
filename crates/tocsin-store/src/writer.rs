@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::checkpoint::Nudge;
 use crate::error::{Error, Result};
-use crate::{NewCheckResult, OutageChange};
+use crate::{NewCheckResult, OutageChange, SubjectKind};
 
 /// Queued writes beyond this make callers wait (backpressure).
 const QUEUE_DEPTH: usize = 1024;
@@ -26,7 +26,13 @@ const MAX_BATCH: usize = 256;
 
 /// A small row write. Consecutive queued inserts share one transaction.
 pub(crate) enum Insert {
-    CheckResult(NewCheckResult),
+    /// A result, and the outage change it confirms if any, kept or rejected
+    /// together.
+    Record {
+        result: NewCheckResult,
+        kind: SubjectKind,
+        change: Option<OutageChange>,
+    },
     ChangeOutage(OutageChange),
 }
 
@@ -34,7 +40,8 @@ pub(crate) enum Insert {
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 
 enum Command {
-    Insert(Insert, oneshot::Sender<Result<i64>>),
+    /// Boxed: a result with its outage change dwarfs a job.
+    Insert(Box<Insert>, oneshot::Sender<Result<i64>>),
     Run(Job),
 }
 
@@ -63,14 +70,14 @@ impl Writer {
         self.queued.load(Ordering::Relaxed)
     }
 
-    /// Queues an insert; resolves with the new row id (for a
-    /// `ChangeOutage` that only ends one, the ended outage's) once its
-    /// transaction has committed.
+    /// Queues an insert; resolves once its transaction has committed with
+    /// the outage it opened, or else the outage it ended, or else (a
+    /// `Record` with no change) the result's row id.
     pub(crate) async fn insert(&self, insert: Insert) -> Result<i64> {
         let (reply, receive) = oneshot::channel();
         self.queued.fetch_add(1, Ordering::Relaxed);
         self.sender
-            .send(Command::Insert(insert, reply))
+            .send(Command::Insert(Box::new(insert), reply))
             .await
             .map_err(|_| Error::Closed)?;
         receive.await.map_err(|_| Error::Closed)?
@@ -132,10 +139,10 @@ fn run(mut session: Session, mut receiver: mpsc::Receiver<Command>) {
         match command {
             Command::Run(job) => job(conn),
             Command::Insert(insert, reply) => {
-                let mut batch = vec![(insert, reply)];
+                let mut batch = vec![(*insert, reply)];
                 while batch.len() < MAX_BATCH {
                     match receiver.try_recv() {
-                        Ok(Command::Insert(insert, reply)) => batch.push((insert, reply)),
+                        Ok(Command::Insert(insert, reply)) => batch.push((*insert, reply)),
                         Ok(other) => {
                             next = Some(other);
                             break;
@@ -226,29 +233,46 @@ fn commit_inserts(
 
 fn apply(conn: &Connection, insert: &Insert) -> rusqlite::Result<i64> {
     match insert {
-        Insert::CheckResult(result) => {
-            let detail = result.detail.as_ref().map(ToString::to_string);
-            conn.prepare_cached(
-                "INSERT INTO check_result
-                     (node_id, check_id, started_at, duration_ms, health, detail, error, status_code)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            )?
-            .execute(params![
-                result.node_id,
-                result.check_id,
-                result.started_at_ms,
-                result.duration_ms,
-                result.health.as_str(),
-                detail,
-                result.error,
-                result.status_code,
-            ])?;
-            Ok(conn.last_insert_rowid())
-        }
         // Both halves run under the insert's savepoint: either fails and
         // neither is kept.
+        Insert::Record {
+            result,
+            kind,
+            change,
+        } => {
+            let id = insert_result(conn, result, *kind)?;
+            match change {
+                Some(change) => apply_outage_change(conn, change),
+                None => Ok(id),
+            }
+        }
         Insert::ChangeOutage(change) => apply_outage_change(conn, change),
     }
+}
+
+pub(crate) fn insert_result(
+    conn: &Connection,
+    result: &NewCheckResult,
+    kind: SubjectKind,
+) -> rusqlite::Result<i64> {
+    let detail = result.detail.as_ref().map(ToString::to_string);
+    conn.prepare_cached(
+        "INSERT INTO check_result
+             (node_id, check_id, started_at, duration_ms, health, detail, error, status_code, kind)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+    )?
+    .execute(params![
+        result.node_id,
+        result.check_id,
+        result.started_at_ms,
+        result.duration_ms,
+        result.health.as_str(),
+        detail,
+        result.error,
+        result.status_code,
+        kind.as_str(),
+    ])?;
+    Ok(conn.last_insert_rowid())
 }
 
 /// Ends and opens outages as `change` says, inside whatever transaction or

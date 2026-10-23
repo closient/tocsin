@@ -32,7 +32,7 @@ pub use notifier::{
     NtfySettings, PushoverSettings, SlackSettings, TelegramSettings, WebhookSettings,
 };
 pub use values::{
-    DURATION_PATTERN, Duration, ID_PATTERN, Id, SECRET_PATTERN, Secret, email_address,
+    DURATION_PATTERN, Duration, ID_PATTERN, Id, SECRET_PATTERN, Secret, Text, email_address,
     is_unanswerable,
 };
 

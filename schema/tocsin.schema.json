@@ -621,11 +621,15 @@
       "description": "`[check.http]`.",
       "properties": {
         "body": {
-          "description": "Request body.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Text"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Request body. It may be a secret, `${ENV:NAME}`."
         },
         "follow_redirects": {
           "default": false,
@@ -634,9 +638,9 @@
         },
         "headers": {
           "additionalProperties": {
-            "type": "string"
+            "$ref": "#/definitions/Text"
           },
-          "description": "Request headers.",
+          "description": "Request headers. A value may be a secret, `${ENV:NAME}`.",
           "type": "object"
         },
         "method": {
@@ -1268,6 +1272,10 @@
         "chat_id"
       ],
       "type": "object"
+    },
+    "Text": {
+      "description": "A string, or a secret read from an environment variable: \"${ENV:NAME}\".",
+      "type": "string"
     },
     "TextAssertion": {
       "additionalProperties": false,

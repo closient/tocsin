@@ -16,6 +16,13 @@ fn tocsin(args: &[&str]) -> Output {
         .expect("tocsin runs")
 }
 
+/// A configuration folder holding the smallest valid file.
+fn config_folder() -> tempfile::TempDir {
+    let config = tempfile::tempdir().unwrap();
+    std::fs::write(config.path().join("server.toml"), "[server]\n").unwrap();
+    config
+}
+
 /// Stdout must be exactly one JSON document.
 fn json_stdout(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("stdout is a single JSON document")
@@ -131,7 +138,7 @@ fn wait_ready(server: &mut Server) -> std::io::Lines<BufReader<ChildStderr>> {
 }
 
 fn stops_cleanly_on(signal: &str, name: &str) {
-    let config = tempfile::tempdir().unwrap();
+    let config = config_folder();
     let parent = tempfile::tempdir().unwrap();
     let data = parent.path().join("data");
     let mut server = Server::start(config.path(), &data);
@@ -171,7 +178,7 @@ fn serve_stops_cleanly_on_sigint() {
 /// A monitor must not die because whatever reads its logs went away.
 #[test]
 fn serve_survives_a_closed_log_pipe() {
-    let config = tempfile::tempdir().unwrap();
+    let config = config_folder();
     let data = tempfile::tempdir().unwrap();
     let mut server = Server::start(config.path(), data.path());
     drop(wait_ready(&mut server));
@@ -182,7 +189,7 @@ fn serve_survives_a_closed_log_pipe() {
 /// Nor because whatever reads its result went away: the exit code still holds.
 #[test]
 fn serve_survives_a_closed_result_pipe() {
-    let config = tempfile::tempdir().unwrap();
+    let config = config_folder();
     let data = tempfile::tempdir().unwrap();
     let mut server = Server::start(config.path(), data.path());
     let lines = wait_ready(&mut server);
@@ -195,7 +202,7 @@ fn serve_survives_a_closed_result_pipe() {
 
 #[test]
 fn serve_rejects_a_dangling_symlink_as_data_folder() {
-    let config = tempfile::tempdir().unwrap();
+    let config = config_folder();
     let parent = tempfile::tempdir().unwrap();
     let link = parent.path().join("data");
     std::os::unix::fs::symlink(parent.path().join("missing"), &link).unwrap();
@@ -208,7 +215,52 @@ fn serve_rejects_a_dangling_symlink_as_data_folder() {
         link.to_str().unwrap(),
     ]);
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(json_stdout(&output)["error"]["kind"], "invalid_input");
+    let error = &json_stdout(&output)["error"];
+    assert_eq!(error["kind"], "invalid_input");
+    let expected = format!("data folder {} is not a directory", link.display());
+    assert_eq!(error["message"], expected.as_str());
+}
+
+#[test]
+fn serve_reads_etc_tocsin_by_default() {
+    let output = tocsin(&["serve", "--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("[default: /etc/tocsin]"), "{help}");
+}
+
+#[test]
+fn an_empty_config_folder_is_invalid_input() {
+    let config = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let folder = config.path().to_str().unwrap();
+    let commands: [&[&str]; 2] = [
+        &["--json", "config", "check", "--config", folder],
+        &[
+            "--json",
+            "serve",
+            "--config",
+            folder,
+            "--data",
+            data.path().to_str().unwrap(),
+        ],
+    ];
+    for command in commands {
+        let output = tocsin(command);
+        assert_eq!(output.status.code(), Some(2), "{command:?}");
+        let error = &json_stdout(&output)["error"];
+        assert_eq!(error["kind"], "invalid_input");
+        assert_eq!(
+            error["errors"][0]["message"],
+            "the folder holds no `*.toml` files"
+        );
+        assert!(
+            error["errors"][0]["hint"]
+                .as_str()
+                .unwrap()
+                .contains("server.toml")
+        );
+    }
 }
 
 #[test]
@@ -260,7 +312,7 @@ fn serve_refuses_an_invalid_configuration() {
 
 #[test]
 fn serve_needs_a_data_folder_from_the_flag_or_the_configuration() {
-    let config = tempfile::tempdir().unwrap();
+    let config = config_folder();
     let output = tocsin(&[
         "--json",
         "serve",

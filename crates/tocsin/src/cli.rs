@@ -29,7 +29,7 @@ pub enum Command {
     /// Run the monitor until SIGINT or SIGTERM.
     Serve {
         /// Folder of `*.toml` configuration files.
-        #[arg(long, value_name = "DIR")]
+        #[arg(long, value_name = "DIR", default_value = DEFAULT_CONFIG)]
         config: PathBuf,
 
         /// Folder for the SQLite database; created if missing. Defaults to

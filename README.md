@@ -14,10 +14,11 @@ tocsin is early: the workspace and CLI skeleton exist, and the monitor is being 
 ```sh
 cargo build --release
 mkdir -p config
+printf '[server]\n' > config/server.toml
 ./target/release/tocsin serve --config config --data data
 ```
 
-`tocsin --version --json` prints `{"version": "..."}`. Stop the server with Ctrl-C or SIGTERM.
+`--config` defaults to `/etc/tocsin`, and the folder needs at least one `*.toml` file. [docs/config.md](docs/config.md) describes every table, and [examples/config/](examples/config/) is a fuller example. `tocsin --version --json` prints `{"version": "..."}`. Stop the server with Ctrl-C or SIGTERM.
 
 ## License
 

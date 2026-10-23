@@ -52,11 +52,13 @@ CI (`.github/workflows/ci.yml`) runs exactly these on linux x86_64 and aarch64, 
 
 ```sh
 tocsin --version --json
-tocsin config check --config <dir> --json  # validate; every error with file, line, column, path, hint
-tocsin config show --config <dir> --json   # the merged configuration, secrets redacted
-tocsin config schema                       # JSON Schema for one config file
-tocsin serve --config <dir> [--data <dir>] # until SIGINT/SIGTERM; --data defaults to [server] data_dir
+tocsin config check [--config <dir>] --json  # validate; every error with file, line, column, path, hint
+tocsin config show [--config <dir>] --json   # the merged configuration, secrets redacted
+tocsin config schema                         # JSON Schema for one config file
+tocsin serve [--config <dir>] [--data <dir>] # until SIGINT/SIGTERM; --data defaults to [server] data_dir
 ```
+
+`--config` defaults to `/etc/tocsin`; a folder with no `*.toml` file is an error (exit 2).
 
 The configuration format is documented in [`docs/config.md`](docs/config.md); [`examples/config/`](examples/config/) is a working example. After changing a config type, regenerate the committed schema with `cargo run -- config schema > schema/tocsin.schema.json` (a test fails until you do).
 

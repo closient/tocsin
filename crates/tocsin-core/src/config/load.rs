@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
+use std::net::IpAddr;
 use std::ops::Range;
 
 use serde::de::DeserializeOwned;
@@ -19,7 +20,7 @@ use super::assertion::{Condition, parse_json_path};
 use super::check::CheckType;
 use super::diagnostic::{Diagnostic, LineIndex};
 use super::notifier::NotifierType;
-use super::values::{Id, Secret, email_address, is_unanswerable};
+use super::values::{Id, Secret, Text, email_address, is_unanswerable};
 use super::{
     Check, Component, Config, Group, Heartbeat, Link, Notifier, Page, Project, Route, Server, Token,
 };
@@ -29,8 +30,9 @@ use super::{
 pub struct Source {
     /// How diagnostics name the file, such as `config/checks.toml`.
     pub name: String,
-    /// The file's text.
-    pub text: String,
+    /// The file's text, or why it could not be read, such as "the file is
+    /// not UTF-8 text".
+    pub text: Result<String, String>,
 }
 
 /// What loading needs from the machine it runs on, passed in so this crate
@@ -184,29 +186,46 @@ struct Loader<'a> {
     ids: HashMap<&'static str, BTreeMap<String, Origin>>,
     /// Where each singleton table was first defined.
     singletons: HashMap<&'static str, Origin>,
+    /// Every item that deserialized, of every kind.
+    deserialized: Vec<Origin>,
+    /// Whether a file could not be read or parsed, so ids it defines are
+    /// unknown and references to them cannot be judged.
+    incomplete: bool,
 }
 
 impl<'a> Loader<'a> {
     fn parse(&mut self, source: usize, file: &'a Source) {
-        let (root, errors) = DeTable::parse_recoverable(&file.text);
-        let lines = LineIndex::new(&file.text);
+        let text = match &file.text {
+            Ok(text) => text,
+            Err(reason) => {
+                self.incomplete = true;
+                self.diagnostics.push((
+                    Some(source),
+                    Diagnostic::in_file(file.name.clone(), reason.clone()),
+                ));
+                return;
+            }
+        };
+        let (root, errors) = DeTable::parse_recoverable(text);
+        let lines = LineIndex::new(text);
         if errors.is_empty() {
             self.files.push(ParsedFile {
                 source,
                 name: &file.name,
-                text: &file.text,
+                text,
                 root: root.into_inner(),
                 lines,
             });
             return;
         }
+        // The partial table is not trusted: an id on or after the broken
+        // line may be missing from it.
+        self.incomplete = true;
         // Recovery reports cascades of errors from one mistake; the first on
         // each line is the one worth reading.
         let mut lines_seen = HashSet::new();
         for error in errors {
-            let position = error
-                .span()
-                .map(|span| lines.locate(&file.text, span.start));
+            let position = error.span().map(|span| lines.locate(text, span.start));
             if position.is_some_and(|(line, _)| !lines_seen.insert(line)) {
                 continue;
             }
@@ -364,7 +383,9 @@ impl<'a> Loader<'a> {
             );
             return existing;
         }
-        self.deserialize(origin, &value).map(|value| Item {
+        let value = self.deserialize(origin, &value)?;
+        self.deserialized.push(origin.clone());
+        Some(Item {
             origin: origin.clone(),
             value,
         })
@@ -394,6 +415,7 @@ impl<'a> Loader<'a> {
                 self.register_id(kind, id, origin.key("id"));
             }
             if let Some(value) = self.deserialize(&origin, element) {
+                self.deserialized.push(origin.clone());
                 items.push(Item { origin, value });
             }
         }
@@ -458,6 +480,11 @@ impl<'a> Loader<'a> {
     // ---- references -----------------------------------------------------
 
     fn check_references(&mut self, items: &Items) {
+        // An id may sit in a file that could not be read; reporting every
+        // reference to it as unknown would bury the real error.
+        if self.incomplete {
+            return;
+        }
         let mut references: Vec<(&'static str, &Id, Origin)> = Vec::new();
         for component in &items.components {
             if let Some(group) = &component.value.group {
@@ -621,6 +648,12 @@ impl<'a> Loader<'a> {
             .as_ref()
             .and_then(|server| server.value.email.as_ref().map(|email| (server, email)));
         let Some((server, email)) = email else {
+            // `[server]` that failed to deserialize, or a file that could
+            // not be read, may hold `[server.email]`; its error is reported.
+            if items.server.is_none() && (self.singletons.contains_key("server") || self.incomplete)
+            {
+                return;
+            }
             self.report(
                 &first.origin.key("type"),
                 format!("notifier `{id}` sends email, but no file sets `[server.email]`"),
@@ -698,6 +731,7 @@ impl<'a> Loader<'a> {
                 );
             }
         }
+        self.validate_settings(&origin, value);
         // Settings tables are optional; fill in their defaults.
         match check_type {
             CheckType::Http => {
@@ -729,6 +763,31 @@ impl<'a> Loader<'a> {
                     Some("split them into separate `[[check.assert]]` tables".to_owned()),
                 ),
             }
+        }
+    }
+
+    /// `[check.dns] resolver` and `[check.tls] server_name`, which are
+    /// written as plain strings.
+    fn validate_settings(&mut self, origin: &Origin, value: &Check) {
+        if let Some(resolver) = value.dns.as_ref().and_then(|dns| dns.resolver.as_ref())
+            && host_and_port(resolver).is_none_or(|(host, _)| host.parse::<IpAddr>().is_err())
+        {
+            self.report(
+                &origin.keys(&["dns", "resolver"]),
+                format!("`{resolver}` is not an IP address or ip:port"),
+                Some(
+                    "such as \"1.1.1.1\", \"192.0.2.53:5353\" or \"[2001:db8::53]:53\"".to_owned(),
+                ),
+            );
+        }
+        if let Some(name) = value.tls.as_ref().and_then(|tls| tls.server_name.as_ref())
+            && !is_host(name)
+        {
+            self.report(
+                &origin.keys(&["tls", "server_name"]),
+                format!("`{name}` is not a hostname"),
+                None,
+            );
         }
     }
 
@@ -892,6 +951,19 @@ impl<'a> Loader<'a> {
                 secrets.push((notifier.origin.keys(&path), secret));
             }
         }
+        for check in &mut items.checks {
+            let Some(http) = &mut check.value.http else {
+                continue;
+            };
+            for (name, header) in &mut http.headers {
+                if let Text::Secret(secret) = header {
+                    secrets.push((check.origin.keys(&["http", "headers", name]), secret));
+                }
+            }
+            if let Some(Text::Secret(secret)) = &mut http.body {
+                secrets.push((check.origin.keys(&["http", "body"]), secret));
+            }
+        }
         for token in &mut items.tokens {
             secrets.push((token.origin.key("secret"), &mut token.value.secret));
         }
@@ -913,18 +985,12 @@ impl<'a> Loader<'a> {
             secret_fields.insert(origin);
         }
 
-        let mut origins: Vec<Origin> = Vec::new();
-        origins.extend(items.server.iter().map(|item| item.origin.clone()));
-        origins.extend(items.page.iter().map(|item| item.origin.clone()));
-        origins.extend(items.groups.iter().map(|item| item.origin.clone()));
-        origins.extend(items.components.iter().map(|item| item.origin.clone()));
-        origins.extend(items.checks.iter().map(|item| item.origin.clone()));
-        origins.extend(items.heartbeats.iter().map(|item| item.origin.clone()));
-        origins.extend(items.projects.iter().map(|item| item.origin.clone()));
-        origins.extend(items.notifiers.iter().map(|item| item.origin.clone()));
-        origins.extend(items.routes.iter().map(|item| item.origin.clone()));
-        origins.extend(items.tokens.iter().map(|item| item.origin.clone()));
-        for origin in origins {
+        self.validate_smtp_url(items);
+        self.reject_shared_token_secrets(items);
+
+        // Items that failed to deserialize are skipped: their secret fields
+        // are unknown, and their error is already reported.
+        for origin in self.deserialized.clone() {
             let Some(value) = self.raw(&origin).cloned() else {
                 continue;
             };
@@ -942,6 +1008,64 @@ impl<'a> Loader<'a> {
                     );
                 }
             }
+        }
+    }
+
+    /// The resolved `smtp_url` must be an SMTP URL. It is a secret, so the
+    /// message never repeats it.
+    fn validate_smtp_url(&mut self, items: &Items) {
+        let Some(server) = &items.server else { return };
+        let Some(smtp) = server
+            .value
+            .email
+            .as_ref()
+            .and_then(|email| email.smtp_url.as_ref())
+        else {
+            return;
+        };
+        let Some(url) = smtp.resolved() else { return };
+        let scheme = url.split_once("://").map(|(scheme, _)| scheme);
+        if !matches!(scheme, Some("smtp" | "smtps")) {
+            self.report(
+                &server.origin.keys(&["email", "smtp_url"]),
+                format!(
+                    "the value of `{}` is not an smtp:// or smtps:// URL",
+                    smtp.variable()
+                ),
+                Some("such as smtps://user:password@mail.example.com:465".to_owned()),
+            );
+        }
+    }
+
+    /// Each token needs its own secret, or a request cannot be traced to
+    /// one token and revoking one revokes both. The message names the
+    /// tokens, never the value.
+    fn reject_shared_token_secrets(&mut self, items: &Items) {
+        let mut seen: HashMap<&str, &Item<Token>> = HashMap::new();
+        let mut shared = Vec::new();
+        for token in &items.tokens {
+            let Some(value) = token.value.secret.resolved() else {
+                continue;
+            };
+            match seen.get(value) {
+                Some(first) => shared.push((*first, token)),
+                None => {
+                    seen.insert(value, token);
+                }
+            }
+        }
+        for (first, token) in shared {
+            let message = format!(
+                "token `{}` has the same secret as token `{}` at {}",
+                token.value.id,
+                first.value.id,
+                self.describe(&first.origin.key("secret"))
+            );
+            self.report(
+                &token.origin.key("secret"),
+                message,
+                Some("give each token its own secret".to_owned()),
+            );
         }
     }
 
@@ -1165,8 +1289,96 @@ fn target_example(check_type: CheckType) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{closest, edit_distance, host_and_port, http_url, target};
-    use crate::config::CheckType;
+    use std::collections::BTreeSet;
+
+    use super::{
+        Environment, Source, TOP_LEVEL_KEYS, closest, edit_distance, host_and_port, http_url, load,
+        target,
+    };
+    use crate::config::{CheckType, schema};
+
+    /// The kinds are listed by hand in `TOP_LEVEL_KEYS`, `Items`,
+    /// `Loader::collect`, `Loader::into_result`, `ConfigFile` (the schema)
+    /// and `Config`, as each kind is its own type. Leaving a kind out of
+    /// any of them fails here.
+    #[test]
+    fn every_top_level_kind_is_published_collected_and_returned() {
+        let samples = [
+            ("server", "[server]\nnode_id = \"sample\"\n"),
+            ("page", "[page]\ntitle = \"Sample\"\n"),
+            ("group", "[[group]]\nid = \"sample\"\nname = \"Sample\"\n"),
+            (
+                "component",
+                "[[component]]\nid = \"sample\"\nname = \"Sample\"\n",
+            ),
+            (
+                "check",
+                "[[check]]\nid = \"sample\"\ntype = \"icmp\"\ntarget = \"192.0.2.1\"\n",
+            ),
+            (
+                "heartbeat",
+                "[[heartbeat]]\nid = \"sample\"\ninterval = \"1m\"\n",
+            ),
+            (
+                "project",
+                "[[project]]\nid = \"sample\"\nname = \"Sample\"\n",
+            ),
+            (
+                "notifier",
+                "[[notifier]]\nid = \"sample\"\ntype = \"ntfy\"\n[notifier.ntfy]\nurl = \"https://ntfy.sh/sample\"\n",
+            ),
+            (
+                "route",
+                "[[route]]\nid = \"sample\"\nnotifiers = [\"sample\"]\n",
+            ),
+            (
+                "token",
+                "[[token]]\nid = \"sample\"\nsecret = \"${ENV:SAMPLE}\"\nscopes = [\"release\"]\n",
+            ),
+        ];
+        let kinds: BTreeSet<&str> = TOP_LEVEL_KEYS.iter().copied().collect();
+        let covered: BTreeSet<&str> = samples.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(covered, kinds, "every kind needs a sample here");
+
+        let expected: BTreeSet<String> = kinds.iter().map(|kind| (*kind).to_owned()).collect();
+        let published: BTreeSet<String> = schema()["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(published, expected, "ConfigFile");
+
+        let variable = |_: &str| Some("sample-secret".to_owned());
+        let environment = Environment {
+            hostname: "host".to_owned(),
+            variable: &variable,
+        };
+        let render = |texts: &[&str]| {
+            let sources: Vec<Source> = texts
+                .iter()
+                .map(|text| Source {
+                    name: "sample.toml".to_owned(),
+                    text: Ok((*text).to_owned()),
+                })
+                .collect();
+            serde_json::to_value(load(&sources, &environment).expect("sample is valid")).unwrap()
+        };
+        let empty = render(&[]);
+        let returned: BTreeSet<String> = empty.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(returned, expected, "Config");
+
+        let notifier = samples[7].1;
+        for (kind, text) in samples {
+            // A route needs the notifier it names.
+            let texts: &[&str] = if kind == "route" {
+                &[text, notifier]
+            } else {
+                &[text]
+            };
+            assert_ne!(render(texts)[kind], empty[kind], "{kind} was not collected");
+        }
+    }
 
     #[test]
     fn edit_distances() {

@@ -16,6 +16,11 @@ fn variable(name: &str) -> Option<String> {
         }
         "SMTP_URL" => Some("smtp://user:hunter2@mail.example.com:587".to_owned()),
         "EMPTY" => Some(String::new()),
+        "API_AUTHORIZATION" => Some("Bearer HEADER-SECRET".to_owned()),
+        "API_BODY" => Some("{\"key\":\"BODY-SECRET\"}".to_owned()),
+        "TOKEN_A" | "TOKEN_B" => Some("SHARED-TOKEN-SECRET".to_owned()),
+        "TOKEN_C" => Some("another-token-secret".to_owned()),
+        "HTTPS_URL" => Some("https://user:HTTPS-SECRET@mail.example.com".to_owned()),
         _ => None,
     }
 }
@@ -25,14 +30,18 @@ fn run(files: &[(&str, &str)]) -> Result<Config, Vec<Diagnostic>> {
         .iter()
         .map(|(name, text)| Source {
             name: (*name).to_owned(),
-            text: (*text).to_owned(),
+            text: Ok((*text).to_owned()),
         })
         .collect();
+    run_sources(&sources)
+}
+
+fn run_sources(sources: &[Source]) -> Result<Config, Vec<Diagnostic>> {
     let environment = Environment {
         hostname: HOSTNAME.to_owned(),
         variable: &variable,
     };
-    load(&sources, &environment)
+    load(sources, &environment)
 }
 
 /// The errors as `file:line:column: message`, without hints.
@@ -252,6 +261,8 @@ fn a_noreply_sender_is_rejected() {
         ("Alerts <no-reply@example.com>", 8),
         ("do-not-reply@example.com", 8),
         ("No.Reply+alerts@example.com", 8),
+        ("no-reply-status@example.com", 8),
+        ("Alerts <alerts-noreply@example.com>", 8),
     ] {
         let text = format!(
             "[server.email]\nfrom = \"{address}\"\nreply_to = \"support@example.com\"\nsmtp_url = \"${{ENV:SMTP_URL}}\"\n"
@@ -379,6 +390,184 @@ fn server_and_page_live_in_one_file() {
         ]),
         ["b.toml:2:1: `[page]` is already defined at a.toml:1:1"]
     );
+}
+
+#[test]
+fn ids_in_a_file_that_failed_to_parse_are_not_reported_unknown() {
+    let components =
+        "[[component]]\nid = \"web\"\nname = \"Web\"\n\n[[component]]\nid = = \"db\"\n";
+    let checks = "[[check]]\nid = \"web\"\ntype = \"tcp\"\ntarget = \"web\"\ncomponent = \"db\"\n";
+    assert_eq!(
+        errors(&[("components.toml", components), ("checks.toml", checks)]),
+        [
+            "components.toml:6:6: TOML syntax error: extra `=`, expected nothing",
+            "checks.toml:4:10: `web` is not a valid tcp target",
+        ]
+    );
+}
+
+#[test]
+fn an_unreadable_file_is_reported_and_its_ids_are_not_reported_unknown() {
+    let sources = [
+        Source {
+            name: "components.toml".to_owned(),
+            text: Err("the file is not UTF-8 text".to_owned()),
+        },
+        Source {
+            name: "checks.toml".to_owned(),
+            text: Ok("[[check]]\nid = \"web\"\ntype = \"tcp\"\ntarget = \"web:80\"\ncomponent = \"web\"\n".to_owned()),
+        },
+    ];
+    let diagnostics = run_sources(&sources).expect_err("invalid");
+    let shown: Vec<String> = diagnostics.iter().map(ToString::to_string).collect();
+    assert_eq!(shown, ["components.toml: the file is not UTF-8 text"]);
+}
+
+#[test]
+fn a_server_table_that_fails_does_not_also_claim_server_email_is_missing() {
+    let server =
+        "[server]\nlisten = \"nonsense\"\n\n[server.email]\nfrom = \"status@example.com\"\n";
+    let notifier = "[[notifier]]\nid = \"mail\"\ntype = \"email\"\n[notifier.email]\nto = [\"ops@example.com\"]\n";
+    let diagnostic = only_error(&[("server.toml", server), ("notify.toml", notifier)]);
+    assert_eq!(diagnostic.location().as_deref(), Some("server.toml:2:10"));
+}
+
+#[test]
+fn http_headers_and_body_can_be_secrets() {
+    let text = r#"
+[[check]]
+id = "api"
+type = "http"
+target = "https://api.example.com/health"
+[check.http]
+method = "POST"
+headers = { Authorization = "${ENV:API_AUTHORIZATION}", Accept = "application/json" }
+body = "${ENV:API_BODY}"
+"#;
+    let config = run(&[("checks.toml", text)]).expect("valid");
+    let http = config.checks[0].http.as_ref().unwrap();
+    assert_eq!(
+        http.headers["Authorization"].expose(),
+        "Bearer HEADER-SECRET"
+    );
+    assert_eq!(http.headers["Accept"].expose(), "application/json");
+    assert_eq!(
+        http.body.as_ref().unwrap().expose(),
+        "{\"key\":\"BODY-SECRET\"}"
+    );
+    let shown = serde_json::to_string(&config).unwrap();
+    assert!(
+        !shown.contains("HEADER-SECRET") && !shown.contains("BODY-SECRET"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("<redacted from ${ENV:API_AUTHORIZATION}>"),
+        "{shown}"
+    );
+    assert!(shown.contains("\"Accept\":\"application/json\""), "{shown}");
+    let debugged = format!("{config:?}");
+    assert!(!debugged.contains("HEADER-SECRET") && !debugged.contains("BODY-SECRET"));
+
+    let broken = r#"
+[[check]]
+id = "api"
+type = "http"
+target = "https://api.example.com/health"
+[check.http]
+headers = { Authorization = "${ENV:MISSING_AUTHORIZATION}", X-Key = "Bearer ${ENV:API_AUTHORIZATION}" }
+"#;
+    let diagnostics = run(&[("checks.toml", broken)]).expect_err("invalid");
+    let shown: Vec<String> = diagnostics.iter().map(ToString::to_string).collect();
+    // The malformed reference fails the whole check, so the missing
+    // variable beside it is only reported once that is fixed.
+    assert_eq!(diagnostics.len(), 1, "{shown:#?}");
+    assert_eq!(
+        diagnostics[0].location().as_deref(),
+        Some("checks.toml:7:69")
+    );
+    assert!(
+        diagnostics[0]
+            .message
+            .starts_with("a secret must be an environment reference"),
+        "{shown:#?}"
+    );
+    assert!(!diagnostics[0].message.contains("Bearer"), "{shown:#?}");
+    let fixed = broken.replace("Bearer ${ENV:API_AUTHORIZATION}", "plain");
+    let diagnostic = only_error(&[("checks.toml", &fixed)]);
+    assert_eq!(
+        diagnostic.path.as_deref(),
+        Some("check[0].http.headers.Authorization")
+    );
+    assert_eq!(
+        diagnostic.message,
+        "environment variable `MISSING_AUTHORIZATION` is not set"
+    );
+}
+
+#[test]
+fn tokens_need_their_own_secrets() {
+    let text = r#"
+[[token]]
+id = "ci"
+secret = "${ENV:TOKEN_A}"
+scopes = ["release"]
+
+[[token]]
+id = "cron"
+secret = "${ENV:TOKEN_C}"
+scopes = ["heartbeat"]
+
+[[token]]
+id = "deploy"
+secret = "${ENV:TOKEN_B}"
+scopes = ["release"]
+"#;
+    let diagnostic = only_error(&[("tokens.toml", text)]);
+    assert_eq!(diagnostic.location().as_deref(), Some("tokens.toml:14:10"));
+    assert_eq!(
+        diagnostic.message,
+        "token `deploy` has the same secret as token `ci` at tokens.toml:4:10"
+    );
+    assert!(!diagnostic.to_string().contains("SHARED-TOKEN-SECRET"));
+}
+
+#[test]
+fn resolvers_server_names_and_smtp_urls_are_checked() {
+    let checks = r#"
+[[check]]
+id = "dns"
+type = "dns"
+target = "example.com"
+[check.dns]
+resolver = "dns.google"
+
+[[check]]
+id = "dns-port"
+type = "dns"
+target = "example.com"
+[check.dns]
+resolver = "[2001:db8::53]:53"
+
+[[check]]
+id = "tls"
+type = "tls"
+target = "192.0.2.1:443"
+[check.tls]
+server_name = "example com"
+"#;
+    let server = "[server.email]\nfrom = \"status@example.com\"\nreply_to = \"support@example.com\"\nsmtp_url = \"${ENV:HTTPS_URL}\"\n";
+    let diagnostics =
+        run(&[("checks.toml", checks), ("server.toml", server)]).expect_err("invalid");
+    let shown: Vec<String> = diagnostics.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        shown,
+        [
+            "checks.toml:7:12: `dns.google` is not an IP address or ip:port (check[0].dns.resolver)\n  hint: such as \"1.1.1.1\", \"192.0.2.53:5353\" or \"[2001:db8::53]:53\"",
+            "checks.toml:21:15: `example com` is not a hostname (check[2].tls.server_name)",
+            "server.toml:4:12: the value of `HTTPS_URL` is not an smtp:// or smtps:// URL (server.email.smtp_url)\n  hint: such as smtps://user:password@mail.example.com:465",
+        ]
+    );
+    assert!(!shown.concat().contains("HTTPS-SECRET"));
 }
 
 #[test]

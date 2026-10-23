@@ -255,6 +255,11 @@ impl Secret {
         self.value = Some(value);
     }
 
+    /// The value, once resolved.
+    pub(crate) fn resolved(&self) -> Option<&str> {
+        self.value.as_deref()
+    }
+
     /// What serialized output and `Display` show in place of the value.
     fn redacted(&self) -> String {
         format!("<redacted from ${{ENV:{}}}>", self.variable)
@@ -308,6 +313,71 @@ impl JsonSchema for Secret {
     }
 }
 
+/// A string written either as itself or, when it is sensitive, as an
+/// `${ENV:NAME}` reference to a [`Secret`].
+///
+/// A string containing `${ENV:` must be exactly one reference: the
+/// variable holds the whole value, so `"Bearer ${ENV:TOKEN}"` is rejected
+/// and `TOKEN` holds `Bearer ...` instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Text {
+    /// Written in the file; shown as is.
+    Literal(String),
+    /// Read from the environment; redacted wherever it is shown.
+    Secret(Secret),
+}
+
+impl Text {
+    /// The value: the literal, or the secret's.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a secret was not resolved, which cannot happen inside a
+    /// [`Config`](super::Config) returned by [`load`](super::load).
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        match self {
+            Text::Literal(text) => text,
+            Text::Secret(secret) => secret.expose(),
+        }
+    }
+}
+
+impl Serialize for Text {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Text::Literal(text) => serializer.serialize_str(text),
+            Text::Secret(secret) => secret.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Text {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        if text.contains("${ENV:") {
+            Secret::parse(&text)
+                .map(Text::Secret)
+                .map_err(serde::de::Error::custom)
+        } else {
+            Ok(Text::Literal(text))
+        }
+    }
+}
+
+impl JsonSchema for Text {
+    fn schema_name() -> Cow<'static, str> {
+        "Text".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "description": "A string, or a secret read from an environment variable: \"${ENV:NAME}\"."
+        })
+    }
+}
+
 /// Splits `"Name <address>"` or a bare address into the address, or says
 /// why it is not one.
 ///
@@ -334,9 +404,10 @@ pub fn email_address(text: &str) -> Result<&str, String> {
     }
 }
 
-/// Whether an address is one nobody reads: a `noreply`, `no-reply` or
-/// `donotreply` local part, ignoring case, `+tags` and `-`, `_`, `.`
-/// separators.
+/// Whether an address is one nobody reads: a local part containing
+/// `noreply` or `donotreply` once case, `+tags` and the `-`, `_`, `.`
+/// separators are ignored, so `no-reply-status@` and `alerts-noreply@`
+/// count too.
 #[must_use]
 pub fn is_unanswerable(address: &str) -> bool {
     let local = address.split('@').next().unwrap_or_default();
@@ -346,7 +417,7 @@ pub fn is_unanswerable(address: &str) -> bool {
         .filter(|character| !matches!(character, '-' | '_' | '.'))
         .flat_map(char::to_lowercase)
         .collect();
-    matches!(normalized.as_str(), "noreply" | "donotreply")
+    normalized.contains("noreply") || normalized.contains("donotreply")
 }
 
 #[cfg(test)]
@@ -437,6 +508,9 @@ mod tests {
             "donotreply@example.com",
             "do-not-reply@example.com",
             "noreply+alerts@example.com",
+            "no-reply-status@example.com",
+            "alerts-noreply@example.com",
+            "Alerts.Do.Not.Reply@example.com",
         ] {
             assert!(is_unanswerable(bad), "{bad}");
         }
@@ -444,6 +518,8 @@ mod tests {
             "support@example.com",
             "reply@example.com",
             "norepl@example.com",
+            "reply-now@example.com",
+            "support@noreply.example.com",
         ] {
             assert!(!is_unanswerable(good), "{good}");
         }

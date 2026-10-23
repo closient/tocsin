@@ -9,7 +9,7 @@ tocsin config show --config /etc/tocsin --json     # the merged result, secrets 
 tocsin config schema > tocsin.schema.json          # the JSON Schema for one file
 ```
 
-`--config` defaults to `/etc/tocsin`. `tocsin serve` loads the same folder and refuses to start (exit 2) if it does not validate.
+`--config` defaults to `/etc/tocsin` for every command, `tocsin serve` included. `tocsin serve` loads the same folder and refuses to start (exit 2) if it does not validate. A folder with no `*.toml` file is an error (exit 2), not an empty configuration.
 
 Hidden files and folders (names starting with `.`) are skipped. A symlinked file is read; a symlinked folder is not followed.
 
@@ -47,6 +47,8 @@ Every error has all six keys; `line`, `column`, `path` and `hint` are `null` whe
 
 Each `[[check]]`, `[[component]]` and other item is read on its own, so one broken item does not hide problems in the others. Within one item, a value that cannot be read at all (an unknown field, a wrong type, a bad duration) is reported, and that item's other rules are not checked until it is fixed.
 
+A file with a TOML syntax error, or one that cannot be read or is not UTF-8, is reported and otherwise skipped. The ids it defines are then unknown, so unknown references are not reported until it is fixed, rather than reporting every reference to an id in it.
+
 ## Conventions
 
 - **Ids** are slugs: lowercase letters, digits and hyphens, starting with a letter or digit (`^[a-z0-9][a-z0-9-]*$`). An id is unique among items of its kind across every file: a check and a component may share the id `api`, but two components may not. A duplicate is reported with the location of the first definition.
@@ -66,7 +68,10 @@ webhook_url = "${ENV:TOCSIN_SLACK_WEBHOOK_URL}"
 - A secret field holding anything else is an error, and the error does not repeat what was written, in case it was a pasted credential.
 - An unset or empty variable is an error naming the variable.
 - `${ENV:...}` anywhere other than a secret field is an error: it is never expanded there.
+- A reference is the whole value: `"Bearer ${ENV:API_TOKEN}"` is an error, and `API_TOKEN` holds `Bearer ...` instead.
 - `tocsin config show` and every log print secrets as `<redacted from ${ENV:NAME}>`.
+
+Fields marked **may be secret** take either a value written in the file or an environment reference.
 
 ## `[server]`
 
@@ -86,9 +91,9 @@ Required, with all three keys, once any notifier has `type = "email"`.
 |-----|------|-|
 | `from` | address | The From address, as `status@example.com` or `Example Status <status@example.com>`. |
 | `reply_to` | address | The Reply-To address: a mailbox a person reads. |
-| `smtp_url` | secret | `smtp://user:password@host:587` or `smtps://...`. |
+| `smtp_url` | secret | `smtp://user:password@host:587` or `smtps://...`; any other scheme is an error. |
 
-Every email tocsin sends can be answered. A `noreply`, `no-reply` or `donotreply` address is rejected in either field, ignoring case, `+tags` and `-`, `_` or `.` separators (`No.Reply+alerts@` is still rejected).
+Every email tocsin sends can be answered. An address whose local part contains `noreply` or `donotreply` is rejected in either field, ignoring case, `+tags` and `-`, `_` or `.` separators: `No.Reply+alerts@`, `no-reply-status@` and `alerts-noreply@` are all rejected.
 
 ### `[server.auth]`
 
@@ -146,13 +151,13 @@ Type-specific settings go in a table named after the type; each is optional and 
 |-----|---------|-|
 | `method` | `"GET"` | `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE` or `OPTIONS`. |
 | `follow_redirects` | `false` | Follow 3xx responses. |
-| `headers` | `{}` | Request headers, as a table. |
-| `body` | none | Request body. |
+| `headers` | `{}` | Request headers, as a table. Each value **may be secret**. |
+| `body` | none | Request body. **May be secret.** |
 | `verify_certificate` | `true` | Reject invalid TLS certificates. |
 
-`[check.dns]`: `record_type` (`A` by default; also `AAAA`, `CNAME`, `MX`, `NS`, `TXT`, `SRV`, `CAA`) and `resolver` (`ip` or `ip:port`; the system resolver by default).
+`[check.dns]`: `record_type` (`A` by default; also `AAAA`, `CNAME`, `MX`, `NS`, `TXT`, `SRV`, `CAA`) and `resolver`, an IP address as `ip`, `ip:port` or `[ipv6]:port` (the system resolver by default; a hostname is an error).
 
-`[check.tls]`: `server_name`, the SNI name to send when it differs from the target host.
+`[check.tls]`: `server_name`, the SNI hostname to send when it differs from the target host.
 
 ### Assertions: `[[check.assert]]`
 
@@ -272,6 +277,6 @@ A bearer token for the write API.
 | Key | Type | |
 |-----|------|-|
 | `id` | id | Required. Logged with each write. |
-| `secret` | secret | Required. |
+| `secret` | secret | Required. Two tokens may not resolve to the same value; the error names both tokens, never the value. |
 | `scopes` | list of `heartbeat`, `incident`, `release` | Required, at least one. |
 | `description` | string | Optional. Who or what uses the token. |

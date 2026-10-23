@@ -33,22 +33,39 @@ pub fn load(folder: &Path) -> Result<Loaded, Failure> {
         )
     })?;
     paths.sort();
-
-    let mut sources = Vec::new();
-    let mut unreadable = Vec::new();
-    for relative in paths {
-        let name = folder.join(&relative).display().to_string();
-        match std::fs::read(folder.join(&relative)) {
-            Ok(bytes) => match String::from_utf8(bytes) {
-                Ok(text) => sources.push(Source { name, text }),
-                Err(_) => unreadable.push(Diagnostic::in_file(name, "the file is not UTF-8 text")),
-            },
-            Err(error) => unreadable.push(Diagnostic::in_file(
-                name,
-                format!("cannot read the file: {error}"),
-            )),
-        }
+    if paths.is_empty() {
+        let diagnostic = Diagnostic {
+            file: None,
+            line: None,
+            column: None,
+            path: None,
+            message: "the folder holds no `*.toml` files".to_owned(),
+            hint: Some(
+                "add at least one, such as server.toml with a `[server]` table; docs/config.md describes every table"
+                    .to_owned(),
+            ),
+        };
+        return Err(Failure::invalid_config(
+            format!("configuration in {} is empty", folder.display()),
+            vec![diagnostic],
+        ));
     }
+
+    let sources: Vec<Source> = paths
+        .into_iter()
+        .map(|relative| {
+            let path = folder.join(relative);
+            let text = std::fs::read(&path)
+                .map_err(|error| format!("cannot read the file: {error}"))
+                .and_then(|bytes| {
+                    String::from_utf8(bytes).map_err(|_| "the file is not UTF-8 text".to_owned())
+                });
+            Source {
+                name: path.display().to_string(),
+                text,
+            }
+        })
+        .collect();
     let files: Vec<String> = sources.iter().map(|source| source.name.clone()).collect();
 
     let variable = |name: &str| std::env::var(name).ok();
@@ -56,14 +73,9 @@ pub fn load(folder: &Path) -> Result<Loaded, Failure> {
         hostname: gethostname::gethostname().to_string_lossy().into_owned(),
         variable: &variable,
     };
-    let result = config::load(&sources, &environment);
-    match result {
-        Ok(config) if unreadable.is_empty() => Ok(Loaded { config, files }),
-        Ok(_) => Err(invalid(folder, unreadable)),
-        Err(mut errors) => {
-            errors.extend(unreadable);
-            Err(invalid(folder, errors))
-        }
+    match config::load(&sources, &environment) {
+        Ok(config) => Ok(Loaded { config, files }),
+        Err(errors) => Err(invalid(folder, errors)),
     }
 }
 
@@ -106,7 +118,7 @@ fn find_toml_files(root: &Path, relative: &Path, found: &mut Vec<PathBuf>) -> st
 /// `tocsin config check`.
 pub fn check(folder: &Path) -> Result<Report, Failure> {
     let Loaded { config, files } = load(folder)?;
-    let counts = counts(&config);
+    let counts = counts(&config)?;
     let summary = counts
         .iter()
         .map(|(kind, count)| {
@@ -130,31 +142,34 @@ pub fn check(folder: &Path) -> Result<Report, Failure> {
     })
 }
 
-fn counts(config: &Config) -> Vec<(String, Value)> {
-    [
-        ("component", config.components.len()),
-        ("group", config.groups.len()),
-        ("check", config.checks.len()),
-        ("heartbeat", config.heartbeats.len()),
-        ("project", config.projects.len()),
-        ("notifier", config.notifiers.len()),
-        ("route", config.routes.len()),
-        ("token", config.tokens.len()),
-    ]
-    .into_iter()
-    .map(|(kind, count)| (kind.to_owned(), Value::from(count)))
-    .collect()
+/// How many items of each `[[kind]]` there are, read from the serialized
+/// configuration so a new kind is counted without being listed here.
+fn counts(config: &Config) -> Result<Vec<(String, Value)>, Failure> {
+    let Value::Object(tables) = render(config)? else {
+        return Ok(Vec::new());
+    };
+    Ok(tables
+        .into_iter()
+        .filter_map(|(kind, value)| match value {
+            Value::Array(items) => Some((kind, Value::from(items.len()))),
+            _ => None,
+        })
+        .collect())
+}
+
+fn render(config: &Config) -> Result<Value, Failure> {
+    serde_json::to_value(config).map_err(|error| {
+        Failure::new(
+            Exit::Runtime,
+            format!("cannot render the configuration: {error}"),
+        )
+    })
 }
 
 /// `tocsin config show`: the merged configuration, secrets redacted.
 pub fn show(folder: &Path) -> Result<Report, Failure> {
     let Loaded { config, .. } = load(folder)?;
-    let json = serde_json::to_value(&config).map_err(|error| {
-        Failure::new(
-            Exit::Runtime,
-            format!("cannot render the configuration: {error}"),
-        )
-    })?;
+    let json = render(&config)?;
     Ok(Report {
         text: pretty(&json),
         json,

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::Link;
 use super::assertion::Assertion;
-use super::values::{Duration, Id};
+use super::values::{Duration, Id, Text};
 
 /// A probe run on an interval, whose result sets a component's health.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -113,12 +113,12 @@ pub struct HttpSettings {
     /// Whether redirects are followed; when not, a 3xx is the result.
     #[serde(default)]
     pub follow_redirects: bool,
-    /// Request headers.
+    /// Request headers. A value may be a secret, `${ENV:NAME}`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub headers: BTreeMap<String, String>,
-    /// Request body.
+    pub headers: BTreeMap<String, Text>,
+    /// Request body. It may be a secret, `${ENV:NAME}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body: Option<String>,
+    pub body: Option<Text>,
     /// Whether the server's certificate must verify. Defaults to true.
     #[serde(default = "default_true")]
     pub verify_certificate: bool,

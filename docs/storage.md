@@ -27,9 +27,17 @@ WAL, and runs any pending migrations before doing anything else.
 | `busy_timeout` | 5 s | Covers a checkpoint or a hand-run `sqlite3` holding a lock briefly. |
 
 **One writer.** Every write goes through a single dedicated thread fed by a
-channel. It drains whatever is queued (up to 256 writes) into one `IMMEDIATE`
-transaction, gives each write its own savepoint so a bad row fails alone, and
-answers each caller once the transaction commits. SQLite allows one writer
+channel of 1024. It drains whatever is queued (up to 256 writes) into one
+`IMMEDIATE` transaction, gives each write its own savepoint so a bad row fails
+alone, and answers each caller once the transaction commits. One write is
+answered sooner: a check's probe result that opens or ends no outage is
+answered once the channel takes it, so a slow commit never holds up a
+probe (DESIGN.md, "Durability", has the contract and what a crash loses).
+Every other write, including every heartbeat ping and every result that
+changes a check's state, is still answered only once committed. A full
+channel makes every caller wait, early-answered or not. A result the
+database refuses after it was answered is logged at `error` and counted in
+`CheckpointStats::rejected`. SQLite allows one writer
 at a time anyway; owning that in one thread means no write ever spins on
 `SQLITE_BUSY`, and batching turns 100 appends into one fsync-bounded commit.
 If an error ends the batch's transaction instead of just its savepoint
@@ -160,9 +168,25 @@ writer's queue while it waits, so check results keep committing.
 limit, how long they waited and copied, lockouts, stand-asides, passes
 (longest and p99), chase passes, rewinds, the longest write, and
 retention's waits, and keeps each write, pass or wait over 10 ms as a
-timed event. The write-latency bench prints them beside its latency table,
-with every stall over budget and the events that overlapped it, so a
-failing run names its path.
+timed event. It also measures commit lag, how long each insert waited from
+entering the queue to its commit (p99, longest, and the commits whose oldest
+insert waited over 50 ms, each kept as a timed event), and counts results
+refused after they were answered. The write-latency bench prints them
+beside its latency table, which shows three series: a probe result as its
+caller saw it (the budget), a state change waiting for its commit, and the
+commit lag of every insert. It lists every stall over budget and the events
+that overlapped it, so a failing run names its path, and a slow disk shows
+up in the commit lag even when no caller waited for it.
+
+On Linux, `scripts/bench/fsync_shim.c` is an `LD_PRELOAD` shim over `fsync`
+and `fdatasync`. With `TOCSIN_SYNCTRACE=1` it prints every sync with its
+thread (`tocsin-store-wr` for the writer, `tocsin-store-ch` for the
+checkpointer), file, start and duration; with `TOCSIN_FSYNC_DELAY_MS` it
+slows syncs of files ending in `TOCSIN_FSYNC_DELAY_SUFFIX` (default
+`-wal`). CI runs the bench under the tracer, and `scripts/bench/sweep.py`
+reads its log and names, for every append over 50 ms, the rewinds and log
+syncs it overlapped. `tests/slow_fsync.rs` uses the delay to show a 300 ms
+header sync no longer reaches a probe's caller.
 
 Writes still stall below both limits, while a pass is running. On CI the
 bench recorded a write of one check result taking 93 ms with the log far

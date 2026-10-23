@@ -1365,7 +1365,10 @@ async fn probe(shared: &Shared, compiled: &CompiledCheck) -> Option<ProbeOutcome
 /// If the write fails nothing is stored and nothing moves: the confirmation
 /// is put back as it was, so as far as the engine is concerned the result
 /// never happened, and the next result that confirms the same change makes
-/// it again.
+/// it again. A check's result that confirms no change is acknowledged
+/// once queued, before it commits (DESIGN.md, "Durability"), so if the
+/// database refuses it later the store logs and counts it, and its place in
+/// the confirmation stays.
 async fn record(
     shared: &Shared,
     tracker: &mut Tracker,

@@ -382,6 +382,11 @@ impl Nudge {
         }
     }
 
+    /// The counters the writer adds to.
+    pub(crate) fn counters(&self) -> &Stats {
+        &self.stats
+    }
+
     /// Called by the writer as it starts a write, to time it.
     pub(crate) fn before_write(&mut self) {
         self.write_started = Some(Instant::now());

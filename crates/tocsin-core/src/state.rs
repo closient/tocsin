@@ -217,6 +217,15 @@ pub enum ComponentStatus {
 }
 
 impl ComponentStatus {
+    /// Every status.
+    pub const ALL: [ComponentStatus; 5] = [
+        ComponentStatus::Operational,
+        ComponentStatus::Degraded,
+        ComponentStatus::Down,
+        ComponentStatus::Maintenance,
+        ComponentStatus::Unknown,
+    ];
+
     /// The status that shows `health`.
     #[must_use]
     pub const fn from_health(health: Health) -> Self {

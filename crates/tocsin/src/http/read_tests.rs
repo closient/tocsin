@@ -172,6 +172,7 @@ fn api() -> Api {
         live: Arc::new(snapshot()),
         heartbeats: HeartbeatHandle::default(),
         config_status: crate::reload::steady_status(),
+        metrics: Arc::new(crate::metrics::Metrics::new()),
     };
     Api {
         _dir: dir,

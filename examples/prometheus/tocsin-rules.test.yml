@@ -1,0 +1,90 @@
+# `promtool test rules examples/prometheus/tocsin-rules.test.yml`
+rule_files:
+  - tocsin-rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'tocsin_check_up{check="api",component="web",node="a",kind="check"}'
+        values: "1 1 0 0"
+      - series: 'tocsin_check_up{check="db",component="",node="a",kind="check"}'
+        values: "0.5x20"
+      - series: 'tocsin_check_up{check="backup",component="jobs",node="a",kind="heartbeat"}'
+        values: "1 0"
+      - series: 'tocsin_notifications_abandoned_total{notifier="pager"}'
+        values: "0 0 1"
+      - series: "tocsin_config_reload_success"
+        values: "1 0x10"
+      - series: 'up{job="tocsin",instance="tocsin:8080"}'
+        values: "1 0x10"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: TocsinCheckDown
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: TocsinCheckDown
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              check: api
+              component: web
+              node: a
+              kind: check
+            exp_annotations:
+              summary: "api is down on a"
+      - eval_time: 10m
+        alertname: TocsinCheckDegraded
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: TocsinCheckDegraded
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              check: db
+              node: a
+              kind: check
+            exp_annotations:
+              summary: "db has been degraded for 15 minutes on a"
+      - eval_time: 1m
+        alertname: TocsinHeartbeatMissed
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              check: backup
+              component: jobs
+              node: a
+              kind: heartbeat
+            exp_annotations:
+              summary: "Heartbeat backup missed its deadline or reported failure"
+      - eval_time: 1m
+        alertname: TocsinNotificationsAbandoned
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: TocsinNotificationsAbandoned
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              notifier: pager
+            exp_annotations:
+              summary: "tocsin gave up delivering alerts through pager"
+      - eval_time: 5m
+        alertname: TocsinConfigReloadFailed
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: TocsinConfigReloadFailed
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+            exp_annotations:
+              summary: "tocsin rejected its configuration; see tocsin config status"
+      - eval_time: 6m
+        alertname: TocsinUnreachable
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              job: tocsin
+              instance: "tocsin:8080"
+            exp_annotations:
+              summary: "Prometheus cannot scrape tocsin at tocsin:8080"

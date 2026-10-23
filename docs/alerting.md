@@ -91,15 +91,15 @@ resolves go out on time. A send that panics is caught: it is logged as an
 error naming the notifier, the alert and the delivery, counted as a failed
 attempt, and retried like any other failure.
 
-**Metrics.** Two counters, both labelled by notifier, are registered in the
-process's Prometheus registry; the `/metrics` endpoint arrives separately.
+**Metrics.** Two counters, both labelled by notifier, are served at
+[`/metrics`](metrics.md):
 
 - `tocsin_notifications_abandoned_total{notifier}` counts messages tocsin
   gave up on: a fire, repeat or resolve that was refused outright, or still
   failing after its last retry. Each one is a message an operator never got,
   so this is the counter to alert on, for example
   `increase(tocsin_notifications_abandoned_total[15m]) > 0`.
-- `tocsin_notification_attempt_failures_total{notifier}` counts every failed
+- `tocsin_notification_failures_total{notifier}` counts every failed
   attempt, retried or not. A notifier that is down shows a steady rate here
   long before its first message is abandoned; use it to see trouble coming,
   not to page.

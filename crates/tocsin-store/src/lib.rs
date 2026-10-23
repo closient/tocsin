@@ -250,6 +250,17 @@ impl Store {
         &self.path
     }
 
+    /// The database's size on disk now, in bytes: the file and its
+    /// write-ahead log. Reads file metadata only, never the database.
+    ///
+    /// # Errors
+    ///
+    /// Either file's metadata cannot be read; a missing log counts as
+    /// empty.
+    pub fn size_on_disk(&self) -> std::io::Result<u64> {
+        size_on_disk(&self.path)
+    }
+
     /// How many writes (inserts and write jobs) have been queued to the
     /// writer since the store opened, for tests and diagnostics: a caller
     /// that should not write can be checked for it.

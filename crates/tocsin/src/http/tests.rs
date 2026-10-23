@@ -92,6 +92,7 @@ fn api() -> Api {
         live: Arc::new(tocsin_engine::Snapshot::default()),
         heartbeats: HeartbeatHandle::default(),
         config_status: crate::reload::steady_status(),
+        metrics: Arc::new(crate::metrics::Metrics::new()),
     };
     Api {
         _dir: dir,
@@ -107,7 +108,7 @@ async fn running() -> (Api, Monitor) {
         &api.state.config,
         &api.state.store,
         &api.state.events,
-        &tocsin_alert::AlertMetrics::default(),
+        &api.state.metrics,
     )
     .await
     .unwrap();

@@ -512,6 +512,36 @@ secret = "${ENV:LATE_TOKEN}"
 scopes = ["status:read"]
 "#;
 
+    /// A component with a check, a heartbeat and a notifier, all of which
+    /// have series in `/metrics` while the file is there.
+    const EDGE: &str = r#"
+[[component]]
+id = "edge"
+name = "Edge"
+
+[[check]]
+id = "edge-tcp"
+component = "edge"
+type = "tcp"
+target = "TARGET"
+interval = "1s"
+timeout = "500ms"
+confirm = 1
+
+[[heartbeat]]
+id = "edge-sync"
+component = "edge"
+interval = "1h"
+
+[[notifier]]
+id = "edge-pager"
+type = "webhook"
+
+[notifier.webhook]
+url = "https://pager.example.com/hook"
+signing_secret = "${ENV:EDGE_SIGNING_SECRET}"
+"#;
+
     /// Valid but for a secret from a variable nobody set; it also drops
     /// `added` and `nightly`, which must therefore keep running.
     const BROKEN: &str = r#"
@@ -526,7 +556,7 @@ scopes = ["release"]
         folder: PathBuf,
         url: String,
         status: watch::Receiver<ConfigStatus>,
-        metrics: Metrics,
+        metrics: Arc<Metrics>,
         events: tokio::sync::broadcast::Receiver<BusEvent>,
         reloader: Reloader,
         store: Arc<Store>,
@@ -544,6 +574,7 @@ scopes = ["release"]
             let variables: Variables = Arc::new(|name| match name {
                 "READER_TOKEN" => Some(SECRET.to_owned()),
                 "LATE_TOKEN" => Some(LATE.to_owned()),
+                "EDGE_SIGNING_SECRET" => Some("0123456789abcdef0123456789abcdef".to_owned()),
                 _ => None,
             });
             let config = crate::config::load_with(&folder, &*variables)
@@ -553,8 +584,8 @@ scopes = ["release"]
             let store = Arc::new(Store::open(&data_dir.path().join(DB_FILE)).unwrap());
             let bus = EventBus::new();
             let events = bus.subscribe();
-            let metrics = Metrics::new();
-            let monitor = Monitor::start(&config, &store, &bus, &metrics.alerting)
+            let metrics = Arc::new(Metrics::new());
+            let monitor = Monitor::start(&config, &store, &bus, &metrics)
                 .await
                 .unwrap();
             let (sender, status) = watch::channel(ConfigStatus::loaded(http::now()));
@@ -566,6 +597,7 @@ scopes = ["release"]
                 live: Arc::new(monitor.status_handle()),
                 heartbeats: monitor.heartbeats(),
                 config_status: status.clone(),
+                metrics: Arc::clone(&metrics),
             };
             let app = LiveRouter::new(http::router(state.clone()));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -642,6 +674,19 @@ scopes = ["release"]
                 .await
                 .unwrap()
                 .status()
+        }
+
+        /// `GET /metrics`, read with a `status:read` token.
+        async fn scrape(&self) -> String {
+            let response = self
+                .http
+                .get(format!("{}/metrics", self.url))
+                .bearer_auth(SECRET)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            response.text().await.unwrap()
         }
 
         async fn status_code_for(&self, token: &str) -> StatusCode {
@@ -799,6 +844,41 @@ scopes = ["release"]
             .await
             .unwrap();
         assert_eq!(history.len(), 1, "{history:?}");
+    }
+
+    #[tokio::test]
+    async fn what_a_reload_removes_leaves_the_metrics() {
+        let (target, _accepting) = target().await;
+        let mut served = Served::start(&target).await;
+        let edge = EDGE.replace("TARGET", &target);
+        let status = served.change("edge.toml", Some(&edge)).await;
+        assert!(status.ok, "{status:?}");
+        served.first_state("edge-tcp").await;
+        assert_eq!(served.ping("edge-sync").await, StatusCode::ACCEPTED);
+        served.metrics.alerting.attempt_failed("edge-pager");
+        let before = served.scrape().await;
+        for series in [
+            "tocsin_check_up{check=\"edge-tcp\",component=\"edge\",",
+            "tocsin_check_duration_seconds_count{check=\"edge-tcp\",component=\"edge\",",
+            "tocsin_check_last_run_timestamp{check=\"edge-tcp\",component=\"edge\",",
+            "tocsin_heartbeat_last_ping_timestamp{check=\"edge-sync\",component=\"edge\",",
+            "tocsin_component_status{component=\"edge\",",
+            "tocsin_notification_failures_total{notifier=\"edge-pager\"} 1\n",
+        ] {
+            assert!(before.contains(series), "{series} missing from\n{before}");
+        }
+
+        let status = served.change("edge.toml", None).await;
+        assert!(status.ok, "{status:?}");
+        let after = served.scrape().await;
+        for gone in ["\"edge", "edge-"] {
+            assert!(!after.contains(gone), "{gone} still served:\n{after}");
+        }
+        assert!(
+            after.contains("tocsin_check_up{check=\"kept\","),
+            "what the reload kept is still served:\n{after}"
+        );
+        served.reloader.into_monitor().await.stop().await;
     }
 
     #[tokio::test(start_paused = true)]

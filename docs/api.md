@@ -23,6 +23,7 @@ the `status:read` scope to read the rest:
 | A check's `target` (its URL or host, which can name an internal host) | no | yes |
 | A check's raw results (`/checks/{id}/results`) | no, 401 | yes |
 | How the configuration last reloaded (`/config/status`), whose errors name files and environment variables | no, 401 | yes |
+| Prometheus metrics (`/metrics`, see [metrics.md](metrics.md)) | no, 401 | yes |
 | Outages and incidents | yes | yes |
 | Releases and deploys of a project with `public = true` | yes | yes |
 | Releases and deploys of a project with `public = false` | no | yes |
@@ -37,9 +38,9 @@ One rule holds on every read, `/llms.txt` included:
 - A header that is malformed or names no `[[token]]`: 401, so a typo is
   loud rather than quietly anonymous.
 
-Raw check results and the configuration status are the two reads with
-nothing public to show: no token is 401 and a token without `status:read`
-is 403.
+Raw check results, the configuration status and `/metrics` are the reads
+with nothing public to show: no token is 401 and a token without
+`status:read` is 403.
 
 Only a `[[project]]` can be non-public; components, checks and their
 outages have no visibility setting and are on the public page. A
@@ -73,6 +74,7 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
 | `GET /api/v1/config/status` | `status:read` | 200, `{loaded_at, last_attempt_at, ok, errors}`; see [config.md](config.md#reloading) |
 | `GET /api/v1/openapi.json` | none | 200, the OpenAPI document |
 | `GET /llms.txt` | none | 200, `text/plain` |
+| `GET /metrics` | `status:read` | 200, Prometheus text format 0.0.4; not in the OpenAPI document, see [metrics.md](metrics.md) |
 
 ### Status now
 

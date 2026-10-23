@@ -72,7 +72,7 @@ webhook_url = "${ENV:TOCSIN_SLACK_WEBHOOK_URL}"
 
 | Key | Type | Default | |
 |-----|------|---------|-|
-| `listen` | `"host:port"` | `"127.0.0.1:8080"` | Address the web server listens on. |
+| `listen` | `"ip:port"` | `"127.0.0.1:8080"` | Address the web server listens on: an IP address, not a hostname, such as `"0.0.0.0:8080"` or `"[::]:8080"`. |
 | `public_url` | URL | none | Where people reach the status page; used in links and emails. `http://` or `https://`. |
 | `node_id` | string | the hostname | This node's name in every result it records. No whitespace. |
 | `data_dir` | path | none | Folder for the SQLite database. A relative path is relative to the config folder. `tocsin serve --data` overrides it; one of the two is required. |

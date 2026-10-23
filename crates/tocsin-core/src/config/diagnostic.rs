@@ -86,14 +86,14 @@ impl LineIndex {
 
     /// The 1-based line and character column of a byte offset.
     pub(crate) fn locate(&self, text: &str, offset: usize) -> (usize, usize) {
-        let offset = offset.min(text.len());
+        let mut offset = offset.min(text.len());
+        // An offset inside a multi-byte character counts as that character.
+        while !text.is_char_boundary(offset) {
+            offset -= 1;
+        }
         let line = self.starts.partition_point(|start| *start <= offset);
         let start = self.starts[line - 1];
-        // An offset inside a multi-byte character counts as that character.
-        let column = text.get(start..offset).map_or_else(
-            || text[start..].chars().count(),
-            |prefix| prefix.chars().count(),
-        );
+        let column = text[start..offset].chars().count();
         (line, column + 1)
     }
 }
@@ -113,6 +113,8 @@ mod tests {
         assert_eq!(index.locate(text, 6), (2, 1));
         // `é` is two bytes but one column.
         assert_eq!(index.locate(text, 10), (2, 4));
+        // Inside `é` is still `é`, not the rest of the text.
+        assert_eq!(index.locate(text, 8), (2, 2));
         assert_eq!(index.locate(text, 13), (2, 7));
         assert_eq!(index.locate(text, 14), (3, 1));
         assert_eq!(index.locate(text, 15), (4, 1));

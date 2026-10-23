@@ -117,7 +117,8 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Server {
-    /// The address the web server listens on.
+    /// The address the web server listens on, as `ip:port`: `127.0.0.1:8080`,
+    /// `0.0.0.0:8080` or `[::]:8080`. Hostnames are not accepted.
     #[serde(default = "default_listen")]
     pub listen: SocketAddr,
     /// The URL people reach the status page at, used in links and emails.

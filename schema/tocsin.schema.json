@@ -1136,7 +1136,7 @@
         },
         "listen": {
           "default": "127.0.0.1:8080",
-          "description": "The address the web server listens on.",
+          "description": "The address the web server listens on, as `ip:port`: `127.0.0.1:8080`,\n`0.0.0.0:8080` or `[::]:8080`. Hostnames are not accepted.",
           "type": "string"
         },
         "node_id": {

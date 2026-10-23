@@ -3,10 +3,12 @@
 //! Rendering command results as text or as a single JSON document.
 
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::io::Write;
 use std::process::ExitCode;
 
 use serde_json::{Value, json};
+use tocsin_core::config::Diagnostic;
 
 use crate::exit::Exit;
 
@@ -26,11 +28,13 @@ impl Report {
     }
 }
 
-/// A failed result: the exit code plus a human-readable message.
+/// A failed result: the exit code, a human-readable message and, for
+/// invalid configuration, every problem found.
 #[derive(Debug)]
 pub struct Failure {
     pub exit: Exit,
     pub message: String,
+    pub errors: Vec<Diagnostic>,
 }
 
 impl Failure {
@@ -38,11 +42,35 @@ impl Failure {
         Failure {
             exit,
             message: message.into(),
+            errors: Vec::new(),
         }
     }
 
+    /// Configuration that does not validate: exit 2 with every problem.
+    pub fn invalid_config(message: impl Into<String>, errors: Vec<Diagnostic>) -> Self {
+        Failure {
+            exit: Exit::InvalidInput,
+            message: message.into(),
+            errors,
+        }
+    }
+
+    /// `{"error":{"kind","message"}}`, plus `errors` when there are any.
     fn json(&self) -> Value {
-        json!({ "error": { "kind": self.exit.kind(), "message": self.message } })
+        let mut error = json!({ "kind": self.exit.kind(), "message": self.message });
+        if !self.errors.is_empty() {
+            error["errors"] = json!(self.errors);
+        }
+        json!({ "error": error })
+    }
+
+    /// The message, then each problem on its own lines.
+    fn text(&self) -> String {
+        let mut text = format!("error: {}\n", self.message);
+        for diagnostic in &self.errors {
+            let _ = writeln!(text, "{diagnostic}");
+        }
+        text
     }
 }
 
@@ -71,7 +99,7 @@ pub fn emit(result: Result<Report, Failure>, json: bool) -> ExitCode {
             if json {
                 write_stdout(&format!("{}\n", failure.json()));
             } else {
-                write_stderr(&format!("error: {}\n", failure.message));
+                write_stderr(&failure.text());
             }
             failure.exit.into()
         }

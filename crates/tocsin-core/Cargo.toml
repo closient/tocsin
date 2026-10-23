@@ -10,3 +10,9 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true

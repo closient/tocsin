@@ -1,0 +1,42 @@
+#:schema ../../../schema/tocsin.schema.json
+# Checks below HTTP: TCP connect, DNS, TLS certificate and ICMP ping.
+
+[[check]]
+id = "database-port"
+component = "database"
+type = "tcp"
+target = "db.internal.example.com:5432"
+interval = "30s"
+timeout = "3s"
+
+[[check]]
+id = "dns-apex"
+component = "website"
+type = "dns"
+target = "example.com"
+interval = "5m"
+
+[check.dns]
+record_type = "A"
+resolver = "1.1.1.1"
+
+[[check.assert]]
+records = { contains = "192.0.2.10" }
+
+[[check]]
+id = "api-certificate"
+component = "api"
+type = "tls"
+target = "api.example.com:443"
+interval = "1h"
+
+[[check.assert]]
+certificate_days_remaining = { gt = 21 }
+on_fail = "degraded"
+
+[[check]]
+id = "gateway-ping"
+type = "icmp"
+target = "192.0.2.1"
+interval = "1m"
+timeout = "2s"

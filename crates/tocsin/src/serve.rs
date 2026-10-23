@@ -2,7 +2,7 @@
 
 //! `tocsin serve`: run until told to stop.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use tokio::signal::unix::{Signal, SignalKind, signal};
@@ -10,13 +10,21 @@ use tokio::signal::unix::{Signal, SignalKind, signal};
 use crate::exit::Exit;
 use crate::output::{Failure, Report};
 
-pub fn run(config: &Path, data: &Path) -> Result<Report, Failure> {
-    if !config.is_dir() {
-        return Err(Failure::new(
-            Exit::InvalidInput,
-            format!("config folder {} is not a directory", config.display()),
-        ));
-    }
+pub fn run(config: &Path, data: Option<&Path>) -> Result<Report, Failure> {
+    let loaded = crate::config::load(config)?;
+    // `--data` wins; a relative `server.data_dir` is relative to the config
+    // folder, so the files mean the same thing wherever tocsin is started.
+    let data: PathBuf = match (data, &loaded.config.server.data_dir) {
+        (Some(data), _) => data.to_owned(),
+        (None, Some(data_dir)) => config.join(data_dir),
+        (None, None) => {
+            return Err(Failure::new(
+                Exit::InvalidInput,
+                "no data folder: pass --data or set `data_dir` in `[server]`",
+            ));
+        }
+    };
+    let data = data.as_path();
     // `symlink_metadata` also catches a dangling symlink, which `exists()`
     // reports as absent and `create_dir_all` then fails on.
     if data.symlink_metadata().is_ok() && !data.is_dir() {
@@ -40,7 +48,13 @@ pub fn run(config: &Path, data: &Path) -> Result<Report, Failure> {
         let shutdown = Shutdown::install()?;
         // Logged only once both handlers exist, so a signal sent after this
         // line is always handled rather than killing the process outright.
-        tracing::info!(config = %config.display(), data = %data.display(), "tocsin serving; waiting for SIGINT or SIGTERM");
+        tracing::info!(
+            config = %config.display(),
+            data = %data.display(),
+            files = loaded.files.len(),
+            checks = loaded.config.checks.len(),
+            "tocsin serving; waiting for SIGINT or SIGTERM"
+        );
         Ok::<_, Failure>(shutdown.wait().await)
     })?;
     tracing::info!(signal = signal_name, "shutting down");

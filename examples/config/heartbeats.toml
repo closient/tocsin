@@ -1,0 +1,27 @@
+#:schema ../../schema/tocsin.schema.json
+# Heartbeats are pings tocsin expects to receive; projects collect releases
+# that CI pushes; tokens authorize both through the write API.
+
+[[heartbeat]]
+id = "nightly-backup"
+name = "Nightly database backup"
+component = "nightly-backup"
+interval = "1d"
+grace = "1h"
+
+[[project]]
+id = "api"
+name = "API"
+url = "https://github.com/example/api"
+component = "api"
+
+[[token]]
+id = "ci"
+description = "CI: records releases and deploys."
+secret = "${ENV:TOCSIN_CI_TOKEN}"
+scopes = ["release"]
+
+[[token]]
+id = "backup-job"
+secret = "${ENV:TOCSIN_BACKUP_TOKEN}"
+scopes = ["heartbeat"]

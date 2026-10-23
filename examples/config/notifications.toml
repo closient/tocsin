@@ -1,0 +1,38 @@
+#:schema ../../schema/tocsin.schema.json
+# Where operator alerts go. Secrets are always `${ENV:NAME}` references and
+# never sit in these files; `tocsin config show` prints them redacted.
+
+[[notifier]]
+id = "ops-slack"
+type = "slack"
+
+[notifier.slack]
+webhook_url = "${ENV:TOCSIN_SLACK_WEBHOOK_URL}"
+
+[[notifier]]
+id = "ops-email"
+type = "email"
+
+[notifier.email]
+to = ["ops@example.com"]
+
+[[notifier]]
+id = "on-call"
+type = "pushover"
+
+[notifier.pushover]
+user_key = "${ENV:TOCSIN_PUSHOVER_USER_KEY}"
+api_token = "${ENV:TOCSIN_PUSHOVER_API_TOKEN}"
+
+# Everything degraded or worse goes to Slack and email.
+[[route]]
+id = "everything"
+notifiers = ["ops-slack", "ops-email"]
+notify_on = "degraded"
+
+# Only customer-facing outages page someone.
+[[route]]
+id = "page-on-call"
+notifiers = ["on-call"]
+groups = ["customer-facing"]
+notify_on = "down"

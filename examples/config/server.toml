@@ -1,0 +1,27 @@
+#:schema ../../schema/tocsin.schema.json
+# The line above points editors (taplo, Even Better TOML) at the JSON Schema,
+# for completion and validation as you type. In your own files, point it at
+# a copy of schema/tocsin.schema.json or the output of `tocsin config schema`.
+#
+# tocsin reads every *.toml file under its config folder, in sorted order,
+# and merges them. Split them however suits you: this example uses one file
+# per concern. `tocsin config check --config examples/config` validates it.
+
+[server]
+listen = "0.0.0.0:8080"
+public_url = "https://status.example.com"
+# node_id defaults to the hostname.
+data_dir = "/var/lib/tocsin"
+retention_days = 90
+
+# Required once any email notifier exists. Every email tocsin sends can be
+# answered: no-reply addresses are rejected.
+[server.email]
+from = "Example Status <status@example.com>"
+reply_to = "support@example.com"
+smtp_url = "${ENV:TOCSIN_SMTP_URL}"
+
+[page]
+title = "Example Status"
+description = "Live health of Example's services."
+homepage_url = "https://www.example.com"

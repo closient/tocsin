@@ -233,3 +233,63 @@ fn version_with_a_command_is_invalid_input() {
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(json_stdout(&output)["error"]["kind"], "invalid_input");
 }
+
+#[test]
+fn serve_refuses_an_invalid_configuration() {
+    let config = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(
+        config.path().join("server.toml"),
+        "[server]\nretention_days = 0\n",
+    )
+    .unwrap();
+    let output = tocsin(&[
+        "--json",
+        "serve",
+        "--config",
+        config.path().to_str().unwrap(),
+        "--data",
+        data.path().to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    let error = &json_stdout(&output)["error"];
+    assert_eq!(error["kind"], "invalid_input");
+    assert_eq!(error["errors"][0]["line"], 2);
+    assert_eq!(error["errors"][0]["path"], "server.retention_days");
+}
+
+#[test]
+fn serve_needs_a_data_folder_from_the_flag_or_the_configuration() {
+    let config = tempfile::tempdir().unwrap();
+    let output = tocsin(&[
+        "--json",
+        "serve",
+        "--config",
+        config.path().to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    let message = json_stdout(&output)["error"]["message"].clone();
+    assert!(message.as_str().unwrap().contains("data_dir"), "{message}");
+
+    // A relative `data_dir` is read relative to the config folder: here it
+    // names a file, so serve refuses it rather than starting.
+    std::fs::write(config.path().join("taken"), "").unwrap();
+    std::fs::write(
+        config.path().join("server.toml"),
+        "[server]\ndata_dir = \"taken\"\n",
+    )
+    .unwrap();
+    let output = tocsin(&[
+        "--json",
+        "serve",
+        "--config",
+        config.path().to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    let message = json_stdout(&output)["error"]["message"].clone();
+    let expected = format!(
+        "data folder {} is not a directory",
+        config.path().join("taken").display()
+    );
+    assert_eq!(message, expected.as_str());
+}

@@ -10,6 +10,7 @@
 compile_error!("tocsin supports Unix-like systems (Linux, macOS) only");
 
 mod cli;
+mod config;
 mod exit;
 mod output;
 mod serve;
@@ -19,7 +20,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use crate::cli::{Cli, Command};
+use crate::cli::{Cli, Command, ConfigCommand};
 use crate::exit::Exit;
 use crate::output::{Failure, Report};
 
@@ -49,7 +50,12 @@ fn run(cli: Cli) -> Result<Report, Failure> {
         return Ok(Report::version());
     }
     match cli.command {
-        Some(Command::Serve { config, data }) => serve::run(&config, &data),
+        Some(Command::Serve { config, data }) => serve::run(&config, data.as_deref()),
+        Some(Command::Config { command }) => match command {
+            ConfigCommand::Check { config } => config::check(&config),
+            ConfigCommand::Show { config } => config::show(&config),
+            ConfigCommand::Schema => Ok(config::schema()),
+        },
         None => Err(Failure::new(
             Exit::InvalidInput,
             "no command given; run `tocsin --help` for usage",

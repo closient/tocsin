@@ -4,3 +4,5 @@
 //!
 //! This crate has no I/O. The binary loads configuration files and the
 //! store crate persists history; both depend on the types defined here.
+
+pub mod config;

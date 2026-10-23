@@ -927,11 +927,13 @@ mod tests {
     #[tokio::test]
     async fn the_alerts_of_a_removed_notifier_end_at_startup_and_at_reload() {
         let (_dir, store) = open();
-        // Nothing listens there once the listener is dropped.
-        let closed = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
+        // Bound and never listening: refused, and no other test can take it.
+        let socket =
+            socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+        socket
+            .bind(&std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)).into())
             .unwrap();
+        let closed = socket.local_addr().unwrap().as_socket().unwrap();
         let check = format!(
             "[[check]]\nid = \"db\"\ntype = \"tcp\"\ntarget = \"{closed}\"\n\
              interval = \"1s\"\ntimeout = \"500ms\"\nconfirm = 1\n"

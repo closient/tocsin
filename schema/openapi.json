@@ -582,7 +582,8 @@
               "string",
               "null"
             ],
-            "description": "A new title, not empty."
+            "description": "A new title, not empty, at most 200 characters.",
+            "maxLength": 200
           }
         },
         "additionalProperties": false
@@ -728,7 +729,8 @@
           },
           "title": {
             "type": "string",
-            "description": "One line, not empty."
+            "description": "One line, not empty, at most 200 characters.",
+            "maxLength": 200
           }
         },
         "additionalProperties": false

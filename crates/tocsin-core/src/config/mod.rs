@@ -35,7 +35,7 @@ pub use notifier::{
     NtfySettings, PushoverSettings, SlackSettings, TelegramSettings, WebhookSettings,
 };
 pub use values::{
-    DURATION_PATTERN, Duration, ID_PATTERN, Id, SECRET_PATTERN, Secret, Text, email_address,
+    Cidr, DURATION_PATTERN, Duration, ID_PATTERN, Id, SECRET_PATTERN, Secret, Text, email_address,
     is_unanswerable,
 };
 
@@ -198,11 +198,61 @@ pub struct ServerEmail {
     pub smtp_url: Option<Secret>,
 }
 
-/// `[server.auth]`. Reserved for the admin page; it accepts no settings
-/// yet.
+/// `[server.auth]`: how the admin page at `/admin/` learns who is asking.
+///
+/// tocsin never handles passwords. It sits behind an identity-aware proxy
+/// and believes only what that proxy can prove: a signed Cloudflare Access
+/// token, or a header from a peer address you trust. Without this table,
+/// or with `mode = "none"`, the admin page does not exist.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Auth {}
+pub struct Auth {
+    /// How identities are proven. `none` turns the admin page off.
+    #[serde(default)]
+    pub mode: AuthMode,
+    /// `cloudflare_access` only: the Zero Trust team, as `name` or
+    /// `name.cloudflareaccess.com`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_domain: Option<String>,
+    /// `cloudflare_access` only: the Access application's audience (AUD)
+    /// tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    /// `trusted_header` only: the request header carrying the email
+    /// address. Defaults to `X-Forwarded-Email`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    /// `trusted_header` only: the networks the proxy connects from. The
+    /// header is believed only when the TCP peer is inside one of them;
+    /// `X-Forwarded-For` is never consulted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_proxies: Vec<Cidr>,
+    /// Email addresses allowed in. With neither this nor
+    /// `allowed_domains`, everyone the proxy lets through is allowed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_emails: Vec<String>,
+    /// Email domains allowed in, matched exactly (`example.com` does not
+    /// admit `team.example.com`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_domains: Vec<String>,
+}
+
+/// The default header for [`AuthMode::TrustedHeader`].
+pub const DEFAULT_IDENTITY_HEADER: &str = "X-Forwarded-Email";
+
+/// How [`Auth`] proves who is asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMode {
+    /// No admin page.
+    #[default]
+    None,
+    /// Cloudflare Access: verify the signed `Cf-Access-Jwt-Assertion`
+    /// token against the team's published keys.
+    CloudflareAccess,
+    /// A proxy on a trusted network names the person in a header.
+    TrustedHeader,
+}
 
 /// `[page]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

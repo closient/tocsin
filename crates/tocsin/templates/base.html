@@ -1,0 +1,23 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{#- Every page extends this and has a `layout: Layout` field (web/page.rs). -#}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="same-origin">
+<title>{{ layout.title }} · tocsin</title>
+<link rel="stylesheet" href="{{ layout.stylesheet }}">
+</head>
+<body>
+<header class="site">
+  <a class="home" href="{% if layout.signed_in.is_some() %}/admin/{% else %}/{% endif %}">tocsin</a>
+  {%- if let Some(who) = layout.signed_in %}
+  <span class="who">Signed in as {{ who }}</span>
+  {%- endif %}
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

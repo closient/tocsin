@@ -33,8 +33,9 @@ Statuses depend on the kind:
   `completed`.
 
 An author (`created_by`, `updated_by`) is `{"kind": "token", "id": "<token id>"}`
-for a write made with a `[[token]]`. The kind `person` is reserved for
-identities an authenticating proxy will supply. Timestamps are UTC, RFC 3339
+for a write made with a `[[token]]`, and `{"kind": "person", "id": "<email>"}`
+for one made on the [admin page](admin.md), as the authenticating proxy
+named them. Timestamps are UTC, RFC 3339
 with milliseconds, such as `2026-11-01T02:00:00.000Z`; the API accepts any
 RFC 3339 offset and stores UTC.
 

@@ -18,9 +18,11 @@ mod export;
 mod http;
 mod incident;
 mod lock;
+mod net;
 mod output;
 mod probe;
 mod serve;
+mod web;
 
 use std::io::IsTerminal;
 use std::process::ExitCode;

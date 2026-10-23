@@ -96,9 +96,18 @@ impl ApiError {
     }
 
     /// The HTTP status.
-    #[cfg(test)]
     pub fn status(&self) -> StatusCode {
         self.status
+    }
+
+    /// What went wrong, for a person.
+    pub fn message(&self) -> &str {
+        &self.body.message
+    }
+
+    /// For a 422: every problem, by path.
+    pub fn fields(&self) -> &[FieldError] {
+        &self.body.fields
     }
 }
 

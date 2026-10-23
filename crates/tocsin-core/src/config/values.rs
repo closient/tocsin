@@ -5,6 +5,7 @@
 
 use std::borrow::Cow;
 use std::fmt;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -187,6 +188,131 @@ impl JsonSchema for Duration {
             "type": "string",
             "pattern": DURATION_PATTERN,
             "description": "A duration such as \"500ms\", \"30s\", \"5m\", \"1h30m\" or \"1d\"."
+        })
+    }
+}
+
+/// An IP network in CIDR notation, such as `"10.0.0.0/8"` or `"::1/128"`.
+/// A bare address is the network holding only that address. Bits past the
+/// prefix must be zero, so `"10.0.0.1/8"` is refused as a likely typo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Cidr {
+    network: IpAddr,
+    prefix: u8,
+}
+
+impl Cidr {
+    /// Parses `address/prefix` or a bare address.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when `text` is not a network.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let invalid = || {
+            format!(
+                "invalid network `{text}`: write an address with an optional prefix length, such as \"10.0.0.0/8\", \"192.0.2.7\" or \"fd00::/8\""
+            )
+        };
+        let (address, prefix) = match text.split_once('/') {
+            Some((address, prefix)) => (address, Some(prefix)),
+            None => (text, None),
+        };
+        let network: IpAddr = address.parse().map_err(|_| invalid())?;
+        let width = match network {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
+        };
+        let prefix = match prefix {
+            // `u8::from_str` takes a leading `+`; a prefix is digits only.
+            Some(prefix) if prefix.is_empty() || !prefix.bytes().all(|b| b.is_ascii_digit()) => {
+                return Err(invalid());
+            }
+            Some(prefix) => prefix.parse::<u8>().map_err(|_| invalid())?,
+            None => width,
+        };
+        if prefix > width {
+            return Err(format!(
+                "invalid network `{text}`: the prefix length is at most {width}"
+            ));
+        }
+        let cidr = Cidr { network, prefix };
+        if cidr.masked(network) != network {
+            return Err(format!(
+                "invalid network `{text}`: bits after the /{prefix} prefix are set; did you mean `{}`?",
+                Cidr {
+                    network: cidr.masked(network),
+                    prefix
+                }
+            ));
+        }
+        Ok(cidr)
+    }
+
+    /// Whether `address` is inside the network. An IPv4 address mapped
+    /// into IPv6 (`::ffff:10.0.0.1`), as a dual-stack socket reports an
+    /// IPv4 peer, matches either as the IPv4 address it is (`10.0.0.0/8`)
+    /// or as itself (`::ffff:10.0.0.0/104`, `::/0`).
+    #[must_use]
+    pub fn contains(&self, address: IpAddr) -> bool {
+        self.contains_exactly(address) || self.contains_exactly(address.to_canonical())
+    }
+
+    /// Whether `address`, in its own family, is inside the network.
+    fn contains_exactly(&self, address: IpAddr) -> bool {
+        let same_family = matches!(
+            (self.network, address),
+            (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_))
+        );
+        same_family && self.masked(address) == self.network
+    }
+
+    /// `address` with the bits after the prefix cleared.
+    fn masked(&self, address: IpAddr) -> IpAddr {
+        match address {
+            IpAddr::V4(address) => {
+                let mask = u32::MAX
+                    .checked_shl(32 - u32::from(self.prefix))
+                    .unwrap_or(0);
+                IpAddr::V4(Ipv4Addr::from(address.to_bits() & mask))
+            }
+            IpAddr::V6(address) => {
+                let mask = u128::MAX
+                    .checked_shl(128 - u32::from(self.prefix))
+                    .unwrap_or(0);
+                IpAddr::V6(Ipv6Addr::from(address.to_bits() & mask))
+            }
+        }
+    }
+}
+
+impl fmt::Display for Cidr {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}/{}", self.network, self.prefix)
+    }
+}
+
+impl Serialize for Cidr {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Cidr {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Cidr::parse(&text).map_err(serde::de::Error::custom)
+    }
+}
+
+impl JsonSchema for Cidr {
+    fn schema_name() -> Cow<'static, str> {
+        "Cidr".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "description": "An IP network such as \"10.0.0.0/8\" or \"fd00::/8\", or a single address such as \"192.0.2.7\"."
         })
     }
 }
@@ -451,6 +577,49 @@ mod tests {
         assert_eq!(Duration::parse("1500ms").unwrap().to_string(), "1s500ms");
         for bad in ["", "60", "s", "1x", "1.5s", "-1s", "1 s", "1s2"] {
             assert!(Duration::parse(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn networks() {
+        let private = Cidr::parse("10.0.0.0/8").unwrap();
+        assert!(private.contains("10.1.2.3".parse().unwrap()));
+        assert!(!private.contains("11.0.0.1".parse().unwrap()));
+        // A dual-stack socket reports IPv4 peers mapped into IPv6.
+        assert!(private.contains("::ffff:10.1.2.3".parse().unwrap()));
+        assert!(!private.contains("fd00::1".parse().unwrap()));
+        let host = Cidr::parse("192.0.2.7").unwrap();
+        assert_eq!(host.to_string(), "192.0.2.7/32");
+        assert!(host.contains("192.0.2.7".parse().unwrap()));
+        assert!(!host.contains("192.0.2.8".parse().unwrap()));
+        let everything = Cidr::parse("0.0.0.0/0").unwrap();
+        assert!(everything.contains("203.0.113.9".parse().unwrap()));
+        let ula = Cidr::parse("fd00::/8").unwrap();
+        assert!(ula.contains("fd12::1".parse().unwrap()));
+        assert!(!ula.contains("10.0.0.1".parse().unwrap()));
+        // A mapped peer also matches an IPv6 network written for it.
+        let mapped: IpAddr = "::ffff:10.1.2.3".parse().unwrap();
+        assert!(Cidr::parse("::/0").unwrap().contains(mapped));
+        assert!(Cidr::parse("::ffff:10.0.0.0/104").unwrap().contains(mapped));
+        assert!(!Cidr::parse("::ffff:11.0.0.0/104").unwrap().contains(mapped));
+        // A plain IPv4 peer is still matched by IPv4 entries only.
+        assert!(
+            !Cidr::parse("::ffff:10.0.0.0/104")
+                .unwrap()
+                .contains("10.1.2.3".parse().unwrap())
+        );
+        let error = Cidr::parse("10.0.0.1/8").unwrap_err();
+        assert!(error.contains("`10.0.0.0/8`"), "{error}");
+        for bad in [
+            "",
+            "10.0.0.0/",
+            "10.0.0.0/33",
+            "10.0.0.0/+8",
+            "::/129",
+            "example.com",
+            "10.0.0/8",
+        ] {
+            assert!(Cidr::parse(bad).is_err(), "{bad:?} should be rejected");
         }
     }
 

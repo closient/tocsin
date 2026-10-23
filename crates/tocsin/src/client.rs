@@ -46,16 +46,9 @@ impl Client {
         if !base.path().ends_with('/') {
             base.set_path(&format!("{}/", base.path()));
         }
-        // reqwest is built without a default provider; this is the one.
-        // Installing twice is harmless, so the result is ignored.
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let http = reqwest::Client::builder()
-            .timeout(TIMEOUT)
-            .user_agent(concat!("tocsin/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|error| {
-                Failure::new(Exit::Runtime, format!("cannot start HTTP client: {error}"))
-            })?;
+        let http = crate::net::http_client(TIMEOUT).build().map_err(|error| {
+            Failure::new(Exit::Runtime, format!("cannot start HTTP client: {error}"))
+        })?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

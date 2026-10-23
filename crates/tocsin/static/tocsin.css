@@ -1,0 +1,140 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* Shared by every tocsin page. No framework: system fonts, one column on a
+   phone, a readable measure on a desktop, light and dark from the OS. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1b1f24;
+  --muted: #59636e;
+  --line: #d1d9e0;
+  --panel: #f6f8fa;
+  --accent: #0b5cad;
+  --accent-fg: #ffffff;
+  --ok: #1a7f37;
+  --warn: #9a6700;
+  --bad: #cf222e;
+  --radius: 6px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #9198a1;
+    --line: #3d444d;
+    --panel: #151b23;
+    --accent: #4493f8;
+    --accent-fg: #0d1117;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --bad: #f85149;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+header.site, main, footer.site {
+  max-width: 48rem;
+  margin: 0 auto;
+  padding: 0 1rem;
+}
+
+header.site {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  align-items: baseline;
+  justify-content: space-between;
+  padding-top: 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--line);
+}
+
+header.site a.home { color: var(--fg); font-weight: 700; text-decoration: none; }
+header.site .who { color: var(--muted); font-size: 0.875rem; overflow-wrap: anywhere; }
+
+main { padding-top: 1rem; padding-bottom: 2rem; }
+footer.site { color: var(--muted); font-size: 0.875rem; padding-bottom: 2rem; }
+
+h1 { font-size: 1.5rem; line-height: 1.25; margin: 0.5rem 0 1rem; overflow-wrap: anywhere; }
+h2 { font-size: 1.125rem; margin: 2rem 0 0.75rem; }
+a { color: var(--accent); }
+p, ul, ol { margin: 0 0 0.75rem; }
+
+.muted { color: var(--muted); }
+.notice { padding: 0.75rem 1rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.notice.error { border-color: var(--bad); }
+
+/* Lists of incidents and timelines */
+ul.items { list-style: none; padding: 0; margin: 0; }
+ul.items > li { padding: 0.75rem 0; border-bottom: 1px solid var(--line); }
+ul.items > li:last-child { border-bottom: 0; }
+.item-title { font-weight: 600; overflow-wrap: anywhere; }
+.meta { color: var(--muted); font-size: 0.875rem; }
+
+.badge {
+  display: inline-block;
+  padding: 0 0.5rem;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.5rem;
+  white-space: nowrap;
+}
+.badge.none, .badge.resolved, .badge.completed { color: var(--ok); }
+.badge.minor, .badge.monitoring, .badge.identified { color: var(--warn); }
+.badge.major, .badge.critical, .badge.investigating { color: var(--bad); }
+
+.markdown :first-child { margin-top: 0; }
+.markdown :last-child { margin-bottom: 0; }
+.markdown pre { overflow-x: auto; padding: 0.5rem; background: var(--panel); border-radius: var(--radius); }
+
+/* Forms: full width on a phone, large touch targets */
+form.stack { display: grid; gap: 0.75rem; padding: 1rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+form.inline { display: inline; }
+label { display: grid; gap: 0.25rem; font-weight: 600; }
+label .hint { font-weight: 400; color: var(--muted); font-size: 0.875rem; }
+fieldset { border: 0; padding: 0; margin: 0; display: grid; gap: 0.25rem; }
+legend { font-weight: 600; padding: 0; margin-bottom: 0.25rem; }
+fieldset label { display: flex; gap: 0.5rem; align-items: center; font-weight: 400; }
+
+input[type="text"], select, textarea {
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+textarea { min-height: 6rem; resize: vertical; }
+input[type="checkbox"] { width: 1.25rem; height: 1.25rem; }
+
+button {
+  min-height: 2.75rem;
+  padding: 0.5rem 1.25rem;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--accent-fg);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+button.secondary { background: transparent; color: var(--accent); }
+button:disabled, .htmx-request button { opacity: 0.6; cursor: progress; }
+
+.field-error { color: var(--bad); font-size: 0.875rem; font-weight: 400; }
+.actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.pager { margin-top: 1rem; }

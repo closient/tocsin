@@ -69,6 +69,7 @@ fn api() -> Api {
         store: Arc::new(store),
         config: Arc::new(config),
         events: EventBus::new(),
+        admin: None,
     };
     Api {
         _dir: dir,
@@ -306,6 +307,36 @@ async fn a_title_with_a_line_break_is_422_on_create_and_edit() {
             "/api/v1/incidents/1",
             Some(ONCALL),
             Some(json!({"title": "API errors\r"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["fields"][0]["path"], "title", "{error}");
+}
+
+/// A title is at most 200 characters over the API, as the schema says.
+#[tokio::test]
+async fn a_title_over_200_characters_is_422_on_create_and_edit() {
+    let api = api();
+    let long = "x".repeat(201);
+    let (status, error) = api
+        .create(Some(ONCALL), json!({"title": long, "message": "y"}))
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["fields"][0]["path"], "title", "{error}");
+
+    let (status, _) = api
+        .create(
+            Some(ONCALL),
+            json!({"title": "x".repeat(200), "message": "y"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, error, _) = api
+        .send(
+            Method::PATCH,
+            "/api/v1/incidents/1",
+            Some(ONCALL),
+            Some(json!({"title": long})),
         )
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");

@@ -12,10 +12,15 @@ publish.workspace = true
 tocsin-core.workspace = true
 tocsin-engine.workspace = true
 tocsin-probe.workspace = true
+ammonia.workspace = true
+askama.workspace = true
 axum.workspace = true
+base64.workspace = true
 clap.workspace = true
 gethostname.workspace = true
+pulldown-cmark.workspace = true
 reqwest.workspace = true
+ring.workspace = true
 rustls.workspace = true
 # `rc` serializes the `Arc<Incident>` an event shares with the response.
 serde = { workspace = true, features = ["rc"] }
@@ -26,6 +31,7 @@ tokio = { workspace = true, features = ["net", "sync", "time"] }
 tocsin-store.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+url.workspace = true
 utoipa.workspace = true
 utoipa-axum.workspace = true
 
@@ -39,3 +45,5 @@ insta = { workspace = true }
 tempfile = "3"
 tocsin-core.workspace = true
 tower = { version = "0.5", default-features = false, features = ["util"] }
+# Paused time for the key-cache tests.
+tokio = { workspace = true, features = ["test-util"] }

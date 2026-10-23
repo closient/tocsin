@@ -5,10 +5,11 @@
 
 use rusqlite::{Connection, OptionalExtension, named_params};
 use tocsin_core::incident::{FieldError, Timestamp};
-use tocsin_core::status::{CheckKind, CheckResult, OutageRecord};
+use tocsin_core::status::{CheckKind, CheckResult, OutageEnding, OutageRecord};
 
 use crate::alert::SubjectKind;
 use crate::error::{Error, Result};
+use crate::incident::text;
 use crate::rollup::parse_column;
 
 /// Which page of a history read: newest first from `before`, back to
@@ -123,6 +124,17 @@ pub(crate) fn subject_kind(index: usize, row: &rusqlite::Row<'_>) -> rusqlite::R
     })
 }
 
+/// Column `index`, how an outage ended; `None` while it is open.
+pub(crate) fn ending(
+    index: usize,
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Option<OutageEnding>> {
+    match row.get_ref(index)? {
+        rusqlite::types::ValueRef::Null => Ok(None),
+        _ => text(row, index).map(Some),
+    }
+}
+
 /// Outages open at any moment at or after `page.since`, in three arms
 /// that each ride an index: started since (`outage_by_start`, in order, so
 /// a page reads only its rows); started before and still open
@@ -132,17 +144,20 @@ pub(crate) fn subject_kind(index: usize, row: &rusqlite::Row<'_>) -> rusqlite::R
 /// older outage through `outage_by_start` instead, hence `INDEXED BY`.
 /// The cursor bound is the same as [`RESULTS`]'s, in every arm.
 const OUTAGES: &str =
-    "SELECT id, node_id, check_id, component_id, health, started_at, ended_at, subject_kind
+    "SELECT id, node_id, check_id, component_id, health, started_at, ended_at, subject_kind,
+         ending
      FROM outage INDEXED BY outage_by_start
      WHERE started_at >= :since
        AND started_at <= :at AND (started_at < :at OR id < :before)
      UNION ALL
-     SELECT id, node_id, check_id, component_id, health, started_at, ended_at, subject_kind
+     SELECT id, node_id, check_id, component_id, health, started_at, ended_at, subject_kind,
+         ending
      FROM outage INDEXED BY outage_open
      WHERE ended_at IS NULL AND started_at < :since
        AND started_at <= :at AND (started_at < :at OR id < :before)
      UNION ALL
-     SELECT id, node_id, check_id, component_id, health, started_at, ended_at, subject_kind
+     SELECT id, node_id, check_id, component_id, health, started_at, ended_at, subject_kind,
+         ending
      FROM outage INDEXED BY outage_ended
      WHERE ended_at >= :since AND started_at < :since
        AND started_at <= :at AND (started_at < :at OR id < :before)
@@ -185,6 +200,7 @@ pub(crate) fn outages(conn: &Connection, page: HistoryPage) -> Result<Vec<Outage
                 started_at: Timestamp::from_millis(row.get(5)?),
                 ended_at: row.get::<_, Option<i64>>(6)?.map(Timestamp::from_millis),
                 subject_kind: subject_kind(7, row)?,
+                ending: ending(8, row)?,
             })
         },
     )?;

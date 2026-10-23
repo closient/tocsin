@@ -13,8 +13,11 @@ codes never change meaning. This page is the contract an agent can rely on.
 2. **Validate** with `tocsin config check --config <dir> --json`.
 3. **Try new checks** with `tocsin probe run <check-id> --config <dir> --json`
    before shipping them.
-4. **Ship** the files and restart tocsin (`systemctl restart tocsin`, or
-   restart the container). There is no reload.
+4. **Ship** the files. tocsin reloads the folder by itself, or at once on
+   SIGHUP (`systemctl reload tocsin`). A file that does not validate
+   changes nothing: confirm with `tocsin config status --json`, which
+   exits 1 with the errors when the last reload failed. A change to
+   `[server]` or to the environment still needs a restart.
 
 ## What to read
 
@@ -55,7 +58,7 @@ finds them all:
 | Code | `kind` | Meaning | What to do |
 |------|--------|---------|------------|
 | 0 | `ok` | Done as asked. | |
-| 1 | `check_failed` | It ran, and a check it ran failed. | Read `assertions` in the output: the target is unhealthy, or the assertion is wrong. |
+| 1 | `check_failed` | It ran, and a check it ran failed. | Read `assertions` in the output: the target is unhealthy, or the assertion is wrong. For `config status`, the last reload failed: read `errors`, fix the files, and the next reload recovers. |
 | 2 | `invalid_input` | Bad arguments or configuration; for client commands, any 4xx from the server. | Fix the input; retrying will not help. |
 | 3 | `runtime_error` | Anything else: I/O, the database, a probe that cannot run on this machine, a server that is down or answers 5xx. | The environment, not the input. For `probe run`, exit 3 says nothing about the target. |
 
@@ -86,6 +89,7 @@ finds them all:
 | Is this check passing right now, from here? | `tocsin probe run <id> --json` |
 | What happened recently? | `GET /api/v1/timeline` (outages, incidents, releases) |
 | What incidents are open? | `tocsin incident list --json` |
+| Did my configuration change go in? | `tocsin config status --json` (needs a `status:read` token) |
 | How big is the database, and how old? | `tocsin db info --data <dir> --json` |
 
 Client commands (`incident`, `maintenance`, `release`, `heartbeat`) take the

@@ -191,8 +191,8 @@ deletes.
 ### `outage`
 
 A machine-detected outage of one check on one node. The only change ever made
-to a row is setting `ended_at`, once; the `outage_only_ends` trigger aborts any
-other `UPDATE`. A partial unique index (`outage_open`) allows at most one open
+to a row is setting `ended_at` and `ending` together, once; the
+`outage_only_ends` trigger aborts any other `UPDATE`. A partial unique index (`outage_open`) allows at most one open
 outage (`ended_at IS NULL`) per check per node. Outages are kept indefinitely:
 they are small and they are the incident history.
 
@@ -204,6 +204,7 @@ they are small and they are the incident history.
 | `health` | text | `degraded` or `down`. |
 | `started_at` | integer | |
 | `ended_at` | integer | Null while open; ≥ `started_at`. |
+| `ending` | text | Null while open, else `recovered` (tocsin saw the check leave this health) or `withdrawn` (the check was removed from the configuration while out). Added by 0008, which set every outage already ended to `recovered`. |
 | `alerted` | integer | 1 if the change that opened it alerted, 0 if a maintenance window silenced it; its recovery alerts the same way. Added by 0003; older rows are 1. |
 
 ### `daily_rollup`

@@ -37,6 +37,9 @@ insta = { version = "1.49", features = ["json"] }
 # message itself.
 lettre = { version = "0.11", default-features = false, features = ["hostname", "smtp-transport", "tokio1-rustls", "ring", "rustls-platform-verifier"] }
 jiff = { version = "0.2", default-features = false, features = ["std"] }
+# Watches the configuration folder for `tocsin serve` to reload. 9.0 is
+# still a release candidate.
+notify = "8.2"
 prometheus-client = "0.25"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 regex = "1.12"

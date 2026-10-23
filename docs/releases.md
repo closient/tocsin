@@ -123,6 +123,9 @@ shows them to everyone already.
   kind (outage, incident, deploy, release), then id. `kind` names the
   event, so an outage's own kind is `subject_kind` (`check` or `heartbeat`),
   as on `/api/v1/outages`, just as an incident's is `incident_kind`.
+  An outage event carries `ending` (`recovered`, `withdrawn`, or `null`
+  while open) as on `/api/v1/outages`; a withdrawn outage was not a
+  recovery.
   `since` defaults to
   30 days ago and may reach back at most 366 days; `limit` is 1 to 500,
   default 100. `truncated` says more events fell in the window, and

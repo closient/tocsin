@@ -475,6 +475,97 @@ fn a_delivery_pending_at_shutdown_is_sent_after_the_restart() {
     });
 }
 
+/// Swaps the alerter's notifiers and the history's routes for `config`'s,
+/// and ends the alerts of notifiers it no longer declares, as a reload
+/// does.
+async fn reload(
+    fixture: &Fixture,
+    running: &Running,
+    config: &Config,
+    notifiers: &[(&str, Arc<dyn Notifier>)],
+) -> usize {
+    let router = Arc::new(Router::new(config));
+    let notifiers: Notifiers = notifiers
+        .iter()
+        .map(|(id, notifier)| ((*id).to_owned(), Arc::clone(notifier)))
+        .collect();
+    let ids = notifiers.keys().cloned().collect();
+    running.alerter.reconfigure(notifiers, Arc::clone(&router));
+    running.history.set_router(router);
+    fixture
+        .store
+        .end_alerts_without_notifier(ids, tocsin_store::now_ms())
+        .await
+        .unwrap()
+}
+
+#[test]
+fn a_reload_sends_new_outages_on_the_new_routes_and_open_alerts_on_their_own() {
+    paused(async {
+        let fixture = Fixture::new();
+        let (sender, mut receiver) = channel();
+        let old = Fake::accepting("old", &sender);
+        let kept: Arc<dyn Notifier> = Fake::accepting("kept", &sender);
+        let running = start(
+            &fixture,
+            &config(&monitored(&["old", "kept"], "")),
+            &[("old", old.clone()), ("kept", Arc::clone(&kept))],
+            &AlertMetrics::default(),
+        );
+        let id = running.change(down(T0)).await.unwrap();
+        next_from(&mut receiver, "old").await;
+        next_from(&mut receiver, "kept").await;
+
+        let new: Arc<dyn Notifier> = Fake::accepting("new", &sender);
+        let ended = reload(
+            &fixture,
+            &running,
+            &config(&monitored(&["kept", "new"], "")),
+            &[("kept", kept), ("new", new)],
+        )
+        .await;
+        assert_eq!(ended, 1, "only the removed notifier's alert ends");
+
+        // The open outage recovers: its alert on `kept` resolves, the
+        // removed notifier's ended alert is not resolved, and `new`, which
+        // never fired for it, hears nothing.
+        running.change(up(id, T0 + 1_000)).await;
+        let resolve = next_from(&mut receiver, "kept").await;
+        assert_eq!(resolve.event(), AlertEvent::Resolve);
+
+        // A new outage fires on the new routes.
+        running.change(down(T0 + 2_000)).await;
+        let mut fires = Vec::new();
+        for _ in 0..2 {
+            let attempt = receiver.recv().await.unwrap();
+            fires.push((attempt.notifier.clone(), attempt.event()));
+        }
+        fires.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            fires,
+            [
+                ("kept".to_owned(), AlertEvent::Fire),
+                ("new".to_owned(), AlertEvent::Fire)
+            ]
+        );
+
+        running.alerter.stop().await;
+        let old_seen: Vec<AlertEvent> = old.seen().iter().map(Attempt::event).collect();
+        assert_eq!(old_seen, [AlertEvent::Fire]);
+        // A resolve queued for the removed notifier would be pending, or
+        // failed as no longer configured.
+        let outbox = fixture.store.outbox().await.unwrap();
+        assert!(
+            outbox
+                .pending
+                .iter()
+                .all(|delivery| delivery.alert.notifier_id != "old"),
+            "{outbox:?}"
+        );
+        assert_eq!(failed_deliveries(&fixture).await, []);
+    });
+}
+
 /// Whether an emergency is still ringing after `attempts`, in order: a
 /// fire or repeat while down rings (the `pager` fixture's priority 2), and
 /// a cancel stops it.

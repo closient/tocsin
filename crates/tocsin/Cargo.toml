@@ -22,6 +22,7 @@ clap.workspace = true
 futures-util.workspace = true
 gethostname.workspace = true
 jiff.workspace = true
+notify.workspace = true
 prometheus-client.workspace = true
 pulldown-cmark.workspace = true
 reqwest.workspace = true
@@ -34,6 +35,8 @@ serde_path_to_error.workspace = true
 subtle.workspace = true
 tokio = { workspace = true, features = ["net", "sync", "time"] }
 tocsin-store.workspace = true
+# Hands each request to the router the configuration last reloaded into.
+tower = { version = "0.5", default-features = false, features = ["util"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
@@ -52,7 +55,6 @@ html5ever = "0.40"
 regex.workspace = true
 tempfile = "3"
 tocsin-core.workspace = true
-tower = { version = "0.5", default-features = false, features = ["util"] }
 # Paused time for the key-cache tests.
 tokio = { workspace = true, features = ["test-util"] }
 

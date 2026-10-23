@@ -29,7 +29,7 @@ use tocsin_core::incident::{
 use tocsin_core::release::NewRelease;
 use tocsin_core::state::ComponentStatus;
 use tocsin_engine::{ComponentSnapshot, HeartbeatHandle, Snapshot};
-use tocsin_store::{Day, NewCheckResult, Store};
+use tocsin_store::{Day, NewCheckResult, NewOutage, Store, SubjectKind};
 use tower::ServiceExt;
 
 use super::status::{FRAGMENT_CACHE, PAGE_CACHE};
@@ -158,6 +158,7 @@ fn site(more: &str) -> Site {
         admin: None,
         live: Arc::new(snapshot()),
         heartbeats: HeartbeatHandle::default(),
+        config_status: crate::reload::steady_status(),
     };
     Site {
         _dir: dir,
@@ -1043,6 +1044,42 @@ async fn the_uptime_bar_shows_today_from_the_rollups() {
 }
 
 // --- Archive and pages -------------------------------------------------------
+
+/// A check removed from the configuration while out ends its outage
+/// withdrawn: the component page must say so, never that it recovered.
+#[tokio::test]
+async fn a_withdrawn_outage_never_reads_as_a_recovery() {
+    let site = site("");
+    let store = &site.state.store;
+    let outage = |started_at_ms| NewOutage {
+        node_id: "node-a".into(),
+        subject_kind: SubjectKind::Check,
+        check_id: "api-https".into(),
+        component_id: Some("api".into()),
+        health: Health::Down,
+        started_at_ms,
+        alerted: false,
+    };
+    let start = now().as_millis() - 2 * 3_600_000;
+    let recovered = store.open_outage(outage(start)).await.unwrap();
+    store.end_outage(recovered, start + 60_000).await.unwrap();
+    let withdrawn = store.open_outage(outage(start + 120_000)).await.unwrap();
+    store
+        .withdraw_outage(withdrawn, start + 180_000)
+        .await
+        .unwrap();
+
+    let page = site.page("/components/api").await;
+    let details: Vec<&str> = page
+        .lines()
+        .filter(|line| line.contains("on node-a"))
+        .collect();
+    assert_eq!(details.len(), 2, "{page}");
+    // Newest first: the withdrawn outage, then the recovered one.
+    assert!(details[0].contains(" · withdrawn "), "{}", details[0]);
+    assert!(!details[0].contains(" · ended "), "{}", details[0]);
+    assert!(details[1].contains(" · ended "), "{}", details[1]);
+}
 
 #[tokio::test]
 async fn the_history_pages_through_every_incident_newest_first() {

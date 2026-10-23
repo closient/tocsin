@@ -17,6 +17,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tocsin_core::config::{Duration, Id};
 use tocsin_core::incident::Timestamp;
+use tocsin_core::status::OutageEnding;
 use url::form_urlencoded;
 
 use crate::cli::{HistoryArgs, ServerArgs};
@@ -212,6 +213,7 @@ struct OutagesView {
 struct OutageView {
     started_at: String,
     ended_at: Option<String>,
+    ending: Option<String>,
     health: String,
     check_id: String,
     node_id: String,
@@ -234,6 +236,7 @@ struct EventView {
     check_id: Option<String>,
     health: Option<String>,
     ended_at: Option<String>,
+    ending: Option<String>,
     incident_kind: Option<String>,
     title: Option<String>,
     status: Option<String>,
@@ -309,8 +312,13 @@ fn describe_outages(list: &OutagesView) -> String {
         let ended = outage.ended_at.as_deref().unwrap_or("open");
         let _ = writeln!(
             text,
-            "{}  {:<24}  {:<8}  {:<20}  {}",
-            outage.started_at, ended, outage.health, outage.check_id, outage.node_id
+            "{}  {:<24}  {:<9}  {:<8}  {:<20}  {}",
+            outage.started_at,
+            ended,
+            outage.ending.as_deref().unwrap_or(""),
+            outage.health,
+            outage.check_id,
+            outage.node_id
         );
     }
     if let Some(next) = list.next_before {
@@ -329,10 +337,12 @@ fn describe_timeline(timeline: &TimelineView) -> String {
         let field = |value: &Option<String>| value.clone().unwrap_or_default();
         let line = match (event.kind.as_str(), &event.release) {
             ("outage", _) => {
-                let ended = event
-                    .ended_at
-                    .as_ref()
-                    .map_or_else(|| "still open".to_owned(), |at| format!("until {at}"));
+                let withdrawn = event.ending.as_deref() == Some(OutageEnding::Withdrawn.as_str());
+                let ended = match &event.ended_at {
+                    None => "still open".to_owned(),
+                    Some(at) if withdrawn => format!("withdrawn at {at}"),
+                    Some(at) => format!("until {at}"),
+                };
                 format!(
                     "outage    {} {}, {ended}",
                     field(&event.check_id),
@@ -381,6 +391,58 @@ mod tests {
         );
         let error = parse_since("yesterday").unwrap_err();
         assert!(error.contains("such as 2h or 7d"), "{error}");
+    }
+
+    #[test]
+    fn a_withdrawn_outage_does_not_read_as_a_recovery() {
+        let outage = |check: &str, ended_at: Option<&str>, ending: Option<&str>| {
+            serde_json::json!({
+                "kind": "outage", "at": "2026-10-23T14:00:00.000Z",
+                "started_at": "2026-10-23T14:00:00.000Z", "ended_at": ended_at,
+                "ending": ending, "health": "down", "check_id": check,
+                "node_id": "node-a",
+            })
+        };
+        let outages = [
+            outage("open", None, None),
+            outage(
+                "legacy",
+                Some("2026-10-23T14:30:00.000Z"),
+                Some("withdrawn"),
+            ),
+            outage("db", Some("2026-10-23T14:20:00.000Z"), Some("recovered")),
+        ];
+
+        let list = describe_outages(
+            &view(&serde_json::json!({
+                "since": "2026-10-23T00:00:00.000Z", "outages": outages, "next_before": null,
+            }))
+            .unwrap(),
+        );
+        let lines: Vec<&str> = list.lines().collect();
+        assert!(
+            lines[0].contains("open") && !lines[0].contains("recovered"),
+            "{list}"
+        );
+        assert!(lines[1].contains("withdrawn"), "{list}");
+        assert!(lines[2].contains("recovered"), "{list}");
+
+        let timeline = describe_timeline(
+            &view(&serde_json::json!({
+                "since": "2026-10-23T00:00:00.000Z", "events": outages, "next_after": null,
+            }))
+            .unwrap(),
+        );
+        let lines: Vec<&str> = timeline.lines().collect();
+        assert!(lines[0].ends_with("open down, still open"), "{timeline}");
+        assert!(
+            lines[1].ends_with("legacy down, withdrawn at 2026-10-23T14:30:00.000Z"),
+            "{timeline}"
+        );
+        assert!(
+            lines[2].ends_with("db down, until 2026-10-23T14:20:00.000Z"),
+            "{timeline}"
+        );
     }
 
     #[test]

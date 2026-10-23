@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::Health;
-use crate::incident::{Incident, Timestamp};
+use crate::incident::{Incident, Timestamp, text_enum};
 use crate::state::ComponentStatus;
 
 /// The whole page's status: the worst of `statuses`, ranked operational,
@@ -198,6 +198,22 @@ pub struct OutageRecord {
     pub started_at: Timestamp,
     /// When it ended; `null` while it is open.
     pub ended_at: Option<Timestamp>,
+    /// How it ended; `null` while it is open.
+    pub ending: Option<OutageEnding>,
+}
+
+text_enum! {
+    /// How an outage ended.
+    OutageEnding, "ending" {
+        /// tocsin saw the check leave this outage's health: it came back
+        /// up, or moved between degraded and down, which ends one outage
+        /// and opens the next.
+        Recovered => "recovered",
+        /// The check or heartbeat was removed from the configuration while
+        /// out, so tocsin stopped watching it. `ended_at` is when it
+        /// stopped, not a recovery.
+        Withdrawn => "withdrawn",
+    }
 }
 
 #[cfg(test)]

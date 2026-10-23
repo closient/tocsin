@@ -20,7 +20,7 @@ use tocsin_core::release::{
 
 use crate::FUTURE_TOLERANCE;
 use crate::error::{Error, Result};
-use crate::history::subject_kind;
+use crate::history::{ending, subject_kind};
 use crate::incident::{actor, snapshot, text};
 use crate::rollup::parse_column;
 
@@ -473,7 +473,7 @@ fn outage_events(
     let events = conn
         .prepare_cached(&format!(
             "SELECT id, node_id, check_id, component_id, health, started_at, ended_at, \
-             subject_kind FROM outage WHERE started_at >= :since AND {} \
+             subject_kind, ending FROM outage WHERE started_at >= :since AND {} \
              AND (:component IS NULL OR component_id = :component \
                   OR check_id IN (SELECT value FROM json_each(:checks))) \
              ORDER BY started_at {direction}, id {direction} LIMIT :limit",
@@ -499,6 +499,7 @@ fn outage_events(
                     component_id: row.get(3)?,
                     health: parse_column(4, &row.get::<_, String>(4)?)?,
                     ended_at: row.get::<_, Option<i64>>(6)?.map(Timestamp::from_millis),
+                    ending: ending(8, row)?,
                 })
             },
         )?

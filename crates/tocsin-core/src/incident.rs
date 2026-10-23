@@ -45,13 +45,13 @@ macro_rules! text_enum {
             }
         }
 
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        impl ::std::fmt::Display for $name {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                 f.write_str(self.as_str())
             }
         }
 
-        impl FromStr for $name {
+        impl ::std::str::FromStr for $name {
             type Err = String;
 
             fn from_str(text: &str) -> Result<Self, Self::Err> {
@@ -67,6 +67,8 @@ macro_rules! text_enum {
         }
     };
 }
+
+pub(crate) use text_enum;
 
 text_enum! {
     /// Whether something broke or work was planned.

@@ -4,13 +4,14 @@
 
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// One configuration error, located as precisely as the problem allows.
 ///
 /// Serialized with every key present (`null` when unknown), so a reader can
 /// rely on the shape: `{file, line, column, path, message, hint}`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Diagnostic {
     /// The file, as the loader named it; absent for a problem with the
     /// folder as a whole, such as a missing setting no file mentions.

@@ -14,6 +14,7 @@ use axum::routing::get;
 use jiff::tz::TimeZone;
 use serde::Deserialize;
 use tocsin_core::release::{Release, TimelineEvent};
+use tocsin_core::status::OutageEnding;
 use tocsin_store::Order;
 
 use super::identity::Admin;
@@ -130,6 +131,7 @@ pub(super) fn row(event: &TimelineEvent, rows: &Rows<'_>) -> Row {
             component_id,
             health,
             ended_at,
+            ending,
             ..
         } => Row {
             at: Stamp::zoned(*at, rows.zone),
@@ -142,10 +144,17 @@ pub(super) fn row(event: &TimelineEvent, rows: &Rows<'_>) -> Row {
                 component_id
                     .as_deref()
                     .map_or_else(String::new, |component| format!(" · {component}")),
-                ended_at.map_or_else(
-                    || " · ongoing".to_owned(),
-                    |ended| format!(" · ended {}", super::page::when_in(ended, rows.zone))
-                ),
+                match (ended_at, ending) {
+                    (None, _) => " · ongoing".to_owned(),
+                    // Removed from the configuration while out: nobody saw
+                    // it recover.
+                    (Some(ended), Some(OutageEnding::Withdrawn)) => {
+                        format!(" · withdrawn {}", super::page::when_in(*ended, rows.zone))
+                    }
+                    (Some(ended), _) => {
+                        format!(" · ended {}", super::page::when_in(*ended, rows.zone))
+                    }
+                },
             ),
         },
         TimelineEvent::Incident {

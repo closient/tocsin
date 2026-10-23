@@ -99,6 +99,7 @@ fn api() -> Api {
         admin: None,
         live: Arc::new(tocsin_engine::Snapshot::default()),
         heartbeats: HeartbeatHandle::default(),
+        config_status: crate::reload::steady_status(),
     };
     Api {
         _dir: dir,

@@ -620,5 +620,5 @@ What a token may do.
 | `"heartbeat"` | Heartbeat pings. |
 | `"incident"` | Incidents and maintenance. |
 | `"release"` | Releases and deploys. |
-| `"status:read"` | Reading what is not public in the read API: non-public projects' releases and deploys, check targets, and raw check results. |
+| `"status:read"` | Reading what is not public in the read API: non-public projects' releases and deploys, check targets, raw check results, and how the configuration last reloaded. |
 

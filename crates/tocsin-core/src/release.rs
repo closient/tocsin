@@ -19,7 +19,7 @@ use crate::incident::{
     Actor, FieldError, Impact, IncidentKind, IncidentStatus, Timestamp, check_title, into_result,
 };
 use crate::link::http_url;
-use crate::status::CheckKind;
+use crate::status::{CheckKind, OutageEnding};
 
 /// The environment a release or deploy is for when none is given.
 pub const DEFAULT_ENVIRONMENT: &str = "production";
@@ -382,6 +382,8 @@ pub enum TimelineEvent {
         health: Health,
         /// When it ended; `null` while it is open.
         ended_at: Option<Timestamp>,
+        /// How it ended; `null` while it is open.
+        ending: Option<OutageEnding>,
     },
     /// An incident or maintenance was opened: at its creation.
     Incident {

@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 
 use rusqlite::{Connection, TransactionBehavior, params};
+use tocsin_core::status::OutageEnding;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::checkpoint::Nudge;
@@ -277,7 +278,8 @@ pub(crate) fn insert_result(
 
 /// Ends and opens outages as `change` says, inside whatever transaction or
 /// savepoint `conn` is in. Returns the opened outage's id, or with none the
-/// ended one's.
+/// ended one's. Every change is one the engine saw, so an ended outage
+/// ended [`OutageEnding::Recovered`].
 pub(crate) fn apply_outage_change(
     conn: &Connection,
     change: &OutageChange,
@@ -285,8 +287,12 @@ pub(crate) fn apply_outage_change(
     let mut id = 0;
     if let Some(end) = &change.end {
         let changed = conn
-            .prepare_cached("UPDATE outage SET ended_at = ?2 WHERE id = ?1")?
-            .execute(params![end.id, end.ended_at_ms])?;
+            .prepare_cached("UPDATE outage SET ended_at = ?2, ending = ?3 WHERE id = ?1")?
+            .execute(params![
+                end.id,
+                end.ended_at_ms,
+                OutageEnding::Recovered.as_str()
+            ])?;
         if changed == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }

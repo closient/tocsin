@@ -82,6 +82,7 @@ fn site(config: Config, admin: Option<AdminAuth>) -> Site {
         admin: admin.map(Arc::new),
         live: Arc::new(tocsin_engine::Snapshot::default()),
         heartbeats: tocsin_engine::HeartbeatHandle::default(),
+        config_status: crate::reload::steady_status(),
     };
     Site {
         _dir: dir,
@@ -1622,6 +1623,49 @@ async fn the_admin_timeline_shows_private_deploys_to_an_admin_only() {
 }
 
 /// More than a page of events: the admin sees the newest, and is told so.
+/// An outage whose check was removed while out reads as withdrawn, not
+/// as one that ended.
+#[tokio::test]
+async fn the_admin_timeline_tells_a_withdrawn_outage_from_a_recovery() {
+    let config = config_with(
+        "mode = \"trusted_header\"\ntrusted_proxies = [\"10.0.0.0/8\"]",
+        "",
+    );
+    let admin = AdminAuth::from_config(&config).unwrap();
+    let site = site(config, admin);
+    let store = &site.state.store;
+    let at = |minutes: i64| http::now().as_millis() - minutes * 60_000;
+    let outage = |check: &str, minutes: i64| tocsin_store::NewOutage {
+        node_id: "node-a".into(),
+        subject_kind: tocsin_store::SubjectKind::Check,
+        check_id: check.into(),
+        component_id: Some("api".into()),
+        health: tocsin_core::Health::Down,
+        started_at_ms: at(minutes),
+        alerted: true,
+    };
+    let recovered = store.open_outage(outage("db", 60)).await.unwrap();
+    store.end_outage(recovered, at(50)).await.unwrap();
+    let withdrawn = store.open_outage(outage("legacy", 40)).await.unwrap();
+    store.withdraw_outage(withdrawn, at(30)).await.unwrap();
+
+    let request = from(PROXY, Method::GET, "/admin/timeline")
+        .header("x-forwarded-email", ALICE)
+        .body(Body::empty())
+        .unwrap();
+    let (status, response) = send(&site.router, request).await;
+    assert_eq!(status, StatusCode::OK);
+    let page = text(response).await;
+    let line = |check: &str| {
+        let start = page.find(&format!("{check} down")).expect(check);
+        let item = &page[start..];
+        item[..item.find("</li>").unwrap()].to_owned()
+    };
+    assert!(line("legacy").contains("· withdrawn "), "{page}");
+    assert!(!line("legacy").contains("· ended "), "{page}");
+    assert!(line("db").contains("· ended "), "{page}");
+}
+
 #[tokio::test]
 async fn the_admin_timeline_shows_the_newest_page_and_says_so() {
     let config = config_with(

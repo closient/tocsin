@@ -529,11 +529,11 @@ fn log_file_bytes(path: &Path, frames: u64) -> u64 {
 /// measured is 16.
 const WRITE_FRAMES: u64 = 1 + 1 + 3 + 3 * 5;
 
-/// The writer at the limit copies the log and the next commit rewinds it,
-/// so the log holds at most the limit's frames, less one, plus the frames
-/// of the one write that reached it.
+/// The writer at the hard limit copies the log and the next commit rewinds
+/// it, so the log holds at most the hard limit's frames, less one, plus the
+/// frames of the one write that reached it.
 fn log_bound() -> u64 {
-    u64::try_from(checkpoint::LOG_LIMIT_FRAMES).unwrap() - 1 + WRITE_FRAMES
+    u64::try_from(checkpoint::HARD_LIMIT_FRAMES).unwrap() - 1 + WRITE_FRAMES
 }
 
 /// The largest the log got, in frames and file bytes, and the most frames
@@ -596,7 +596,7 @@ async fn write_row(writer: &Writer) -> (u64, u64) {
 
 /// Writes that never pause race every checkpoint the checkpointer runs, so
 /// none of them leaves the whole log copied and SQLite never rewinds it.
-/// Once the log reaches its limit the writer copies the rest itself,
+/// Once the log reaches its hard limit the writer copies the rest itself,
 /// waiting out any pass of the checkpointer's still running, which keeps
 /// the log within [`log_bound`] however long the writes go on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -605,7 +605,7 @@ async fn the_log_stays_bounded_under_writes_that_never_pause() {
     let path = dir.path().join(DB_FILE);
     // The migrations' frames are not writes of this test's.
     empty_log(&path);
-    let limit_frames = u64::try_from(checkpoint::LOG_LIMIT_FRAMES).unwrap();
+    let limit_frames = u64::try_from(checkpoint::HARD_LIMIT_FRAMES).unwrap();
     let mut highs = LogHighs {
         appended: store
             .writer
@@ -729,7 +729,7 @@ async fn the_writer_waits_at_the_limit_for_another_checkpoint() {
     let (dir, store) = open();
     let path = dir.path().join(DB_FILE);
     empty_log(&path);
-    let limit_frames = u64::try_from(checkpoint::LOG_LIMIT_FRAMES).unwrap();
+    let limit_frames = u64::try_from(checkpoint::HARD_LIMIT_FRAMES).unwrap();
     let mut highs = LogHighs {
         appended: store
             .writer
@@ -818,8 +818,14 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Captured {
 }
 
 /// A connection set up as the writer's is, on the test's own thread, with a
-/// log at its limit. Small pages make that 2 MB rather than 16.
+/// log at its hard limit. Small pages make that 4 MB rather than 32.
 fn log_at_limit(path: &Path) -> rusqlite::Connection {
+    log_of(path, limit_frames())
+}
+
+/// A connection set up as the writer's is, on the test's own thread, with a
+/// log of at least `frames` frames of 512-byte pages.
+fn log_of(path: &Path, frames: u64) -> rusqlite::Connection {
     let conn = rusqlite::Connection::open(path).unwrap();
     conn.execute_batch(
         "PRAGMA page_size = 512;
@@ -829,14 +835,18 @@ fn log_at_limit(path: &Path) -> rusqlite::Connection {
     )
     .unwrap();
     checkpoint::watch(&conn);
-    while checkpoint::log_frames() < limit_frames() {
+    while checkpoint::log_frames() < frames {
         add_row(&conn);
     }
     conn
 }
 
 fn limit_frames() -> u64 {
-    u64::try_from(checkpoint::LOG_LIMIT_FRAMES).unwrap()
+    u64::try_from(checkpoint::HARD_LIMIT_FRAMES).unwrap()
+}
+
+fn soft_limit_frames() -> u64 {
+    u64::try_from(checkpoint::SOFT_LIMIT_FRAMES).unwrap()
 }
 
 fn add_row(conn: &rusqlite::Connection) {
@@ -999,6 +1009,99 @@ fn the_checkpointer_stands_aside_while_the_writer_is_at_the_limit() {
         assert!(
             Instant::now() < deadline,
             "the checkpointer never came back to the log"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(nudge);
+    checkpointer.join().unwrap();
+}
+
+/// Below the hard limit the writer does no checkpoint work at all, so no
+/// write waits for a copy's fsyncs or for another checkpoint's pass, however
+/// slow (TOC-60): past the soft limit the database file stays untouched, and
+/// with another checkpoint holding the lock, as a slow pass of the
+/// checkpointer's does, the writer never waits for it.
+#[test]
+fn below_the_hard_limit_the_writer_neither_copies_nor_waits() {
+    /// More frames than one [`add_row`] appends.
+    const ROW_FRAMES: u64 = 20;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(DB_FILE);
+    let conn = log_of(&path, soft_limit_frames());
+    let (mut nudge, _nudges) = Nudge::detached();
+    let passes = nudge.passes();
+    let before = database_bytes(&path);
+    // A checkpoint would let the next commit rewind the log.
+    let write = |nudge: &mut Nudge| {
+        let frames = checkpoint::log_frames();
+        add_row(&conn);
+        nudge.after_write(&conn);
+        assert!(
+            checkpoint::log_frames() > frames,
+            "the log rewound below the hard limit"
+        );
+    };
+    let halfway = u64::midpoint(soft_limit_frames(), limit_frames());
+    while checkpoint::log_frames() < halfway {
+        write(&mut nudge);
+    }
+    assert_eq!(
+        database_bytes(&path),
+        before,
+        "the writer checkpointed below the hard limit"
+    );
+    let holder = CheckpointHolder::hold(&path);
+    while checkpoint::log_frames() + ROW_FRAMES < limit_frames() {
+        write(&mut nudge);
+    }
+    holder.join();
+    assert_eq!(passes.waits(), 0, "the writer waited below the hard limit");
+    assert_eq!(passes.polls(), 0, "the writer polled below the hard limit");
+}
+
+/// Past the soft limit a write wakes the checkpointer at once, though fewer
+/// frames than its threshold are waiting and its minute is not up. Here a
+/// read keeps the next commit from rewinding a log the checkpointer has just
+/// copied, so the frames after it would otherwise wait a minute.
+#[test]
+fn past_the_soft_limit_a_write_wakes_the_checkpointer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(DB_FILE);
+    let conn = log_of(&path, soft_limit_frames() - 200);
+    let (checkpointer, mut nudge) =
+        Checkpointer::spawn(schema::open_checkpointer(&path).unwrap()).unwrap();
+    let passes = nudge.passes();
+    // A read of the log as it is: the pass may copy all of it, but no
+    // commit can rewind it while the read is open.
+    let reader = rusqlite::Connection::open(&path).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT count(*) FROM t", [], |row| row.get(0))
+        .unwrap();
+    // Thousands of frames are waiting, past the threshold.
+    nudge.after_write(&conn);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while passes.ran() == 0 {
+        assert!(Instant::now() < deadline, "the checkpointer never ran");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let copied = checkpoint::log_frames();
+    add_row(&conn);
+    nudge.after_write(&conn);
+    assert!(
+        checkpoint::log_frames() > copied,
+        "the log rewound past an open read"
+    );
+    reader.execute_batch("COMMIT").unwrap();
+    while checkpoint::log_frames() < soft_limit_frames() {
+        add_row(&conn);
+        nudge.after_write(&conn);
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while passes.ran() < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "a write past the soft limit did not wake the checkpointer within 5s"
         );
         std::thread::sleep(Duration::from_millis(10));
     }

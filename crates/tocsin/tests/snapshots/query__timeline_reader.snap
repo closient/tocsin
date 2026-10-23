@@ -10,7 +10,7 @@ expression: trusted
       "component_id": "api",
       "ended_at": null,
       "health": "down",
-      "id": 3,
+      "id": 4,
       "kind": "outage",
       "node_id": "node-a"
     },

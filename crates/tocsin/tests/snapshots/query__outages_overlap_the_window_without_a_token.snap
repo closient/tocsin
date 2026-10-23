@@ -10,7 +10,7 @@ expression: list
       "component_id": "api",
       "ended_at": null,
       "health": "down",
-      "id": 3,
+      "id": 4,
       "node_id": "node-a",
       "started_at": "[time]"
     },
@@ -19,6 +19,15 @@ expression: list
       "component_id": "api",
       "ended_at": "[time]",
       "health": "degraded",
+      "id": 3,
+      "node_id": "node-a",
+      "started_at": "[time]"
+    },
+    {
+      "check_id": "api-https",
+      "component_id": "api",
+      "ended_at": "[time]",
+      "health": "down",
       "id": 2,
       "node_id": "node-a",
       "started_at": "[time]"

@@ -206,9 +206,10 @@ fn now_ms() -> i64 {
     i64::try_from(since_epoch.as_millis()).unwrap()
 }
 
-/// Results for `api-https` 3h, 90, 30, 20 and 10 minutes ago, and three
-/// outages: one 10 days ago, one 2 days ago, and one open since 20 minutes
-/// ago, which the engine resumes so the API starts down.
+/// Results for `api-https` 3h, 90, 30, 20 and 10 minutes ago, and four
+/// outages: one 10 days ago, one from 8 to 6 days ago, one 2 days ago, and
+/// one open since 20 minutes ago, which the engine resumes so the API
+/// starts down.
 fn seed(path: &Path) {
     fn result(started_at_ms: i64, health: Health) -> NewCheckResult {
         NewCheckResult {
@@ -248,8 +249,16 @@ fn seed(path: &Path) {
             ] {
                 store.append(result(now - ago, health)).await.unwrap();
             }
-            let old = store.open_outage(outage(now - 10 * DAY, Down)).await.unwrap();
+            let old = store
+                .open_outage(outage(now - 10 * DAY, Down))
+                .await
+                .unwrap();
             store.end_outage(old, now - 10 * DAY + HOUR).await.unwrap();
+            let straddles = store
+                .open_outage(outage(now - 8 * DAY, Down))
+                .await
+                .unwrap();
+            store.end_outage(straddles, now - 6 * DAY).await.unwrap();
             let recent = store
                 .open_outage(outage(now - 2 * DAY, Degraded))
                 .await
@@ -258,7 +267,10 @@ fn seed(path: &Path) {
                 .end_outage(recent, now - 2 * DAY + 15 * MINUTE)
                 .await
                 .unwrap();
-            store.open_outage(outage(now - 20 * MINUTE, Down)).await.unwrap();
+            store
+                .open_outage(outage(now - 20 * MINUTE, Down))
+                .await
+                .unwrap();
             store.close().await.unwrap();
         });
 }
@@ -329,7 +341,10 @@ fn history_pages_a_checks_results_for_a_reader() {
     assert_eq!(code, Some(0), "{first}");
     insta::assert_json_snapshot!("history_first_page", first);
 
-    let before = first["next_before"].as_i64().expect("a second page").to_string();
+    let before = first["next_before"]
+        .as_i64()
+        .expect("a second page")
+        .to_string();
     let (code, second) = server.run(
         Some(READER),
         &[
@@ -387,8 +402,8 @@ fn outages_overlap_the_window_without_a_token() {
     insta::assert_json_snapshot!(list);
     assert_eq!(
         list["outages"].as_array().unwrap().len(),
-        2,
-        "the one 10 days ago is out: {list}"
+        3,
+        "the one 8 days ago that ended 6 days ago is in, the one 10 days ago out: {list}"
     );
 }
 

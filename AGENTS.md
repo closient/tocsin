@@ -46,7 +46,7 @@ CI (`.github/workflows/ci.yml`) runs exactly these on linux x86_64 and aarch64, 
 | Code | Kind | Meaning |
 |---|---|---|
 | 0 | `ok` | the command did what was asked |
-| 1 | `check_failed` | the command ran and a check it ran failed |
+| 1 | `check_failed` | the command ran and a check it ran failed, or `tocsin status` found something degraded or down |
 | 2 | `invalid_input` | bad arguments, or configuration that does not validate |
 | 3 | `runtime_error` | anything else: I/O, runtime, database |
 
@@ -66,6 +66,10 @@ tocsin openapi                               # the HTTP API's OpenAPI document
 tocsin incident new|update|edit|show|list|export ...  # HTTP client: TOCSIN_URL, TOCSIN_TOKEN (or --url, --token)
 tocsin release publish|deployed ...                    # HTTP client, as above; docs/releases.md
 tocsin maintenance schedule --start <rfc3339> --end <rfc3339> ...
+tocsin status --json                                    # HTTP client: the page now; exit 1 when degraded or down
+tocsin history <check> --since 2h --json                # raw results; TOCSIN_TOKEN needs status:read
+tocsin outages --since 7d --json
+tocsin timeline --component <id> --since 1d --json      # docs/api.md
 ```
 
 `--config` defaults to `/etc/tocsin`; a folder with no `*.toml` file is an error (exit 2).
@@ -76,7 +80,7 @@ The storage schema and its rules are in [`docs/storage.md`](docs/storage.md); `s
 
 `tocsin probe run` needs no server or database; it exits 0 when the check is up, 1 when it is degraded or down, 2 for an unknown check or invalid configuration, and 3 when the probe cannot run on this machine. Its output, each probe's facts and the ICMP permissions are documented in [`docs/probes.md`](docs/probes.md); the JSON shape is pinned by the snapshots in `crates/tocsin/tests/snapshots/`.
 
-`serve` answers HTTP on `[server] listen`. The incident API, CLI, export format and token setup are in [`docs/incidents.md`](docs/incidents.md). Releases, the timeline API, `/releases` and `/admin/timeline` are in [`docs/releases.md`](docs/releases.md). After changing an API type or route, regenerate the committed document with `cargo run -- openapi > schema/openapi.json` (a test fails until you do). New routes register in `crates/tocsin/src/http/openapi.rs`; writes take the `Authorized<scope::...>` extractor from `http/auth.rs`.
+`serve` answers HTTP on `[server] listen`. The incident API, CLI, export format and token setup are in [`docs/incidents.md`](docs/incidents.md). Releases, the timeline API, `/releases` and `/admin/timeline` are in [`docs/releases.md`](docs/releases.md). The read API (`/api/v1/status.json`, components, checks, check results, outages), `/llms.txt`, the `status:read` scope and the query commands are in [`docs/api.md`](docs/api.md); public data needs no token, and a non-public project never appears without `status:read`. After changing an API type or route, regenerate the committed document with `cargo run -- openapi > schema/openapi.json` (a test fails until you do). New routes register in `crates/tocsin/src/http/openapi.rs`; writes take the `Authorized<scope::...>` extractor from `http/auth.rs`, and reads that show more to a reader take `Viewer`.
 
 Server-rendered pages (the admin page now) live in `crates/tocsin/src/web/`: askama templates in `crates/tocsin/templates/`, assets compiled in from `crates/tocsin/static/` and served by content hash, and the `Admin` / `AdminForm` extractors for a signed-in person. [`docs/admin.md`](docs/admin.md) has the pattern for a new page and the `[server.auth]` threat model.
 

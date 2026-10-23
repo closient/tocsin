@@ -534,6 +534,7 @@ mod tests {
             store: Arc::clone(&store),
             config,
             events,
+            admin: None,
         });
 
         let body = json!({

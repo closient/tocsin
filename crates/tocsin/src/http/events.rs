@@ -2,7 +2,11 @@
 
 //! The in-process event bus. Writers emit an [`Event`] after a change is
 //! committed; subscribers (the SSE stream, notifiers) each get every event
-//! sent after they subscribe.
+//! sent after they subscribe. Events share the incident through an `Arc`,
+//! so each subscriber's copy of an event costs a reference count, not a
+//! copy of every update.
+
+use std::sync::Arc;
 
 use serde::Serialize;
 use tocsin_core::incident::Incident;
@@ -23,17 +27,17 @@ pub enum Event {
     /// An incident or maintenance was opened.
     IncidentCreated {
         /// As stored, with its first update.
-        incident: Incident,
+        incident: Arc<Incident>,
     },
     /// An update was appended.
     IncidentUpdated {
         /// As stored, with the new update last.
-        incident: Incident,
+        incident: Arc<Incident>,
     },
     /// Title, impact, components or schedule were edited.
     IncidentEdited {
         /// As stored after the edit.
-        incident: Incident,
+        incident: Arc<Incident>,
     },
 }
 

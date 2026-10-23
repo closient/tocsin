@@ -154,7 +154,14 @@ where
         }
         let bytes = axum::body::Bytes::from_request(request, state)
             .await
-            .map_err(|rejection| ApiError::bad_request(rejection.body_text()))?;
+            .map_err(|rejection| match rejection.status() {
+                StatusCode::PAYLOAD_TOO_LARGE => ApiError::new(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "too_large",
+                    format!("the body is over the {} byte limit", super::BODY_LIMIT),
+                ),
+                status => ApiError::new(status, "bad_request", rejection.body_text()),
+            })?;
         parse(&bytes).map(ApiJson)
     }
 }

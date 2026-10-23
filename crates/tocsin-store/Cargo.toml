@@ -17,6 +17,8 @@ tokio = { workspace = true, features = ["sync", "rt", "time"] }
 tracing.workspace = true
 
 [dev-dependencies]
+# The tests race a second connection against a read and count statements.
+rusqlite = { version = "0.40", features = ["bundled", "hooks", "trace"] }
 tempfile = "3"
 
 [lints]

@@ -208,6 +208,7 @@ fn serve_answers_http_and_exits_cleanly_on_sigterm() {
         serde_json::json!({ "status": "stopped", "signal": "SIGTERM" })
     );
     assert!(log.contains("shutting down"), "{log}");
+    assert!(!log.contains("still in use"), "{log}");
 }
 
 #[test]

@@ -16,7 +16,8 @@ clap.workspace = true
 gethostname.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
-serde.workspace = true
+# `rc` serializes the `Arc<Incident>` an event shares with the response.
+serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 serde_path_to_error.workspace = true
 subtle.workspace = true

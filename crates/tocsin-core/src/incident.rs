@@ -460,12 +460,41 @@ fn check_text(path: &str, text: &str, errors: &mut Vec<FieldError>) {
     }
 }
 
+/// A title is one line: besides being non-empty, it holds no control
+/// characters (CR, LF, tab, ...) and no Unicode line or paragraph
+/// separator, any of which would break the line it is printed on.
+fn check_title(path: &str, title: &str, errors: &mut Vec<FieldError>) {
+    check_text(path, title, errors);
+    if let Some(found) = title
+        .chars()
+        .find(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+    {
+        errors.push(FieldError::new(
+            path,
+            format!(
+                "must be a single line without control characters; found U+{:04X}",
+                u32::from(found)
+            ),
+        ));
+    }
+}
+
+/// What to do about a schedule on a new incident.
+const SCHEDULE_ON_CREATE: &str = "only maintenance has a schedule; set kind to \"maintenance\"";
+
+/// What to do about a schedule added to an existing incident, whose kind
+/// cannot be changed.
+const SCHEDULE_ON_EDIT: &str = "only maintenance has a schedule, and an incident's kind is fixed \
+     at creation; announce the window as a new incident with kind \"maintenance\"";
+
 /// Checks the schedule `kind` requires: both ends for maintenance, the end
-/// after the start; neither for an incident.
+/// after the start; neither for an incident, which is refused with
+/// `advice`.
 fn check_schedule(
     kind: IncidentKind,
     start: Option<Timestamp>,
     end: Option<Timestamp>,
+    advice: &str,
     errors: &mut Vec<FieldError>,
 ) {
     match kind {
@@ -493,10 +522,7 @@ fn check_schedule(
         IncidentKind::Incident => {
             for (path, value) in [("scheduled_start", start), ("scheduled_end", end)] {
                 if value.is_some() {
-                    errors.push(FieldError::new(
-                        path,
-                        "only maintenance has a schedule; set kind to \"maintenance\"",
-                    ));
+                    errors.push(FieldError::new(path, advice));
                 }
             }
         }
@@ -539,7 +565,7 @@ impl NewIncident {
     /// Every problem found, each at its field path.
     pub fn validate(&self, known: &dyn Fn(&str) -> bool) -> Result<(), Vec<FieldError>> {
         let mut errors = Vec::new();
-        check_text("title", &self.title, &mut errors);
+        check_title("title", &self.title, &mut errors);
         check_text("message", &self.message, &mut errors);
         check_components("components", &self.components, known, &mut errors);
         check_status(self.kind, self.first_status(), &mut errors);
@@ -547,6 +573,7 @@ impl NewIncident {
             self.kind,
             self.scheduled_start,
             self.scheduled_end,
+            SCHEDULE_ON_CREATE,
             &mut errors,
         );
         into_result(errors)
@@ -584,7 +611,7 @@ impl IncidentEdit {
             ));
         }
         if let Some(title) = &self.title {
-            check_text("title", title, &mut errors);
+            check_title("title", title, &mut errors);
         }
         if let Some(components) = &self.components {
             check_components("components", components, known, &mut errors);
@@ -620,6 +647,7 @@ impl Incident {
                 self.kind,
                 edit.scheduled_start,
                 edit.scheduled_end,
+                SCHEDULE_ON_EDIT,
                 &mut errors,
             );
         } else {
@@ -627,6 +655,7 @@ impl Incident {
                 self.kind,
                 edit.scheduled_start.or(self.scheduled_start),
                 edit.scheduled_end.or(self.scheduled_end),
+                SCHEDULE_ON_EDIT,
                 &mut errors,
             );
         }
@@ -755,6 +784,49 @@ mod tests {
     }
 
     #[test]
+    fn a_title_is_one_line_on_create_and_on_edit() {
+        for title in [
+            "API\nerrors",
+            "API errors\r",
+            "API\terrors",
+            "API\u{85}errors",
+            "API\u{2028}errors",
+        ] {
+            let incident = NewIncident {
+                title: title.into(),
+                ..new_incident()
+            };
+            let errors = incident.validate(&known).unwrap_err();
+            assert_eq!(paths(errors.clone()), ["title"], "{title:?}");
+            assert!(errors[0].message.contains("single line"), "{errors:?}");
+            let edit = IncidentEdit {
+                title: Some(title.into()),
+                ..IncidentEdit::default()
+            };
+            assert_eq!(
+                paths(edit.validate(&known).unwrap_err()),
+                ["title"],
+                "{title:?}"
+            );
+        }
+        let unicode = NewIncident {
+            title: "Paiement refusé — API ✓".into(),
+            ..new_incident()
+        };
+        assert_eq!(unicode.validate(&known), Ok(()));
+    }
+
+    #[test]
+    fn a_new_incident_with_a_schedule_is_told_to_be_maintenance() {
+        let incident = NewIncident {
+            scheduled_end: Some(Timestamp::from_millis(9000)),
+            ..new_incident()
+        };
+        let errors = incident.validate(&known).unwrap_err();
+        assert!(errors[0].message.contains("set kind"), "{errors:?}");
+    }
+
+    #[test]
     fn maintenance_needs_a_forward_schedule() {
         let maintenance = NewIncident {
             kind: IncidentKind::Maintenance,
@@ -831,9 +903,13 @@ mod tests {
             scheduled_end: Some(Timestamp::from_millis(9000)),
             ..IncidentEdit::default()
         };
-        assert_eq!(
-            paths(incident.apply_edit(&schedule).unwrap_err()),
-            ["scheduled_end"]
+        let errors = incident.apply_edit(&schedule).unwrap_err();
+        assert_eq!(paths(errors.clone()), ["scheduled_end"]);
+        assert!(
+            errors[0].message.contains("fixed at creation")
+                && !errors[0].message.contains("set kind"),
+            "an edit cannot change kind, so must not suggest it: {}",
+            errors[0].message
         );
 
         let mut maintenance = stored(IncidentKind::Maintenance);

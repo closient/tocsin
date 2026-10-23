@@ -17,6 +17,8 @@ pub enum Error {
     Io(std::io::Error),
     /// The transaction a write was batched into could not commit.
     Batch(String),
+    /// An incident edit could not be encoded as JSON for the edit log.
+    Encode(serde_json::Error),
     /// SQLite would not switch the database to write-ahead logging, for
     /// example because the filesystem cannot share memory between processes.
     NotWal(String),
@@ -51,6 +53,7 @@ impl fmt::Display for Error {
             Error::Migration(error) => write!(f, "migrating the database: {error}"),
             Error::Io(error) => write!(f, "database file: {error}"),
             Error::Batch(message) => write!(f, "committing a write batch: {message}"),
+            Error::Encode(error) => write!(f, "encoding the edit log entry: {error}"),
             Error::NotWal(mode) => write!(
                 f,
                 "the database could not use write-ahead logging (journal mode is {mode})"
@@ -84,6 +87,7 @@ impl std::error::Error for Error {
             Error::Sqlite(error) => Some(error),
             Error::Migration(error) => Some(error),
             Error::Io(error) => Some(error),
+            Error::Encode(error) => Some(error),
             _ => None,
         }
     }

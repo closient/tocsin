@@ -274,6 +274,67 @@ async fn bad_bodies_are_422_with_paths_or_400() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
+/// A body over the limit is 413, not a 400 that blames its syntax.
+#[tokio::test]
+async fn an_oversized_body_is_413() {
+    let api = api();
+    let title = "x".repeat(super::BODY_LIMIT);
+    let (status, error) = api
+        .create(Some(ONCALL), json!({"title": title, "message": "y"}))
+        .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{error}");
+    assert_eq!(error["error"], "too_large");
+}
+
+/// A title is one line, whether set on create or by PATCH.
+#[tokio::test]
+async fn a_title_with_a_line_break_is_422_on_create_and_edit() {
+    let api = api();
+    let (status, error) = api
+        .create(
+            Some(ONCALL),
+            json!({"title": "API\nerrors", "message": "y"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["fields"][0]["path"], "title", "{error}");
+
+    api.create(Some(ONCALL), outage()).await;
+    let (status, error, _) = api
+        .send(
+            Method::PATCH,
+            "/api/v1/incidents/1",
+            Some(ONCALL),
+            Some(json!({"title": "API errors\r"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["fields"][0]["path"], "title", "{error}");
+}
+
+/// Scheduling an existing incident cannot be fixed by changing its kind,
+/// so the error does not suggest it.
+#[tokio::test]
+async fn a_schedule_on_an_incident_edit_says_kind_is_fixed() {
+    let api = api();
+    api.create(Some(ONCALL), outage()).await;
+    let (status, error, _) = api
+        .send(
+            Method::PATCH,
+            "/api/v1/incidents/1",
+            Some(ONCALL),
+            Some(json!({"scheduled_end": "2026-10-23T12:00:00Z"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["fields"][0]["path"], "scheduled_end");
+    let message = error["fields"][0]["message"].as_str().unwrap();
+    assert!(
+        message.contains("fixed at creation") && !message.contains("set kind"),
+        "{message}"
+    );
+}
+
 #[tokio::test]
 async fn updates_and_edits_follow_the_kind_and_404_unknown_ids() {
     let api = api();
@@ -329,6 +390,29 @@ async fn the_list_pages_and_validates_its_query() {
         .await;
     assert_eq!(page["incidents"][0]["id"], 1);
     assert_eq!(page["next_before"], Value::Null);
+    // A last page that is exactly full has no cursor either; one more
+    // incident beyond it does.
+    let (_, page, _) = api
+        .send(Method::GET, "/api/v1/incidents?limit=3", None, None)
+        .await;
+    assert_eq!(page["incidents"].as_array().unwrap().len(), 3);
+    assert_eq!(page["next_before"], Value::Null, "{page}");
+    let (_, page, _) = api
+        .send(
+            Method::GET,
+            "/api/v1/incidents?limit=2&before=3",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(page["incidents"].as_array().unwrap().len(), 2);
+    assert_eq!(page["next_before"], Value::Null, "{page}");
+    api.create(Some(ONCALL), outage()).await;
+    let (_, page, _) = api
+        .send(Method::GET, "/api/v1/incidents?limit=3", None, None)
+        .await;
+    assert_eq!(page["incidents"].as_array().unwrap().len(), 3);
+    assert_eq!(page["next_before"], 2, "{page}");
     for query in ["limit=0", "limit=101", "limit=x", "colour=red"] {
         let (status, _, _) = api
             .send(

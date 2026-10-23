@@ -2,6 +2,8 @@
 
 //! `/api/v1/incidents`: incidents and scheduled maintenance.
 
+use std::sync::Arc;
+
 use axum::Json;
 use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
@@ -70,11 +72,14 @@ pub async fn list_incidents(
             format!("must be 1 to {MAX_LIMIT}"),
         )]));
     }
-    let incidents = state.store.incidents(query.before, limit).await?;
-    let full = incidents.len() == limit as usize;
+    // One more than the page holds says whether another page follows, so
+    // the last page carries no cursor even when it is exactly full.
+    let mut incidents = state.store.incidents(query.before, limit + 1).await?;
+    let more = incidents.len() > limit as usize;
+    incidents.truncate(limit as usize);
     let next_before = incidents
         .last()
-        .filter(|_| full)
+        .filter(|_| more)
         .map(|incident| incident.id);
     Ok(Json(IncidentList {
         incidents,
@@ -129,8 +134,9 @@ pub async fn create_incident(
         .await?;
     tracing::info!(incident = incident.id, kind = %incident.kind, actor = %auth.actor, "incident opened");
     let location = format!("/api/v1/incidents/{}", incident.id);
+    let incident = Arc::new(incident);
     state.events.emit(Event::IncidentCreated {
-        incident: incident.clone(),
+        incident: Arc::clone(&incident),
     });
     Ok((
         StatusCode::CREATED,
@@ -170,8 +176,9 @@ pub async fn add_update(
         .await?
         .ok_or_else(|| missing(id))?;
     tracing::info!(incident = id, %status, actor = %auth.actor, "incident updated");
+    let incident = Arc::new(incident);
     state.events.emit(Event::IncidentUpdated {
-        incident: incident.clone(),
+        incident: Arc::clone(&incident),
     });
     Ok((StatusCode::CREATED, Json(incident)))
 }
@@ -198,7 +205,7 @@ pub async fn edit_incident(
     auth: Authorized<scope::Incident>,
     id: Result<Path<i64>, PathRejection>,
     ApiJson(edit): ApiJson<IncidentEdit>,
-) -> Result<Json<Incident>, ApiError> {
+) -> Result<Json<Arc<Incident>>, ApiError> {
     let id = incident_id(id)?;
     edit.validate(&|component| state.knows_component(component))
         .map_err(ApiError::invalid)?;
@@ -208,8 +215,9 @@ pub async fn edit_incident(
         .await?
         .ok_or_else(|| missing(id))?;
     tracing::info!(incident = id, actor = %auth.actor, "incident edited");
+    let incident = Arc::new(incident);
     state.events.emit(Event::IncidentEdited {
-        incident: incident.clone(),
+        incident: Arc::clone(&incident),
     });
     Ok(Json(incident))
 }

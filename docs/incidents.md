@@ -12,7 +12,7 @@ incidents on their own.
 |---|---|
 | `id` | Assigned by tocsin, never reused. |
 | `kind` | `incident` or `maintenance`. Fixed at creation. |
-| `title` | One line, shown on the status page. |
+| `title` | One line, shown on the status page: no line breaks, tabs or other control characters. |
 | `impact` | `none`, `minor`, `major` or `critical`. Defaults to `none`. |
 | `components` | Ids of `[[component]]` entries it affects, sorted. An id the configuration does not define is refused. |
 | `status` | The status of the latest update. |
@@ -73,8 +73,8 @@ served at `GET /api/v1/openapi.json` and committed as
 | `PATCH /api/v1/incidents/{id}` | `incident` | any of `{title, impact, components, scheduled_start, scheduled_end}` | 200, the incident |
 
 - **List** returns newest first. `limit` is 1 to 100 (default 20).
-  `next_before` is set when the page is full; pass it as `before` for the
-  next page.
+  `next_before` is set when more incidents follow; pass it as `before` for
+  the next page. It is `null` on the last page, even a full one.
 - **Create** needs `title` and `message`; `kind` defaults to `incident`,
   `impact` to `none`, `components` to none, and `status` to the kind's first
   status. Maintenance needs `scheduled_start` and `scheduled_end`.
@@ -105,6 +105,7 @@ Every error, including an unknown route (404) or method (405), is JSON:
 | 403 | `forbidden` | The token lacks the `incident` scope. The message names the token id. |
 | 404 | `not_found` | No incident with that id, or no such route. |
 | 405 | `method_not_allowed` | The route exists; the method does not. |
+| 413 | `too_large` | The body is over 2 MiB (2,097,152 bytes). |
 | 415 | `bad_request` | The body is not sent as JSON. |
 | 422 | `invalid` | The body or query breaks a rule. `fields` lists each problem at its path (`title`, `components[1]`, `scheduled_end`); a path of `""` is the request as a whole. |
 | 500 | `internal` | Logged on the server; the response says only that. |

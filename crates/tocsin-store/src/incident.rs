@@ -4,6 +4,8 @@
 //! one IMMEDIATE transaction; reads assemble an [`Incident`] from its row,
 //! its components and its updates.
 
+use std::collections::HashMap;
+
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use tocsin_core::incident::{
     Actor, ActorKind, Impact, Incident, IncidentEdit, IncidentKind, IncidentStatus, IncidentUpdate,
@@ -117,7 +119,7 @@ pub(crate) fn edit(
     if edit.components.is_some() {
         replace_components(transaction, id, &incident.components)?;
     }
-    let changes = serde_json::to_string(edit).map_err(|error| Error::Batch(error.to_string()))?;
+    let changes = serde_json::to_string(edit).map_err(Error::Encode)?;
     transaction.execute(
         "INSERT INTO incident_edit (incident_id, changes, created_at, created_by_kind, \
          created_by) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -165,57 +167,98 @@ fn append_update(
 
 /// The incident with that id, with its components and updates.
 pub(crate) fn load(conn: &Connection, id: i64) -> Result<Option<Incident>> {
-    let incident = conn
-        .prepare_cached(&format!(
-            "SELECT {INCIDENT_COLUMNS} FROM incident WHERE id = ?1"
-        ))?
-        .query_row([id], incident_row)
-        .optional()?;
-    incident
-        .map(|incident| complete(conn, incident))
-        .transpose()
+    snapshot(conn, |conn| {
+        let incident = conn
+            .prepare_cached(&format!(
+                "SELECT {INCIDENT_COLUMNS} FROM incident WHERE id = ?1"
+            ))?
+            .query_row([id], incident_row)
+            .optional()?;
+        Ok(complete(conn, incident.into_iter().collect())?.pop())
+    })
 }
 
 /// Up to `limit` incidents, newest first, with ids below `before` when it
 /// is given.
 pub(crate) fn list(conn: &Connection, before: Option<i64>, limit: u32) -> Result<Vec<Incident>> {
-    let incidents = conn
-        .prepare_cached(&format!(
-            "SELECT {INCIDENT_COLUMNS} FROM incident WHERE id < ?1 ORDER BY id DESC LIMIT ?2"
-        ))?
-        .query_map(params![before.unwrap_or(i64::MAX), limit], incident_row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    incidents
-        .into_iter()
-        .map(|incident| complete(conn, incident))
-        .collect()
+    snapshot(conn, |conn| {
+        let incidents = conn
+            .prepare_cached(&format!(
+                "SELECT {INCIDENT_COLUMNS} FROM incident WHERE id < ?1 ORDER BY id DESC LIMIT ?2"
+            ))?
+            .query_map(params![before.unwrap_or(i64::MAX), limit], incident_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        complete(conn, incidents)
+    })
 }
 
-/// Fills in components and updates.
-fn complete(conn: &Connection, mut incident: Incident) -> Result<Incident> {
-    incident.components = conn
+/// Runs `read` against one snapshot of the database, so an incident's row,
+/// components and updates all come from the same moment even while the
+/// writer commits. A write already runs inside its own transaction, which
+/// is snapshot enough.
+fn snapshot<T>(conn: &Connection, read: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    if !conn.is_autocommit() {
+        return read(conn);
+    }
+    let transaction = conn.unchecked_transaction()?;
+    let value = read(&transaction)?;
+    transaction.commit()?;
+    Ok(value)
+}
+
+/// Fills in the components and updates of `incidents`, three queries
+/// however many there are.
+fn complete(conn: &Connection, mut incidents: Vec<Incident>) -> Result<Vec<Incident>> {
+    if incidents.is_empty() {
+        return Ok(incidents);
+    }
+    let ids = serde_json::Value::from(
+        incidents
+            .iter()
+            .map(|incident| incident.id)
+            .collect::<Vec<_>>(),
+    )
+    .to_string();
+    let mut components: HashMap<i64, Vec<String>> = HashMap::new();
+    let rows = conn
         .prepare_cached(
-            "SELECT component_id FROM incident_component WHERE incident_id = ?1 \
-             ORDER BY component_id",
+            "SELECT incident_id, component_id FROM incident_component \
+             WHERE incident_id IN (SELECT value FROM json_each(?1)) \
+             ORDER BY incident_id, component_id",
         )?
-        .query_map([incident.id], |row| row.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    incident.updates = conn
+        .query_map([&ids], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<(i64, String)>>>()?;
+    for (id, component) in rows {
+        components.entry(id).or_default().push(component);
+    }
+    let mut updates: HashMap<i64, Vec<IncidentUpdate>> = HashMap::new();
+    let rows = conn
         .prepare_cached(
-            "SELECT id, status, message, created_at, created_by_kind, created_by \
-             FROM incident_update WHERE incident_id = ?1 ORDER BY id",
+            "SELECT incident_id, id, status, message, created_at, created_by_kind, created_by \
+             FROM incident_update WHERE incident_id IN (SELECT value FROM json_each(?1)) \
+             ORDER BY incident_id, id",
         )?
-        .query_map([incident.id], |row| {
-            Ok(IncidentUpdate {
-                id: row.get(0)?,
-                status: text(row, 1)?,
-                message: row.get(2)?,
-                created_at: Timestamp::from_millis(row.get(3)?),
-                created_by: actor(row, 4)?,
-            })
+        .query_map([&ids], |row| {
+            Ok((
+                row.get(0)?,
+                IncidentUpdate {
+                    id: row.get(1)?,
+                    status: text(row, 2)?,
+                    message: row.get(3)?,
+                    created_at: Timestamp::from_millis(row.get(4)?),
+                    created_by: actor(row, 5)?,
+                },
+            ))
         })?
-        .collect::<rusqlite::Result<_>>()?;
-    Ok(incident)
+        .collect::<rusqlite::Result<Vec<(i64, IncidentUpdate)>>>()?;
+    for (id, update) in rows {
+        updates.entry(id).or_default().push(update);
+    }
+    for incident in &mut incidents {
+        incident.components = components.remove(&incident.id).unwrap_or_default();
+        incident.updates = updates.remove(&incident.id).unwrap_or_default();
+    }
+    Ok(incidents)
 }
 
 fn incident_row(row: &Row<'_>) -> rusqlite::Result<Incident> {

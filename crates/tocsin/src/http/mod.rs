@@ -23,6 +23,7 @@ mod tests;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
@@ -56,6 +57,9 @@ impl AppState {
 /// Where the OpenAPI document is served.
 pub const OPENAPI_PATH: &str = "/api/v1/openapi.json";
 
+/// The largest request body accepted; a larger one is 413.
+pub const BODY_LIMIT: usize = 2 * 1024 * 1024;
+
 /// The whole HTTP service.
 pub fn router(state: AppState) -> Router {
     let (router, spec) = openapi::api().split_for_parts();
@@ -79,5 +83,6 @@ pub fn router(state: AppState) -> Router {
         )
         .fallback(|| async { ApiError::not_found("no such route") })
         .method_not_allowed_fallback(|| async { ApiError::method_not_allowed() })
+        .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .with_state(state)
 }

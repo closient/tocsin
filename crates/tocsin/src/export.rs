@@ -11,11 +11,11 @@ use tocsin_core::incident::{Incident, Timestamp};
 /// Renders `incident` as a markdown document.
 ///
 /// Front-matter strings are written as JSON strings, which YAML reads as
-/// the same strings whatever they contain.
+/// the same strings whatever they contain (see [`yaml`]).
 pub fn markdown(incident: &Incident) -> String {
     let mut text = String::from("---\n");
     let mut field = |name: &str, value: serde_json::Value| {
-        let _ = writeln!(text, "{name}: {value}");
+        let _ = writeln!(text, "{name}: {}", yaml(&value));
     };
     field("id", json!(incident.id));
     field("kind", json!(incident.kind));
@@ -46,6 +46,24 @@ pub fn markdown(incident: &Incident) -> String {
             update.created_by,
             update.message.trim_end()
         );
+    }
+    text
+}
+
+/// `value` as JSON, which is a YAML flow value, with NEL, LINE SEPARATOR
+/// and PARAGRAPH SEPARATOR escaped: JSON leaves them raw, and YAML 1.1
+/// reads them as line breaks, which would end the front-matter line inside
+/// a string. They can only occur inside strings, where `\uXXXX` is an
+/// escape both languages read.
+fn yaml(value: &serde_json::Value) -> String {
+    let mut text = String::new();
+    for c in value.to_string().chars() {
+        match c {
+            '\u{85}' | '\u{2028}' | '\u{2029}' => {
+                let _ = write!(text, "\\u{:04x}", u32::from(c));
+            }
+            c => text.push(c),
+        }
     }
     text
 }
@@ -133,6 +151,44 @@ Rolled back.
 - api fixed
 "#;
         assert_eq!(markdown(&incident), expected);
+    }
+
+    /// Characters YAML 1.1 takes for line breaks stay inside their string,
+    /// escaped, so each front-matter field is one line that reads back as
+    /// the stored value.
+    #[test]
+    fn unicode_line_breaks_are_escaped_in_front_matter() {
+        let title = "a\u{85}b\u{2028}c\u{2029}d";
+        let incident = Incident {
+            id: 9,
+            kind: IncidentKind::Incident,
+            title: title.into(),
+            impact: Impact::Minor,
+            status: IncidentStatus::Investigating,
+            components: vec!["x\u{2028}y".into()],
+            scheduled_start: None,
+            scheduled_end: None,
+            resolved_at: None,
+            created_at: at("2026-10-23T14:05:00Z"),
+            created_by: Actor::token("ci"),
+            updated_at: at("2026-10-23T14:05:00Z"),
+            updated_by: Actor::token("ci"),
+            updates: vec![],
+        };
+        let text = markdown(&incident);
+        let front = text.split("---\n").nth(1).unwrap();
+        assert!(
+            !front.contains(['\u{85}', '\u{2028}', '\u{2029}']),
+            "{front:?}"
+        );
+        let line = front
+            .lines()
+            .find(|line| line.starts_with("title: "))
+            .unwrap();
+        assert_eq!(line, r#"title: "a\u0085b\u2028c\u2029d""#);
+        let value: String = serde_json::from_str(line.trim_start_matches("title: ")).unwrap();
+        assert_eq!(value, title);
+        assert!(front.contains(r#"components: ["x\u2028y"]"#), "{front:?}");
     }
 
     #[test]

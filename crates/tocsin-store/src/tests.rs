@@ -6,6 +6,10 @@ use std::time::Duration;
 
 use rusqlite::{TransactionBehavior, params};
 
+use tocsin_core::incident::{
+    Actor, Impact, Incident, IncidentKind, IncidentStatus, NewIncident, NewUpdate, Timestamp,
+};
+
 use crate::{DB_FILE, Day, Error, NewCheckResult, Retention, Store, now_ms};
 
 fn open() -> (tempfile::TempDir, Store) {
@@ -234,4 +238,169 @@ async fn a_result_committed_between_count_and_finalize_is_counted() {
         rolled[0].total, 101,
         "a result was deleted without being counted"
     );
+}
+
+fn outage(title: &str) -> NewIncident {
+    NewIncident {
+        kind: IncidentKind::Incident,
+        title: title.into(),
+        impact: Impact::Major,
+        components: vec!["web".into(), "api".into()],
+        status: None,
+        message: "Looking into it.".into(),
+        scheduled_start: None,
+        scheduled_end: None,
+    }
+}
+
+thread_local! {
+    /// Set when the reader starts the statement that reads incident rows.
+    static READING_ROWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Opens a plain connection to the store's file that, while it is reading
+/// incident rows, has a second connection resolve incident `id` with a
+/// second update. The write commits after the row is read and before the
+/// updates are, which is the moment a torn read would show it.
+fn reader_raced_by_a_resolution(path: &std::path::Path, id: i64) -> rusqlite::Connection {
+    // rusqlite fixes the signature, so the event is taken by value.
+    let watch: fn(rusqlite::trace::TraceEvent<'_>) = |event| {
+        if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event {
+            READING_ROWS.with(|reading| reading.set(sql.contains("FROM incident WHERE")));
+        }
+    };
+    let reader = rusqlite::Connection::open(path).unwrap();
+    reader.trace_v2(
+        rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+        Some(watch),
+    );
+    let writer = std::sync::Mutex::new(Some(rusqlite::Connection::open(path).unwrap()));
+    reader
+        .progress_handler(
+            1,
+            Some(move || {
+                if !READING_ROWS.with(std::cell::Cell::get) {
+                    return false;
+                }
+                if let Some(writer) = writer.lock().unwrap().take() {
+                    writer
+                        .execute_batch(&format!(
+                            "BEGIN IMMEDIATE;
+                             INSERT INTO incident_update (incident_id, status, message,
+                                 created_at, created_by_kind, created_by)
+                             VALUES ({id}, 'resolved', 'Fixed.', 2000, 'token', 'oncall');
+                             UPDATE incident SET status = 'resolved', resolved_at = 2000
+                             WHERE id = {id};
+                             COMMIT;"
+                        ))
+                        .unwrap();
+                }
+                false
+            }),
+        )
+        .unwrap();
+    reader
+}
+
+/// Asserts the incident's status is its latest update's, which a read
+/// that took the row and the updates from different moments breaks.
+fn assert_untorn(incident: &Incident) {
+    let latest = incident.updates.last().unwrap();
+    assert_eq!(
+        incident.status, latest.status,
+        "the row and the updates came from different moments: {incident:?}"
+    );
+}
+
+/// A write that commits while an incident is being read does not tear it:
+/// the row, components and updates all come from one snapshot.
+#[tokio::test]
+async fn an_incident_is_read_from_one_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(DB_FILE);
+    let store = Store::open(&path).unwrap();
+    let id = store
+        .create_incident(
+            outage("API errors"),
+            Actor::token("oncall"),
+            Timestamp::from_millis(1000),
+        )
+        .await
+        .unwrap()
+        .id;
+
+    let reader = reader_raced_by_a_resolution(&path, id);
+    let loaded = crate::incident::load(&reader, id).unwrap().unwrap();
+    assert_untorn(&loaded);
+    // The read saw the incident as it was before the racing write.
+    assert_eq!(loaded.status, IncidentStatus::Investigating);
+
+    let reader = reader_raced_by_a_resolution(&path, id);
+    store
+        .add_incident_update(
+            id,
+            NewUpdate {
+                status: IncidentStatus::Identified,
+                message: "Found it.".into(),
+            },
+            Actor::token("oncall"),
+            Timestamp::from_millis(1500),
+        )
+        .await
+        .unwrap();
+    let listed = crate::incident::list(&reader, None, 10).unwrap();
+    assert_untorn(&listed[0]);
+    assert_eq!(listed[0].status, IncidentStatus::Identified);
+    // The racing writes did land; the reads just did not straddle them.
+    let after = store.incident(id).await.unwrap().unwrap();
+    assert_eq!(after.status, IncidentStatus::Resolved);
+    store.close().await.unwrap();
+}
+
+thread_local! {
+    static STATEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A page of incidents costs the same handful of queries however many
+/// incidents it holds.
+#[tokio::test]
+async fn listing_a_page_does_not_query_per_incident() {
+    fn count(_: rusqlite::trace::TraceEvent<'_>) {
+        STATEMENTS.with(|statements| statements.set(statements.get() + 1));
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(DB_FILE);
+    let store = Store::open(&path).unwrap();
+    let reader = rusqlite::Connection::open(&path).unwrap();
+    reader.trace_v2(
+        rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+        Some(count),
+    );
+    let mut costs = Vec::new();
+    for page in [1, 5] {
+        while store.incidents(None, 100).await.unwrap().len() < page {
+            store
+                .create_incident(
+                    outage("API errors"),
+                    Actor::token("oncall"),
+                    Timestamp::from_millis(1000),
+                )
+                .await
+                .unwrap();
+        }
+        STATEMENTS.with(|statements| statements.set(0));
+        let listed = crate::incident::list(&reader, None, 100).unwrap();
+        assert_eq!(listed.len(), page);
+        assert!(
+            listed.iter().all(
+                |incident| incident.components == ["api", "web"] && incident.updates.len() == 1
+            )
+        );
+        costs.push(STATEMENTS.with(std::cell::Cell::get));
+    }
+    assert_eq!(
+        costs[0], costs[1],
+        "statements for 1 and 5 incidents: {costs:?}"
+    );
+    store.close().await.unwrap();
 }

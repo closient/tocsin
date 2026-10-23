@@ -109,16 +109,15 @@ fn a_route_matches_its_checks_heartbeats_components_and_groups() {
 }
 
 #[test]
-fn a_check_and_a_heartbeat_sharing_an_id_route_by_their_kind() {
+fn routes_and_names_are_looked_up_by_kind() {
     let router = router(
         &["oncheck", "onbeat"],
-        "[[check]]\nid = \"backup\"\nname = \"Backup host\"\ntype = \"tcp\"\n\
-         target = \"backup.example.com:22\"\ncomponent = \"jobs\"\n\n\
-         [[route]]\nid = \"check\"\nnotifiers = [\"oncheck\"]\nchecks = [\"backup\"]\n\n\
+        "[[route]]\nid = \"check\"\nnotifiers = [\"oncheck\"]\nchecks = [\"queue\"]\n\n\
          [[route]]\nid = \"heartbeat\"\nnotifiers = [\"onbeat\"]\nheartbeats = [\"backup\"]\n",
     );
 
-    // The engine says which `backup` failed; the router never guesses.
+    // Configuration keeps the ids apart, but the router still never
+    // guesses: a check named like the heartbeat matches neither route.
     assert_eq!(
         notified(
             &router,
@@ -129,18 +128,26 @@ fn a_check_and_a_heartbeat_sharing_an_id_route_by_their_kind() {
         ),
         ["onbeat"]
     );
+    let nobody: [String; 0] = [];
     assert_eq!(
         notified(&router, SubjectKind::Check, "backup", "jobs", Health::Down),
-        ["oncheck"]
+        nobody
+    );
+    assert_eq!(
+        notified(
+            &router,
+            SubjectKind::Heartbeat,
+            "queue",
+            "jobs",
+            Health::Down
+        ),
+        nobody
     );
     assert_eq!(
         router.subject_name(SubjectKind::Heartbeat, "backup"),
         "Nightly backup"
     );
-    assert_eq!(
-        router.subject_name(SubjectKind::Check, "backup"),
-        "Backup host"
-    );
+    assert_eq!(router.subject_name(SubjectKind::Check, "backup"), "backup");
 }
 
 #[test]

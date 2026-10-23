@@ -1,6 +1,8 @@
 #:schema ../../schema/tocsin.schema.json
 # Heartbeats are pings tocsin expects to receive; projects collect releases
-# that CI pushes; tokens authorize both through the write API.
+# that CI pushes; tokens authorize both through the write API. The backup job
+# pings with `tocsin heartbeat ping nightly-backup` and TOCSIN_TOKEN set to
+# the backup-job secret; see docs/heartbeats.md.
 
 [[heartbeat]]
 id = "nightly-backup"

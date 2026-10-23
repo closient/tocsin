@@ -43,7 +43,7 @@ use crate::checkpoint::Checkpointer;
 pub use crate::day::Day;
 pub use crate::error::{Error, Result};
 pub use crate::incident::OpenIncident;
-pub use crate::outage::{LastUp, Outage};
+pub use crate::outage::{LastUp, LatestResult, Outage};
 use crate::readers::Readers;
 pub use crate::release::{ComponentScope, Order, Projects, ReleaseQuery, TimelineQuery, Written};
 pub use crate::rollup::DailyRollup;
@@ -60,11 +60,10 @@ const READERS: usize = 4;
 pub const FUTURE_TOLERANCE: Duration = Duration::from_hours(1);
 
 /// The tables `tocsin db info` counts, in schema order.
-pub const TABLES: [&str; 12] = [
+pub const TABLES: [&str; 11] = [
     "check_result",
     "outage",
     "daily_rollup",
-    "heartbeat_ping",
     "incident",
     "incident_component",
     "incident_update",
@@ -265,15 +264,41 @@ impl Store {
     /// a value breaks a constraint (an empty id, a negative time), or the
     /// write fails.
     pub async fn append(&self, result: NewCheckResult) -> Result<i64> {
-        let now_ms = now_ms();
-        let tolerance_ms = i64::try_from(FUTURE_TOLERANCE.as_millis()).unwrap_or(i64::MAX);
-        if result.started_at_ms > now_ms.saturating_add(tolerance_ms) {
-            return Err(Error::FutureResult {
-                started_at_ms: result.started_at_ms,
-                now_ms,
-            });
-        }
-        self.writer.insert(Insert::CheckResult(result)).await
+        not_future(&result)?;
+        let insert = Insert::Record {
+            result,
+            kind: SubjectKind::Check,
+            change: None,
+        };
+        self.writer.insert(insert).await
+    }
+
+    /// Stores a result of `kind` and the outage change it confirms, if any,
+    /// in one transaction: both are kept or neither is. Resolves with the
+    /// opened outage's id, if the change opened one.
+    ///
+    /// # Errors
+    ///
+    /// The result fails as [`Store::append`] would, the change as
+    /// [`Store::change_outage`] would, or the write fails; nothing is
+    /// written then.
+    pub async fn record(
+        &self,
+        result: NewCheckResult,
+        kind: SubjectKind,
+        change: Option<OutageChange>,
+    ) -> Result<Option<i64>> {
+        not_future(&result)?;
+        let opens = change.as_ref().is_some_and(|change| change.open.is_some());
+        let id = self
+            .writer
+            .insert(Insert::Record {
+                result,
+                kind,
+                change,
+            })
+            .await?;
+        Ok(opens.then_some(id))
     }
 
     /// Records the start of an outage; resolves with its id.
@@ -341,6 +366,30 @@ impl Store {
     ) -> Result<OutageAlerts> {
         self.writer
             .run(move |conn| alert::change_outage(conn, &change, routing.as_ref(), now_ms))
+            .await
+    }
+
+    /// Stores a result of `kind` and the outage change it confirms as
+    /// [`Store::record`] does and, in the same transaction, queues the
+    /// alerting deliveries the change causes as
+    /// [`Store::change_outage_alerting`] does.
+    ///
+    /// # Errors
+    ///
+    /// The result fails as [`Store::append`] would, the change as
+    /// [`Store::change_outage`] would, or the write fails; nothing is
+    /// written then.
+    pub async fn record_alerting(
+        &self,
+        result: NewCheckResult,
+        kind: SubjectKind,
+        change: OutageChange,
+        routing: Option<AlertRouting>,
+        now_ms: i64,
+    ) -> Result<OutageAlerts> {
+        not_future(&result)?;
+        self.writer
+            .run(move |conn| alert::record(conn, &result, kind, &change, routing.as_ref(), now_ms))
             .await
     }
 
@@ -679,6 +728,22 @@ impl Store {
             .await
     }
 
+    /// For each of `check_ids` that `node_id` has any result for, when its
+    /// latest result started. Heartbeats resume their deadline from it.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn latest_results(
+        &self,
+        node_id: &str,
+        check_ids: Vec<String>,
+    ) -> Result<Vec<LatestResult>> {
+        let node_id = node_id.to_owned();
+        self.read(move |conn| outage::latest_results(conn, &node_id, &check_ids))
+            .await
+    }
+
     /// Every outage `node_id` has open, ordered by check.
     ///
     /// # Errors
@@ -735,7 +800,8 @@ impl Store {
     async fn recompute(&self, since: Option<Day>) -> Result<RollupReport> {
         let (since, rollups) = self
             .read(move |conn| {
-                let today = Day::containing(now_ms());
+                let now_ms = now_ms();
+                let today = Day::containing(now_ms);
                 let Some(asked) =
                     since.map_or_else(|| rollup::resume_day(conn, today), |day| Ok(Some(day)))?
                 else {
@@ -745,7 +811,7 @@ impl Store {
                 let since = asked.max(floor);
                 Ok((
                     Some(since),
-                    rollup::aggregate(conn, since.start_ms(), i64::MAX)?,
+                    rollup::aggregate(conn, since.start_ms(), i64::MAX, now_ms)?,
                 ))
             })
             .await?;
@@ -784,7 +850,7 @@ impl Store {
         let mut rolled_up = 0;
         // A cutoff before 1970 finalizes nothing: the watermark starts at 0.
         while let Some(plan) = self
-            .read(move |conn| rollup::plan_finalize(conn, cutoff))
+            .read(move |conn| rollup::plan_finalize(conn, cutoff, now_ms))
             .await?
         {
             rolled_up += self
@@ -889,6 +955,19 @@ fn join(writer: std::thread::JoinHandle<()>, checkpointer: Checkpointer) -> Resu
     let checkpointer = checkpointer.join();
     writer.map_err(|_| Error::WriterThreadPanicked)?;
     checkpointer.map_err(|_| Error::CheckpointerPanicked)
+}
+
+/// Refuses a result that starts more than [`FUTURE_TOLERANCE`] after now.
+fn not_future(result: &NewCheckResult) -> Result<()> {
+    let now_ms = now_ms();
+    let tolerance_ms = i64::try_from(FUTURE_TOLERANCE.as_millis()).unwrap_or(i64::MAX);
+    if result.started_at_ms > now_ms.saturating_add(tolerance_ms) {
+        return Err(Error::FutureResult {
+            started_at_ms: result.started_at_ms,
+            now_ms,
+        });
+    }
+    Ok(())
 }
 
 /// The current time as unix milliseconds, UTC.

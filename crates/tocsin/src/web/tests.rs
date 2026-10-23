@@ -80,6 +80,7 @@ fn site(config: Config, admin: Option<AdminAuth>) -> Site {
         config: Arc::new(config),
         events: EventBus::new(),
         admin: admin.map(Arc::new),
+        heartbeats: tocsin_engine::HeartbeatHandle::default(),
     };
     Site {
         _dir: dir,

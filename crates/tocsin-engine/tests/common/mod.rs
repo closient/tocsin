@@ -7,7 +7,7 @@
 #![allow(dead_code, reason = "each test file uses a different subset")]
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -16,7 +16,9 @@ use tocsin_core::config::{Config, Environment, Source, load};
 use tocsin_core::probe::{CompiledCheck, ProbeError, ProbeErrorKind, ProbeOutcome};
 use tocsin_engine::ports::{BoxFuture, Clock, History, Notices, Runner, Sink, TokioClock};
 use tocsin_engine::{CheckChange, ComponentChange, EngineEvent, Notice, Parts, Plan};
-use tocsin_store::{Error, LastUp, NewCheckResult, Outage, OutageChange, Result};
+use tocsin_store::{
+    Error, LastUp, LatestResult, NewCheckResult, Outage, OutageChange, Result, SubjectKind,
+};
 use tokio::time::Instant;
 
 /// Wall-clock time when a test's engine starts.
@@ -46,6 +48,15 @@ pub fn check(id: &str, component: Option<&str>, interval_s: u64, confirm: u32) -
     format!(
         "[[check]]\nid = \"{id}\"\ntype = \"tcp\"\ntarget = \"{id}.example.com:443\"\n\
          interval = \"{interval_s}s\"\ntimeout = \"10s\"\nconfirm = {confirm}\n{component}\n"
+    )
+}
+
+/// A heartbeat `id` on `component`, expected every `interval` with `grace`
+/// to spare (durations as written in configuration).
+pub fn heartbeat(id: &str, component: Option<&str>, interval: &str, grace: &str) -> String {
+    let component = component.map_or(String::new(), |c| format!("component = \"{c}\"\n"));
+    format!(
+        "[[heartbeat]]\nid = \"{id}\"\ninterval = \"{interval}\"\ngrace = \"{grace}\"\n{component}\n"
     )
 }
 
@@ -162,14 +173,49 @@ impl Runner for FakeRunner {
     }
 }
 
+/// A [`TokioClock`] that can be pushed ahead of tokio's time: what the
+/// engine sees when its tasks wake late, after the wall clock has already
+/// passed the time they slept until.
+pub struct SkewedClock {
+    tokio: TokioClock,
+    skew_ms: AtomicI64,
+}
+
+impl SkewedClock {
+    /// A clock reading [`T0`] now, with no skew.
+    pub fn new() -> Arc<Self> {
+        Arc::new(SkewedClock {
+            tokio: TokioClock::starting_at(T0),
+            skew_ms: AtomicI64::new(0),
+        })
+    }
+
+    /// Moves the clock `by` ahead of tokio's time, without waking anything.
+    pub fn skip(&self, by: Duration) {
+        self.skew_ms
+            .fetch_add(i64::try_from(by.as_millis()).unwrap(), Ordering::SeqCst);
+    }
+}
+
+impl Clock for SkewedClock {
+    fn now_ms(&self) -> i64 {
+        self.tokio.now_ms() + self.skew_ms.load(Ordering::SeqCst)
+    }
+}
+
 /// An in-memory history enforcing the store's outage rules: one open
 /// outage per check and node, ended once, never before it started.
 #[derive(Default)]
 pub struct FakeHistory {
     pub results: Mutex<Vec<NewCheckResult>>,
     pub outages: Mutex<Vec<Outage>>,
-    /// How many of the next outage changes fail, writing nothing.
+    /// The kind each of `results` was stored as.
+    pub kinds: Mutex<Vec<SubjectKind>>,
+    /// How many of the next results that carry an outage change fail,
+    /// writing neither.
     pub failing_changes: AtomicUsize,
+    /// How long each write takes to resolve, in milliseconds of tokio time.
+    pub write_delay_ms: AtomicU64,
 }
 
 impl FakeHistory {
@@ -187,9 +233,15 @@ impl FakeHistory {
             .collect()
     }
 
-    /// Makes the next `count` outage changes fail.
+    /// Makes the next `count` results that carry an outage change fail.
     pub fn fail_changes(&self, count: usize) {
         self.failing_changes.store(count, Ordering::SeqCst);
+    }
+
+    /// Makes every write take `by` to resolve.
+    pub fn delay_writes(&self, by: Duration) {
+        self.write_delay_ms
+            .store(u64::try_from(by.as_millis()).unwrap(), Ordering::SeqCst);
     }
 
     /// `(check, health, alerted)` for every outage, in the order they
@@ -223,29 +275,42 @@ impl FakeHistory {
 }
 
 impl History for FakeHistory {
-    fn append(&self, result: NewCheckResult) -> BoxFuture<'_, Result<i64>> {
-        let mut results = self.results.lock().unwrap();
-        results.push(result);
-        let id = i64::try_from(results.len()).unwrap();
-        Box::pin(async move { Ok(id) })
-    }
-
-    fn change_outage(&self, change: OutageChange) -> BoxFuture<'_, Result<Option<i64>>> {
-        let result = if self
-            .failing_changes
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
-                left.checked_sub(1)
-            })
-            .is_ok()
-        {
-            Err(Error::Batch("scripted write failure".to_owned()))
-        } else {
-            // Checked on a copy and swapped in, so a failure writes nothing.
-            let mut outages = self.outages.lock().unwrap();
-            let mut next = outages.clone();
-            apply_change(&mut next, change).inspect(|_| *outages = next)
+    fn record(
+        &self,
+        result: NewCheckResult,
+        kind: SubjectKind,
+        change: Option<OutageChange>,
+    ) -> BoxFuture<'_, Result<Option<i64>>> {
+        let written = match change {
+            None => Ok(None),
+            Some(_)
+                if self
+                    .failing_changes
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                        left.checked_sub(1)
+                    })
+                    .is_ok() =>
+            {
+                Err(Error::Batch("scripted write failure".to_owned()))
+            }
+            Some(change) => {
+                // Checked on a copy and swapped in, so a failure writes
+                // nothing.
+                let mut outages = self.outages.lock().unwrap();
+                let mut next = outages.clone();
+                apply_change(&mut next, change).inspect(|_| *outages = next)
+            }
         };
-        Box::pin(async move { result })
+        // The result is stored only with its change, as in one transaction.
+        if written.is_ok() {
+            self.results.lock().unwrap().push(result);
+            self.kinds.lock().unwrap().push(kind);
+        }
+        let delay = Duration::from_millis(self.write_delay_ms.load(Ordering::SeqCst));
+        Box::pin(async move {
+            tokio::time::sleep(delay).await;
+            written
+        })
     }
 
     fn open_outages<'a>(&'a self, node_id: &'a str) -> BoxFuture<'a, Result<Vec<Outage>>> {
@@ -289,6 +354,29 @@ impl History for FakeHistory {
                     check_id,
                     last_up_ms,
                     since_ms,
+                })
+            })
+            .collect();
+        Box::pin(async move { Ok(found) })
+    }
+
+    fn latest_results<'a>(
+        &'a self,
+        node_id: &'a str,
+        check_ids: Vec<String>,
+    ) -> BoxFuture<'a, Result<Vec<LatestResult>>> {
+        let results = self.results.lock().unwrap();
+        let found = check_ids
+            .into_iter()
+            .filter_map(|check_id| {
+                let started_at_ms = results
+                    .iter()
+                    .filter(|result| result.check_id == check_id && result.node_id == node_id)
+                    .map(|result| result.started_at_ms)
+                    .max()?;
+                Some(LatestResult {
+                    check_id,
+                    started_at_ms,
                 })
             })
             .collect();

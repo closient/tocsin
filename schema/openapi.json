@@ -10,6 +10,242 @@
     "version": "1"
   },
   "paths": {
+    "/api/v1/heartbeat/{id}": {
+      "get": {
+        "tags": [
+          "heartbeats"
+        ],
+        "summary": "Record a ping, for clients that can only send `GET`; the same as `POST`.",
+        "operationId": "ping_get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Heartbeat id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "`up` (the default) or `down`.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "What a job reports about its own run.",
+              "enum": [
+                "up",
+                "down"
+              ]
+            }
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "description": "A `[[token]]` secret with the `heartbeat` scope, for clients that\ncannot send `Authorization: Bearer`, percent-encoded (a bare `+`\nreads as a space). The header wins when both are sent. A URL carrying\nits token is itself a secret: it may be logged on its way here, and a\nlink checker or chat unfurler that fetches it pings. Prefer the\nheader.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "message",
+            "in": "query",
+            "description": "A short note stored with the result, such as what failed; at most 1024 bytes.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PingReceipt"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks the `heartbeat` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No heartbeat has that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A bad `status`, or a `message` over 1024 bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is shutting down",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "heartbeats"
+        ],
+        "summary": "Record a ping: the job ran, and says whether it succeeded.",
+        "operationId": "ping_post",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Heartbeat id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "`up` (the default) or `down`.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "What a job reports about its own run.",
+              "enum": [
+                "up",
+                "down"
+              ]
+            }
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "description": "A `[[token]]` secret with the `heartbeat` scope, for clients that\ncannot send `Authorization: Bearer`, percent-encoded (a bare `+`\nreads as a space). The header wins when both are sent. A URL carrying\nits token is itself a secret: it may be logged on its way here, and a\nlink checker or chat unfurler that fetches it pings. Prefer the\nheader.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "message",
+            "in": "query",
+            "description": "A short note stored with the result, such as what failed; at most 1024 bytes.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PingReceipt"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks the `heartbeat` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No heartbeat has that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A bad `status`, or a `message` over 1024 bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is shutting down",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/incidents": {
       "get": {
         "tags": [
@@ -792,7 +1028,7 @@
         "properties": {
           "error": {
             "type": "string",
-            "description": "Stable machine-readable code: `unauthorized`, `forbidden`,\n`not_found`, `method_not_allowed`, `bad_request`, `too_large`, `invalid`\nor `internal`."
+            "description": "Stable machine-readable code: `unauthorized`, `forbidden`,\n`not_found`, `method_not_allowed`, `bad_request`, `too_large`, `invalid`,\n`unavailable` or `internal`."
           },
           "fields": {
             "type": "array",
@@ -1242,6 +1478,37 @@
         },
         "additionalProperties": false
       },
+      "PingReceipt": {
+        "type": "object",
+        "description": "A ping as recorded.",
+        "required": [
+          "id",
+          "status",
+          "received_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The heartbeat."
+          },
+          "received_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When the ping was recorded; the next is due by this plus the\nheartbeat's `interval + grace`."
+          },
+          "status": {
+            "$ref": "#/components/schemas/PingStatus",
+            "description": "The health recorded."
+          }
+        }
+      },
+      "PingStatus": {
+        "type": "string",
+        "description": "What a job reports about its own run.",
+        "enum": [
+          "up",
+          "down"
+        ]
+      },
       "Release": {
         "type": "object",
         "description": "A release of a project to one environment.",
@@ -1600,6 +1867,10 @@
     {
       "name": "timeline",
       "description": "Outages, incidents and deploys in one stream"
+    },
+    {
+      "name": "heartbeats",
+      "description": "Pings from scheduled jobs"
     }
   ]
 }

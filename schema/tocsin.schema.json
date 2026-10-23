@@ -309,7 +309,7 @@
               "$ref": "#/definitions/Id"
             }
           ],
-          "description": "Unique among checks in every file."
+          "description": "Unique among checks and heartbeats in every file: they share one\nhistory."
         },
         "interval": {
           "allOf": [
@@ -681,7 +681,7 @@
     },
     "Heartbeat": {
       "additionalProperties": false,
-      "description": "`[[heartbeat]]`: a ping tocsin expects to receive, such as a cron job\nreporting in. Pings are sent to the write API with a token that has the\n`heartbeat` scope.",
+      "description": "`[[heartbeat]]`: a ping tocsin expects to receive, such as a cron job\nreporting in. Pings are sent to the write API with a token that has the\n`heartbeat` scope. A heartbeat with no ping for `interval + grace` is\ndown; it is a member of its component exactly as a check is.",
       "properties": {
         "component": {
           "anyOf": [
@@ -701,7 +701,7 @@
             }
           ],
           "default": "1m",
-          "description": "How late a ping may be before the heartbeat is down."
+          "description": "How late a ping may be before the heartbeat is down: it is down once\n`interval + grace` passes without one."
         },
         "id": {
           "allOf": [
@@ -709,7 +709,7 @@
               "$ref": "#/definitions/Id"
             }
           ],
-          "description": "Unique among heartbeats in every file."
+          "description": "Unique among checks and heartbeats in every file: they share one\nhistory."
         },
         "interval": {
           "allOf": [

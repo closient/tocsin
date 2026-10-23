@@ -425,6 +425,30 @@ impl<'a> Loader<'a> {
     }
 
     fn register_id(&mut self, kind: &'static str, id: &str, origin: Origin) {
+        // Checks and heartbeats share one history (`check_result.check_id`)
+        // and one member list per component, so their ids must not collide.
+        let shared = match kind {
+            "check" => Some("heartbeat"),
+            "heartbeat" => Some("check"),
+            _ => None,
+        };
+        if let Some(other) = shared
+            && let Some(first) = self.ids.get(other).and_then(|ids| ids.get(id)).cloned()
+        {
+            let message = format!(
+                "{kind} id `{id}` is already a {other} id, defined at {}",
+                self.describe(&first)
+            );
+            self.report(
+                &origin,
+                message,
+                Some(
+                    "checks and heartbeats share one id space: their results are stored together"
+                        .to_owned(),
+                ),
+            );
+            return;
+        }
         if let Some(first) = self.ids.get(kind).and_then(|ids| ids.get(id)).cloned() {
             let message = format!(
                 "duplicate {kind} id `{id}`; first defined at {}",
@@ -572,6 +596,7 @@ impl<'a> Loader<'a> {
                     None,
                 );
             }
+            self.validate_heartbeat_retention(heartbeat, items.server.as_ref());
         }
         for notifier in &items.notifiers {
             self.validate_notifier(notifier);
@@ -612,6 +637,51 @@ impl<'a> Loader<'a> {
         {
             team.make_ascii_lowercase();
         }
+    }
+
+    /// A heartbeat's deadline runs from its latest stored result, so that
+    /// result must outlive the wait: with `interval + grace` past half the
+    /// retention, a restart can find the anchor swept, and a late miss can
+    /// fall before the retention watermark the store refuses to write
+    /// behind.
+    fn validate_heartbeat_retention(
+        &mut self,
+        heartbeat: &Item<Heartbeat>,
+        server: Option<&Item<Server>>,
+    ) {
+        let retention_days = server.map_or_else(
+            || Server::default().retention_days,
+            |server| server.value.retention_days,
+        );
+        if retention_days == 0 {
+            return; // reported on its own
+        }
+        let value = &heartbeat.value;
+        let allowance = value.interval.get().saturating_add(value.grace.get());
+        let half = std::time::Duration::from_secs(u64::from(retention_days) * 43_200);
+        if allowance <= half {
+            return;
+        }
+        // Without the key, `describe` names the `[server]` table, where it
+        // would go.
+        let retention = match server {
+            Some(server) => format!(
+                "`[server] retention_days = {retention_days}` ({})",
+                self.describe(&server.origin.key("retention_days"))
+            ),
+            None => format!("the default `[server] retention_days = {retention_days}`"),
+        };
+        self.report(
+            &heartbeat.origin.key("interval"),
+            format!(
+                "heartbeat `{}`: `interval` ({}) + `grace` ({}) must be at most half of {retention}",
+                value.id, value.interval, value.grace
+            ),
+            Some(
+                "its deadline runs from its latest stored result, which retention must not sweep first: shorten `interval` or `grace`, or raise `retention_days`"
+                    .to_owned(),
+            ),
+        );
     }
 
     fn validate_server(&mut self, server: &Item<Server>) {

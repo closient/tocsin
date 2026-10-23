@@ -6,7 +6,9 @@
 use std::sync::Arc;
 
 use tocsin_engine::ports::{BoxFuture, Clock, History};
-use tocsin_store::{LastUp, NewCheckResult, Outage, OutageChange, Result, Store};
+use tocsin_store::{
+    LastUp, LatestResult, NewCheckResult, Outage, OutageChange, Result, Store, SubjectKind,
+};
 use tokio::sync::Notify;
 
 use crate::route::Router;
@@ -51,12 +53,17 @@ impl AlertingHistory {
 }
 
 impl History for AlertingHistory {
-    fn append(&self, result: NewCheckResult) -> BoxFuture<'_, Result<i64>> {
-        Box::pin(self.store.append(result))
-    }
-
-    fn change_outage(&self, change: OutageChange) -> BoxFuture<'_, Result<Option<i64>>> {
+    fn record(
+        &self,
+        result: NewCheckResult,
+        kind: SubjectKind,
+        change: Option<OutageChange>,
+    ) -> BoxFuture<'_, Result<Option<i64>>> {
         Box::pin(async move {
+            // Most results change nothing: those join the writer's batches.
+            let Some(change) = change else {
+                return self.store.record(result, kind, None).await;
+            };
             let routing = change
                 .open
                 .as_ref()
@@ -71,7 +78,7 @@ impl History for AlertingHistory {
                 });
             let alerts = self
                 .store
-                .change_outage_alerting(change, routing, self.clock.now_ms())
+                .record_alerting(result, kind, change, routing, self.clock.now_ms())
                 .await?;
             if alerts.queued > 0 {
                 self.wake.notify_one();
@@ -90,5 +97,13 @@ impl History for AlertingHistory {
         check_ids: Vec<String>,
     ) -> BoxFuture<'a, Result<Vec<LastUp>>> {
         Box::pin(self.store.last_up(node_id, check_ids))
+    }
+
+    fn latest_results<'a>(
+        &'a self,
+        node_id: &'a str,
+        check_ids: Vec<String>,
+    ) -> BoxFuture<'a, Result<Vec<LatestResult>>> {
+        Box::pin(self.store.latest_results(node_id, check_ids))
     }
 }

@@ -692,6 +692,69 @@ async fn outages_are_public_and_overlap_the_window() {
 }
 
 #[tokio::test]
+async fn an_outage_says_whether_it_recovered_or_was_withdrawn() {
+    let api = api();
+    let at = |minutes: i64| now().as_millis() - minutes * 60_000;
+    let store = &api.state.store;
+    let outage = |check: &str, minutes: i64| NewOutage {
+        node_id: "node-a".into(),
+        subject_kind: SubjectKind::Check,
+        check_id: check.into(),
+        component_id: Some("api".into()),
+        health: Down,
+        started_at_ms: at(minutes),
+        alerted: true,
+    };
+    let recovered = store.open_outage(outage("db", 60)).await.unwrap();
+    store.end_outage(recovered, at(50)).await.unwrap();
+    let withdrawn = store.open_outage(outage("legacy", 40)).await.unwrap();
+    store.withdraw_outage(withdrawn, at(30)).await.unwrap();
+    let open = store.open_outage(outage("api-https", 10)).await.unwrap();
+
+    let (status, list) = api.get("/api/v1/outages", None).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let endings: Vec<(i64, Value)> = list["outages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|outage| (outage["id"].as_i64().unwrap(), outage["ending"].clone()))
+        .collect();
+    assert_eq!(
+        endings,
+        [
+            (open, Value::Null),
+            (withdrawn, json!("withdrawn")),
+            (recovered, json!("recovered")),
+        ]
+    );
+
+    let (status, timeline) = api.get("/api/v1/timeline", None).await;
+    assert_eq!(status, StatusCode::OK, "{timeline}");
+    let mut endings: Vec<(String, Value)> = timeline["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "outage")
+        .map(|event| {
+            (
+                event["check_id"].as_str().unwrap().to_owned(),
+                event["ending"].clone(),
+            )
+        })
+        .collect();
+    endings.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        endings,
+        [
+            ("api-https".to_owned(), Value::Null),
+            ("db".to_owned(), json!("recovered")),
+            ("legacy".to_owned(), json!("withdrawn")),
+        ],
+        "{timeline}"
+    );
+}
+
+#[tokio::test]
 async fn llms_txt_is_the_status_in_plain_text_with_where_to_go_next() {
     let api = api();
     api.post(

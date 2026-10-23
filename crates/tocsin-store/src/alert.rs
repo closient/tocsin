@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use tocsin_core::Health;
+use tocsin_core::status::OutageEnding;
 
 use crate::error::Result;
 use crate::rollup::parse_column;
@@ -379,7 +380,8 @@ fn outage_identity(conn: &Connection, id: i64, open_only: bool) -> Result<Option
 }
 
 /// Ends outage `id`, whose check or heartbeat is no longer configured, at
-/// `now_ms` (or its start, if that is later), and ends its alerts without
+/// `now_ms` (or its start, if that is later) as
+/// [`OutageEnding::Withdrawn`], and ends its alerts without
 /// resolving them, in one transaction. Returns the deliveries queued, or
 /// zero if the outage was not open.
 pub(crate) fn withdraw_outage(conn: &mut Connection, id: i64, now_ms: i64) -> Result<usize> {
@@ -388,8 +390,10 @@ pub(crate) fn withdraw_outage(conn: &mut Connection, id: i64, now_ms: i64) -> Re
         return Ok(0);
     };
     transaction
-        .prepare_cached("UPDATE outage SET ended_at = max(?2, started_at) WHERE id = ?1")?
-        .execute(params![id, now_ms])?;
+        .prepare_cached(
+            "UPDATE outage SET ended_at = max(?2, started_at), ending = ?3 WHERE id = ?1",
+        )?
+        .execute(params![id, now_ms, OutageEnding::Withdrawn.as_str()])?;
     let open_alerts = open_alerts(&transaction, &identity)?;
     let queued = end_alerts(
         &transaction,

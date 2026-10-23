@@ -13,7 +13,7 @@ use tocsin_alert::{
     AlertMetrics, Alerter, AlertingHistory, HTTP_TIMEOUT, Notifiers, Router, WorkerSettings,
 };
 use tocsin_core::config::Config;
-use tocsin_engine::ports::{Clock, ProbeRunner, SystemClock};
+use tocsin_engine::ports::{Clock, History, ProbeRunner, SystemClock};
 use tocsin_engine::{Engine, HeartbeatHandle, Parts, Plan, StatusHandle};
 use tocsin_probe::ProbeContext;
 use tocsin_store::{DB_FILE, Retention, Store};
@@ -245,6 +245,18 @@ impl Monitor {
         events: &EventBus,
         metrics: &AlertMetrics,
     ) -> Result<Self, Failure> {
+        Self::start_with(config, store, events, metrics, |history| history).await
+    }
+
+    /// [`Monitor::start`], with the engine's history passed through `wrap`
+    /// first: the seam a test uses to make the engine's reads fail.
+    async fn start_with(
+        config: &Config,
+        store: &Arc<Store>,
+        events: &EventBus,
+        metrics: &AlertMetrics,
+        wrap: impl FnOnce(Arc<dyn History>) -> Arc<dyn History>,
+    ) -> Result<Self, Failure> {
         let plan = Plan::from_config(config).map_err(|error| {
             Failure::new(
                 Exit::Runtime,
@@ -292,7 +304,7 @@ impl Monitor {
         ));
         let parts = Parts {
             runner: Arc::new(ProbeRunner::new(probe_context(config))),
-            history: Arc::clone(&history) as _,
+            history: wrap(Arc::clone(&history) as _),
             notices: Arc::clone(store) as _,
             sink: Arc::new(events.clone()),
             clock: Arc::new(SystemClock),
@@ -649,7 +661,8 @@ impl Shutdown {
 #[cfg(test)]
 mod tests {
     use std::future::{pending, ready};
-    use std::sync::{Arc, Weak};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, Weak};
     use std::time::Duration;
 
     use axum::body::Body;
@@ -659,11 +672,15 @@ mod tests {
     use tocsin_core::config::{Environment, Source};
     use tocsin_core::state::ComponentStatus;
     use tocsin_engine::Ping;
-    use tocsin_store::{DB_FILE, NewCheckResult, Retention, Store, SubjectKind};
+    use tocsin_engine::ports::{BoxFuture, History};
+    use tocsin_store::{
+        DB_FILE, LastUp, LatestResult, NewCheckResult, Outage, OutageChange, Retention, Store,
+        SubjectKind,
+    };
     use tokio::sync::oneshot;
     use tower::ServiceExt;
 
-    use super::{AlertMetrics, Monitor, close, io, start_checks, supervise};
+    use super::{AlertMetrics, Monitor, ReloadError, close, io, start_checks, supervise};
     use crate::exit::Exit;
     use crate::http::events::{Event, EventBus};
     use crate::http::{self, AppState};
@@ -976,6 +993,190 @@ mod tests {
         let outages = store.open_outages("test").await.unwrap();
         assert_eq!(outages.len(), 1, "the outage itself stays open");
         monitor.stop().await;
+        assert!(close(store).await);
+    }
+
+    /// The engine's history, whose next `failing` reads of open outages
+    /// fail.
+    struct FailingReads {
+        history: Arc<dyn History>,
+        failing: AtomicUsize,
+    }
+
+    impl History for FailingReads {
+        fn record(
+            &self,
+            result: NewCheckResult,
+            kind: SubjectKind,
+            change: Option<OutageChange>,
+        ) -> BoxFuture<'_, tocsin_store::Result<Option<i64>>> {
+            self.history.record(result, kind, change)
+        }
+
+        fn open_outages<'a>(
+            &'a self,
+            node_id: &'a str,
+        ) -> BoxFuture<'a, tocsin_store::Result<Vec<Outage>>> {
+            let fail = self
+                .failing
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok();
+            if fail {
+                return Box::pin(ready(Err(tocsin_store::Error::Batch(
+                    "scripted read failure".to_owned(),
+                ))));
+            }
+            self.history.open_outages(node_id)
+        }
+
+        fn last_up<'a>(
+            &'a self,
+            node_id: &'a str,
+            check_ids: Vec<String>,
+        ) -> BoxFuture<'a, tocsin_store::Result<Vec<LastUp>>> {
+            self.history.last_up(node_id, check_ids)
+        }
+
+        fn latest_results<'a>(
+            &'a self,
+            node_id: &'a str,
+            check_ids: Vec<String>,
+        ) -> BoxFuture<'a, tocsin_store::Result<Vec<LatestResult>>> {
+            self.history.latest_results(node_id, check_ids)
+        }
+
+        fn withdraw(&self, outage: i64, at_ms: i64) -> BoxFuture<'_, tocsin_store::Result<()>> {
+            self.history.withdraw(outage, at_ms)
+        }
+    }
+
+    /// A server that takes every notifier's posts, at `/{id}`, and yields
+    /// the id of each.
+    async fn notifier_server() -> (
+        std::net::SocketAddr,
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) {
+        let (sent, received) = tokio::sync::mpsc::unbounded_channel();
+        let app = axum::Router::new().route(
+            "/{id}",
+            axum::routing::post(
+                async move |axum::extract::Path(id): axum::extract::Path<String>| {
+                    let _ = sent.send(id);
+                    StatusCode::OK
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        (address, received)
+    }
+
+    /// A reload the engine cannot apply puts alerting back as it was: the
+    /// old routes still queue alerts, and the worker still has the
+    /// notifiers to send them, rather than routing to notifiers it never
+    /// started.
+    #[tokio::test]
+    async fn a_reload_the_engine_refuses_leaves_the_old_alerting() {
+        let (_dir, store) = open();
+        let (notify, mut received) = notifier_server().await;
+        // The check is up while this listens, and down once it is dropped.
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = target.local_addr().unwrap();
+        let check = |id: &str| {
+            format!(
+                "[[check]]\nid = \"{id}\"\ntype = \"tcp\"\ntarget = \"{address}\"\n\
+                 interval = \"1s\"\ntimeout = \"500ms\"\nconfirm = 1\n"
+            )
+        };
+        let alerting = |id: &str| {
+            format!(
+                "[[notifier]]\nid = \"{id}\"\ntype = \"ntfy\"\n\
+                 [notifier.ntfy]\nurl = \"http://{notify}/{id}\"\n\
+                 [[route]]\nid = \"all\"\nnotifiers = [\"{id}\"]\n"
+            )
+        };
+        let old = parse(&format!("{}{}", check("db"), alerting("old")));
+        let new = parse(&format!(
+            "{}{}{}",
+            check("db"),
+            check("api"),
+            alerting("new")
+        ));
+
+        let events = EventBus::new();
+        let mut seen = events.subscribe();
+        let history = Arc::new(Mutex::new(None::<Arc<FailingReads>>));
+        let mut monitor =
+            Monitor::start_with(&old, &store, &events, &AlertMetrics::default(), |inner| {
+                let failing = Arc::new(FailingReads {
+                    history: inner,
+                    failing: AtomicUsize::new(0),
+                });
+                *history.lock().unwrap() = Some(Arc::clone(&failing));
+                failing
+            })
+            .await
+            .unwrap();
+        let mut reached = async |health: Health| {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if let Event::CheckChanged(change) = seen.recv().await.unwrap()
+                        && change.check_id == "db"
+                        && change.to == health
+                    {
+                        return;
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("db never went {health:?}"));
+        };
+        reached(Health::Up).await;
+
+        history
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .failing
+            .store(1, Ordering::SeqCst);
+        let error = monitor
+            .reload(&new)
+            .await
+            .expect_err("the engine's read fails");
+        assert!(matches!(error, ReloadError::Rejected(_)), "{error:?}");
+        let running: Vec<String> = monitor
+            .snapshot()
+            .checks
+            .iter()
+            .map(|check| check.id.clone())
+            .collect();
+        assert_eq!(running, ["db"], "the old checks still run");
+
+        drop(target);
+        reached(Health::Down).await;
+        let delivered = tokio::time::timeout(Duration::from_secs(10), received.recv())
+            .await
+            .expect("the old notifier is sent the alert");
+        assert_eq!(delivered.as_deref(), Some("old"));
+        let notifiers: Vec<String> = store
+            .alerts()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|alert| alert.notifier_id)
+            .collect();
+        assert_eq!(notifiers, ["old"], "routed by the old routes");
+        monitor.stop().await;
+        assert!(
+            received.try_recv().is_err(),
+            "nothing reached the new notifier"
+        );
+        // It holds the engine's history, and through it the store.
+        drop(history);
         assert!(close(store).await);
     }
 }

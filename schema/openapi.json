@@ -2232,6 +2232,14 @@
         },
         "additionalProperties": false
       },
+      "OutageEnding": {
+        "type": "string",
+        "description": "How an outage ended.",
+        "enum": [
+          "recovered",
+          "withdrawn"
+        ]
+      },
       "OutageList": {
         "type": "object",
         "description": "`GET /api/v1/outages`: one page of outages, newest first.",
@@ -2289,6 +2297,17 @@
               {
                 "$ref": "#/components/schemas/Timestamp",
                 "description": "When it ended; `null` while it is open."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ending": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OutageEnding",
+                "description": "How it ended; `null` while it is open."
               },
               {
                 "type": "null"
@@ -2572,6 +2591,17 @@
                   {
                     "$ref": "#/components/schemas/Timestamp",
                     "description": "When it ended; `null` while it is open."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ending": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/OutageEnding",
+                    "description": "How it ended; `null` while it is open."
                   },
                   {
                     "type": "null"

@@ -61,7 +61,7 @@ A reload reads and validates the whole folder exactly as startup does, and eithe
 
 Removing something that is alerting ends it rather than leaving it open:
 
-- **A removed check or heartbeat** with an open outage has the outage withdrawn: ended at the reload, with no resolve sent, since nobody saw it recover. An alert still ringing (a Pushover emergency) is cancelled.
+- **A removed check or heartbeat** with an open outage has the outage withdrawn: ended at the reload, with no resolve sent, since nobody saw it recover, and recorded as `ending: "withdrawn"` in the read API ([api.md](api.md)). An alert still ringing (a Pushover emergency) is cancelled.
 - **A removed notifier** has its open alerts ended, with nothing sent, since there is nothing left to send through.
 - **A changed route** applies to outages opened from then on; an alert already firing keeps the notifiers it fired on.
 

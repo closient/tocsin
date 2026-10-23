@@ -21,6 +21,7 @@ static MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("../migrations/0005_alerting.sql")),
     M::up(include_str!("../migrations/0006_heartbeats.sql")),
     M::up(include_str!("../migrations/0007_read_indexes.sql")),
+    M::up(include_str!("../migrations/0008_outage_ending.sql")),
 ];
 
 /// How long a connection waits for another process's lock before failing.
@@ -91,8 +92,41 @@ pub(crate) fn open_inspector(path: &Path) -> Result<Connection> {
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::Connection;
+
     #[test]
     fn migrations_are_valid() {
         super::migrations().validate().unwrap();
+    }
+
+    /// Before migration 8 only a recovery ended an outage, so each one
+    /// already ended reads back recovered; an open one has no ending yet.
+    #[test]
+    fn outages_ended_before_migration_8_ended_recovered() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let migrations = super::migrations();
+        migrations.to_version(&mut conn, 7).unwrap();
+        conn.execute_batch(
+            "INSERT INTO outage (node_id, check_id, health, started_at, ended_at)
+                 VALUES ('node-a', 'web', 'down', 1000, 2000);
+             INSERT INTO outage (node_id, check_id, health, started_at)
+                 VALUES ('node-a', 'api', 'degraded', 1000);",
+        )
+        .unwrap();
+        migrations.to_latest(&mut conn).unwrap();
+        let endings: Vec<(String, Option<String>)> = conn
+            .prepare("SELECT check_id, ending FROM outage ORDER BY check_id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            endings,
+            [
+                ("api".to_owned(), None),
+                ("web".to_owned(), Some("recovered".to_owned()))
+            ]
+        );
     }
 }

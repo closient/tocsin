@@ -6,10 +6,17 @@
 //! A panic in a write is caught, the open transaction (if any) is rolled
 //! back, the waiting callers get [`Error::WriterPanicked`] and the thread
 //! carries on: a bug in one write must not silently stop every later one.
+//!
+//! Every write is answered once it has committed, except a probe result
+//! that changes nothing ([`Writer::queue`]), which is answered once queued:
+//! the first commit after a checkpoint has copied the whole log syncs the
+//! log's new header inside the commit, and on a busy disk that sync has
+//! taken 442 ms (TOC-66, DESIGN.md "Durability").
 
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use rusqlite::{Connection, TransactionBehavior, params};
 use tocsin_core::status::OutageEnding;
@@ -46,8 +53,16 @@ type Reply = Box<dyn FnOnce() + Send>;
 
 enum Command {
     /// Boxed: a result with its outage change dwarfs a job.
-    Insert(Box<Insert>, oneshot::Sender<Result<i64>>),
+    Insert(Box<Queued>),
     Run(Job),
+}
+
+/// An insert, when it was queued, and who to answer once it commits: no one
+/// if it was answered as it was queued.
+struct Queued {
+    insert: Insert,
+    at: Instant,
+    reply: Option<oneshot::Sender<Result<i64>>>,
 }
 
 pub(crate) struct Writer {
@@ -80,12 +95,33 @@ impl Writer {
     /// `Record` with no change) the result's row id.
     pub(crate) async fn insert(&self, insert: Insert) -> Result<i64> {
         let (reply, receive) = oneshot::channel();
-        self.queued.fetch_add(1, Ordering::Relaxed);
-        self.sender
-            .send(Command::Insert(Box::new(insert), reply))
-            .await
-            .map_err(|_| Error::Closed)?;
+        self.send(insert, Some(reply)).await?;
         receive.await.map_err(|_| Error::Closed)?
+    }
+
+    /// Queues an insert and resolves at once, waiting only for room in a
+    /// full queue: the caller gives up hearing whether it committed. One
+    /// the database refuses is logged, and counted in
+    /// [`crate::CheckpointStats::rejected`].
+    pub(crate) async fn queue(&self, insert: Insert) -> Result<()> {
+        self.send(insert, None).await
+    }
+
+    async fn send(
+        &self,
+        insert: Insert,
+        reply: Option<oneshot::Sender<Result<i64>>>,
+    ) -> Result<()> {
+        self.queued.fetch_add(1, Ordering::Relaxed);
+        let queued = Queued {
+            insert,
+            at: Instant::now(),
+            reply,
+        };
+        self.sender
+            .send(Command::Insert(Box::new(queued)))
+            .await
+            .map_err(|_| Error::Closed)
     }
 
     /// Runs `job` on the write connection, after every write queued before it.
@@ -156,11 +192,11 @@ fn run(mut session: Session, mut receiver: mpsc::Receiver<Command>) {
                 nudge.publish();
                 reply();
             }
-            Command::Insert(insert, reply) => {
-                let mut batch = vec![(*insert, reply)];
+            Command::Insert(queued) => {
+                let mut batch = vec![*queued];
                 while batch.len() < MAX_BATCH {
                     match receiver.try_recv() {
-                        Ok(Command::Insert(insert, reply)) => batch.push((*insert, reply)),
+                        Ok(Command::Insert(queued)) => batch.push(*queued),
                         Ok(other) => {
                             next = Some(other);
                             break;
@@ -168,14 +204,61 @@ fn run(mut session: Session, mut receiver: mpsc::Receiver<Command>) {
                         Err(_) => break,
                     }
                 }
-                let (inserts, replies): (Vec<_>, Vec<_>) = batch.into_iter().unzip();
+                let (inserts, answers): (Vec<_>, Vec<_>) = batch
+                    .into_iter()
+                    .map(|queued| (queued.insert, (queued.at, queued.reply)))
+                    .unzip();
                 let outcomes = commit_batch(conn, &inserts);
-                for (reply, outcome) in replies.into_iter().zip(outcomes) {
-                    let _ = reply.send(outcome);
+                nudge
+                    .counters()
+                    .committed(answers.iter().map(|&(at, _)| at), Instant::now());
+                let mut refused = Vec::new();
+                for ((insert, (_, reply)), outcome) in inserts.iter().zip(answers).zip(outcomes) {
+                    match reply {
+                        Some(reply) => {
+                            let _ = reply.send(outcome);
+                        }
+                        None => {
+                            if let Err(error) = outcome {
+                                refused.push((insert, error));
+                            }
+                        }
+                    }
                 }
+                refuse(nudge, &refused);
             }
         }
         nudge.after_write(conn);
+    }
+}
+
+/// Logs the probe results answered on queueing that the database then
+/// refused, one line for each unless a whole batch went: then one in all.
+fn refuse(nudge: &Nudge, refused: &[(&Insert, Error)]) {
+    let Some((_, first)) = refused.first() else {
+        return;
+    };
+    nudge
+        .counters()
+        .rejected(u64::try_from(refused.len()).unwrap_or(u64::MAX));
+    if matches!(first, Error::Batch(_) | Error::WriterPanicked) {
+        tracing::error!(
+            results = refused.len(),
+            error = %first,
+            "a batch of probe results already acknowledged failed to commit; they are not stored"
+        );
+        return;
+    }
+    for (insert, error) in refused {
+        if let Insert::Record { result, .. } = insert {
+            tracing::error!(
+                check = %result.check_id,
+                node = %result.node_id,
+                started_at_ms = result.started_at_ms,
+                %error,
+                "a probe result already acknowledged was refused; it is not stored"
+            );
+        }
     }
 }
 
@@ -333,4 +416,111 @@ pub(crate) fn apply_outage_change(
         id = conn.last_insert_rowid();
     }
     Ok(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::QUEUE_DEPTH;
+    use crate::{DB_FILE, NewCheckResult, Store, SubjectKind, now_ms};
+
+    fn result() -> NewCheckResult {
+        NewCheckResult {
+            node_id: "node-a".into(),
+            check_id: "web".into(),
+            started_at_ms: now_ms(),
+            duration_ms: 3,
+            health: tocsin_core::Health::Up,
+            detail: None,
+            error: None,
+            status_code: None,
+        }
+    }
+
+    async fn stored(store: &Store) -> i64 {
+        store
+            .read(|conn| {
+                Ok(conn.query_row("SELECT count(*) FROM check_result", [], |row| row.get(0))?)
+            })
+            .await
+            .unwrap()
+    }
+
+    /// A probe result answered on queueing still waits for room in a full
+    /// queue: the bound is backpressure, and nothing is dropped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_full_queue_makes_a_probe_result_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&dir.path().join(DB_FILE)).unwrap());
+        // Parks the writer thread in a job until released.
+        let (parked, is_parked) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let job = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                store
+                    .writer
+                    .run(move |_| {
+                        let _ = parked.send(());
+                        let _ = released.recv();
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+        is_parked.await.unwrap();
+
+        for _ in 0..QUEUE_DEPTH {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                store.record(result(), SubjectKind::Check, None),
+            )
+            .await
+            .expect("room in the queue")
+            .unwrap();
+        }
+        let waiting = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move { store.record(result(), SubjectKind::Check, None).await })
+        };
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !waiting.is_finished(),
+            "a record into a full queue waits for room"
+        );
+
+        release.send(()).unwrap();
+        job.await.unwrap().unwrap();
+        waiting.await.unwrap().unwrap();
+        // Queued behind every one of them, so answered after their commits.
+        store.append(result()).await.unwrap();
+        let queued = i64::try_from(QUEUE_DEPTH).unwrap();
+        assert_eq!(stored(&store).await, queued + 2, "every result was stored");
+        assert_eq!(store.checkpoint_stats().rejected, 0);
+        Arc::into_inner(store).unwrap().close().await.unwrap();
+    }
+
+    /// A probe result the database refuses after it was answered is counted
+    /// (and logged); a write answered on its commit gets the error instead.
+    #[tokio::test]
+    async fn a_refused_probe_result_is_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join(DB_FILE)).unwrap();
+        let mut refused = result();
+        refused.node_id = String::new();
+
+        store
+            .record(refused.clone(), SubjectKind::Check, None)
+            .await
+            .unwrap();
+        store.append(result()).await.unwrap();
+        assert_eq!(store.checkpoint_stats().rejected, 1);
+        assert_eq!(stored(&store).await, 1, "only the valid result was stored");
+
+        assert!(store.append(refused).await.is_err());
+        assert_eq!(store.checkpoint_stats().rejected, 1);
+        store.close().await.unwrap();
+    }
 }

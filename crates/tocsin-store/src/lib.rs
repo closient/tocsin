@@ -302,11 +302,18 @@ impl Store {
     /// in one transaction: both are kept or neither is. Resolves with the
     /// opened outage's id, if the change opened one.
     ///
+    /// A check's result that changes nothing resolves once queued, before
+    /// it commits: it is not durable yet, and a database error is logged
+    /// and counted ([`CheckpointStats::rejected`]) instead of returned. A
+    /// full queue still makes it wait. Every other record resolves once
+    /// committed (DESIGN.md, "Durability").
+    ///
     /// # Errors
     ///
     /// The result fails as [`Store::append`] would, the change as
     /// [`Store::change_outage`] would, or the write fails; nothing is
-    /// written then.
+    /// written then. For a check's result with no change, only a result
+    /// from the future and a closed store are reported.
     pub async fn record(
         &self,
         result: NewCheckResult,
@@ -314,6 +321,16 @@ impl Store {
         change: Option<OutageChange>,
     ) -> Result<Option<i64>> {
         not_future(&result)?;
+        if kind == SubjectKind::Check && change.is_none() {
+            self.writer
+                .queue(Insert::Record {
+                    result,
+                    kind,
+                    change,
+                })
+                .await?;
+            return Ok(None);
+        }
         let opens = change.as_ref().is_some_and(|change| change.open.is_some());
         let id = self
             .writer

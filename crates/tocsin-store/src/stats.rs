@@ -17,6 +17,11 @@ const EVENTS: usize = 1024;
 /// A pass or a write that takes longer than this is kept as an event.
 pub(crate) const SLOW: Duration = Duration::from_millis(10);
 
+/// An insert whose commit lags its queueing by more than this is kept as an
+/// event: the write-latency bench's budget. Lags pile up behind any slow
+/// write, so a lower bar would crowd the slow paths out of [`EVENTS`].
+pub(crate) const LAGGING: Duration = Duration::from_millis(50);
+
 /// What the checkpoint paths have done since the store opened. See
 /// [`crate::Store::checkpoint_stats`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -64,6 +69,19 @@ pub struct CheckpointStats {
     /// The longest write on the writer thread, its commit included and the
     /// checkpoint after it not.
     pub write_max: Duration,
+    /// Inserts committed (or rejected) by the writer.
+    pub inserts: u64,
+    /// The longest an insert waited from queueing to its commit. A probe
+    /// result acknowledged on queueing waits this long to be durable; any
+    /// other insert's caller waits it out.
+    pub lag_max: Duration,
+    /// The 99th percentile of those waits, to within a quarter.
+    pub lag_p99: Duration,
+    /// Inserts that waited over 50 ms for their commit.
+    pub lagging: u64,
+    /// Probe results acknowledged on queueing that the database then
+    /// refused: not stored, and each logged as an error.
+    pub rejected: u64,
     /// The slow paths, oldest first: up to 1024, then only counted.
     pub events: Vec<CheckpointEvent>,
     /// Events past the first 1024, not kept.
@@ -107,6 +125,15 @@ pub enum CheckpointEvent {
         /// How long it waited.
         waited: Duration,
     },
+    /// The inserts of one commit, the oldest queued over 50 ms before it.
+    Lag {
+        /// When the oldest was queued.
+        at: Instant,
+        /// How long it waited for the commit.
+        took: Duration,
+        /// Inserts in the commit that had waited over 50 ms.
+        inserts: u64,
+    },
     /// A write on the writer thread took longer than 10 ms, its checkpoint
     /// at the limit, if any, not included.
     Write {
@@ -116,6 +143,9 @@ pub enum CheckpointEvent {
         took: Duration,
         /// Frames in the log after it.
         frames: u64,
+        /// It found the whole log copied and started it again from the
+        /// beginning, syncing the log's new header inside its commit.
+        rewound: bool,
     },
 }
 
@@ -143,6 +173,11 @@ pub(crate) struct Stats {
     frames_high: AtomicU64,
     rewinds: AtomicU64,
     write_max: AtomicU64,
+    inserts: AtomicU64,
+    lag_max: AtomicU64,
+    lag_buckets: [AtomicU64; BUCKETS],
+    lagging: AtomicU64,
+    rejected: AtomicU64,
     events: Mutex<(VecDeque<CheckpointEvent>, u64)>,
 }
 
@@ -167,6 +202,11 @@ impl Default for Stats {
             frames_high: AtomicU64::new(0),
             rewinds: AtomicU64::new(0),
             write_max: AtomicU64::new(0),
+            inserts: AtomicU64::new(0),
+            lag_max: AtomicU64::new(0),
+            lag_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            lagging: AtomicU64::new(0),
+            rejected: AtomicU64::new(0),
             events: Mutex::new((VecDeque::new(), 0)),
         }
     }
@@ -201,6 +241,27 @@ fn bucket_top(bucket: usize) -> u64 {
     ((4 + quarter + 1) << (power - 2)) - 1
 }
 
+/// The top of the bucket holding the 99th percentile, by rank, capped at
+/// the largest value seen.
+fn p99(buckets: &[AtomicU64; BUCKETS], max: Duration) -> Duration {
+    let buckets: Vec<u64> = buckets
+        .iter()
+        .map(|count| count.load(Ordering::Relaxed))
+        .collect();
+    let total: u64 = buckets.iter().sum();
+    let rank = total - total / 100;
+    let mut seen = 0;
+    buckets
+        .iter()
+        .position(|count| {
+            seen += count;
+            total > 0 && seen >= rank
+        })
+        .map_or(Duration::ZERO, |bucket| {
+            Duration::from_micros(bucket_top(bucket)).min(max)
+        })
+}
+
 impl Stats {
     /// A write that left `frames` in the log, `rewound` it first, and took
     /// `took` from `at`.
@@ -211,8 +272,44 @@ impl Stats {
         }
         self.write_max.fetch_max(micros(took), Ordering::Relaxed);
         if took > SLOW {
-            self.event(CheckpointEvent::Write { at, took, frames });
+            self.event(CheckpointEvent::Write {
+                at,
+                took,
+                frames,
+                rewound,
+            });
         }
+    }
+
+    /// One commit's inserts, each queued at one of `queued` and committed at
+    /// `committed`.
+    pub(crate) fn committed(&self, queued: impl IntoIterator<Item = Instant>, committed: Instant) {
+        let mut oldest: Option<Instant> = None;
+        let mut lagging = 0;
+        for at in queued {
+            let lag = committed.saturating_duration_since(at);
+            let us = micros(lag);
+            bump(&self.inserts);
+            self.lag_max.fetch_max(us, Ordering::Relaxed);
+            bump(&self.lag_buckets[bucket(us)]);
+            if lag > LAGGING {
+                lagging += 1;
+                oldest = Some(oldest.map_or(at, |oldest| oldest.min(at)));
+            }
+        }
+        if let Some(at) = oldest {
+            self.lagging.fetch_add(lagging, Ordering::Relaxed);
+            self.event(CheckpointEvent::Lag {
+                at,
+                took: committed.saturating_duration_since(at),
+                inserts: lagging,
+            });
+        }
+    }
+
+    /// `count` probe results acknowledged on queueing were refused.
+    pub(crate) fn rejected(&self, count: u64) {
+        self.rejected.fetch_add(count, Ordering::Relaxed);
     }
 
     /// The writer's checkpoint at the hard limit.
@@ -291,21 +388,8 @@ impl Stats {
     pub(crate) fn snapshot(&self) -> CheckpointStats {
         let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
         let duration = |counter: &AtomicU64| Duration::from_micros(load(counter));
-        let buckets: Vec<u64> = self.pass_buckets.iter().map(load).collect();
-        let passes: u64 = buckets.iter().sum();
         let pass_max = duration(&self.pass_max);
-        // The bucket holding the pass at the 99th percentile, by rank.
-        let rank = passes - passes / 100;
-        let mut seen = 0;
-        let pass_p99 = buckets
-            .iter()
-            .position(|count| {
-                seen += count;
-                passes > 0 && seen >= rank
-            })
-            .map_or(Duration::ZERO, |bucket| {
-                Duration::from_micros(bucket_top(bucket)).min(pass_max)
-            });
+        let lag_max = duration(&self.lag_max);
         let (events, events_dropped) = {
             let events = self.events.lock().unwrap_or_else(PoisonError::into_inner);
             (events.0.iter().copied().collect(), events.1)
@@ -323,12 +407,17 @@ impl Stats {
             paced_wait_max: duration(&self.paced_wait_max),
             passes: load(&self.passes),
             pass_max,
-            pass_p99,
+            pass_p99: p99(&self.pass_buckets, pass_max),
             chase_passes: load(&self.chase_passes),
             chase_streak_max: load(&self.chase_streak_max),
             frames_high: load(&self.frames_high),
             rewinds: load(&self.rewinds),
             write_max: duration(&self.write_max),
+            inserts: load(&self.inserts),
+            lag_max,
+            lag_p99: p99(&self.lag_buckets, lag_max),
+            lagging: load(&self.lagging),
+            rejected: load(&self.rejected),
             events,
             events_dropped,
         }

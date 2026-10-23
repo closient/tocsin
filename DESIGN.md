@@ -79,6 +79,23 @@ This file is the decision record from the 2026-10-22 plan review, and it is cano
   * rmcp for MCP
   * cargo-dist for releases
 
+## Durability (TOC-66)
+
+Every write goes through the store's one writer thread, which commits in batches under WAL with `synchronous = NORMAL` ([docs/storage.md](docs/storage.md)). What "done" means to the caller depends on the write:
+
+* **A check's probe result that changes nothing** (it opens and ends no outage) is acknowledged once the writer's queue has taken it, before it commits. It is the only write acknowledged early. It is almost every write, and losing one costs the least: the next probe of the same check says the same thing.
+* **Everything else is committed before it is acknowledged:** every state change (an outage opening or ending, with the result that confirmed it), every alert and its deliveries, every heartbeat ping and missed deadline, every incident and its updates, every release and deploy, retention's writes, and every `Store::append`. A 2xx from the API for any of these means its rows are in a committed transaction.
+
+**What a process crash loses** (a kill, the OOM killer, an abort): no-change probe results only, and at most one queue's worth of them. That is the 1024 the queue holds plus the batch of up to 256 the writer has taken but not yet committed: 1280 at most. Nothing that changed a check's state is lost, and neither is any alert, heartbeat, incident or release. The queue is first in, first out, so a change queued after a no-change result never commits before it. `Store::close` waits for the writer to commit everything queued, and `serve` closes the store on shutdown, so a clean shutdown loses nothing. Dropping a `Store` without closing it does not wait: its writer thread still drains the queue, but only while the process lives.
+
+**A power cut** loses what it lost before this rule: under `synchronous = NORMAL` the last few commits of any kind, never the file's integrity.
+
+**A full queue makes the caller wait** rather than drop the result, the same backpressure every other write has.
+
+**A refused result is logged and counted.** If the database refuses a result that was already acknowledged (a full disk, a constraint), the writer logs it at `error` with its check, node and start time, and counts it in `CheckpointStats::rejected`. The engine has moved on by then: the result still counts towards confirming a change, but the change itself is committed before it moves any state, so a change the database refuses is retried by the next result that confirms it.
+
+**Why early acknowledgement, not a faster commit.** SQLite syncs the log's header when a commit rewinds the log to its start (`sqlite3WalFrames`: `if( pWal->syncHeader ){ rc = sqlite3OsSync(pWal->pWalFd, CKPT_SYNC_FLAGS(sync_flags)); }`, bundled SQLite 3.53.2). That sync runs inside the commit, on the writer, holding the write lock, at any `synchronous` level above OFF. Only a VFS reporting `SQLITE_IOCAP_SEQUENTIAL` skips it. On a slow disk it took hundreds of milliseconds, and every check result queued behind it waited too. The ways to keep it off a commit (`synchronous = OFF`, a VFS lying about the device, a VFS written in Rust) give up durability or `unsafe`-free code. So the sync stays and the caller stops waiting for it, for the one write whose loss is cheap. The write-latency bench still reports how long every insert waits from queue to commit, so a slow disk stays visible.
+
 ## Milestones
 
 * **v0.1 — Monitor, page and releases.** Enough to retire Gatus at Closient. UptimeFlare stays as the outside watchdog for the tocsin node, because a single node cannot report its own death.

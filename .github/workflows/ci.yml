@@ -115,8 +115,14 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo test --release --locked -p tocsin-store --test write_latency --no-run
+      # Traces every sync with its thread and duration, for
+      # scripts/bench/sweep.py to set beside the bench's slow appends.
+      - name: Build the fsync tracer
+        run: cc -shared -fPIC -O2 -o "$RUNNER_TEMP/fsync_shim.so" scripts/bench/fsync_shim.c -ldl -lpthread
       - name: Write latency on one core
-        run: taskset -c 0 cargo test --release --locked -p tocsin-store --test write_latency -- --ignored --nocapture
+        run: |
+          LD_PRELOAD="$RUNNER_TEMP/fsync_shim.so" TOCSIN_SYNCTRACE=1 \
+            taskset -c 0 cargo test --release --locked -p tocsin-store --test write_latency -- --ignored --nocapture
 
   # The release's Linux packaging, on each architecture. dist builds the
   # static musl archive the release would; the container image is built from

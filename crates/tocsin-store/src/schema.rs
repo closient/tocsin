@@ -52,7 +52,7 @@ pub(crate) fn open_writer(path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     // Commits never checkpoint: the checkpointer thread does, on its own
-    // connection, so a checkpoint's fsyncs never hold up a write.
+    // connection, so no commit runs a checkpoint's copy or its fsyncs.
     // The pragma replaces any WAL hook, so it comes first.
     conn.pragma_update(None, "wal_autocheckpoint", 0)?;
     checkpoint::watch(&conn);

@@ -15,6 +15,7 @@ use tocsin_core::incident::{
 };
 
 use crate::checkpoint::{self, Checkpointer, Nudge};
+use crate::rollup;
 use crate::writer::Writer;
 use crate::{DB_FILE, Day, Error, NewCheckResult, Retention, Store, now_ms, schema};
 
@@ -619,6 +620,11 @@ async fn the_log_stays_bounded_under_writes_that_never_pause() {
         highs.record(&path, write);
     }
     highs.assert_bounded(&path);
+    // What the store reports it did, as the bench prints it (TOC-62).
+    let stats = store.checkpoint_stats();
+    assert!(stats.passes > 0, "{stats:?}");
+    assert!(stats.rewinds > 0, "{stats:?}");
+    assert!(stats.frames_high > 0, "{stats:?}");
     store.close().await.unwrap();
 }
 
@@ -905,6 +911,15 @@ fn a_lockout_logs_once_and_later_writes_do_not_wait() {
     assert_eq!(passes.waits(), 1);
     // The test's checkpoint is not the checkpointer's, so the writer polls.
     assert!(passes.polls() > 0);
+    let stats = nudge.stats();
+    assert_eq!(stats.lockouts, 1, "{stats:?}");
+    assert_eq!(stats.limit_waits, 1, "{stats:?}");
+    assert!(
+        stats.limit_wait_max + Duration::from_millis(100) >= schema::BUSY_TIMEOUT,
+        "{stats:?}"
+    );
+    assert!(stats.inline_copies >= 1, "{stats:?}");
+    assert!(stats.rewinds >= 1, "{stats:?}");
 }
 
 /// A checkpoint that fails is a lockout too: one error, naming SQLite's,
@@ -969,6 +984,9 @@ fn the_writer_waits_out_the_checkpointers_pass_without_polling() {
     pass.join().unwrap();
     assert_eq!(passes.waits(), 1);
     assert_eq!(passes.polls(), 0, "the writer polled");
+    let stats = nudge.stats();
+    assert_eq!((stats.limit_writes, stats.limit_waits), (1, 1), "{stats:?}");
+    assert!(!stats.limit_wait_max.is_zero(), "{stats:?}");
     assert!(
         took >= PASS && took < schema::BUSY_TIMEOUT,
         "the writer was done {took:?} after the pass began"
@@ -1004,6 +1022,7 @@ fn the_checkpointer_stands_aside_while_the_writer_is_at_the_limit() {
         assert!(Instant::now() < deadline, "the checkpointer did not skip");
         std::thread::sleep(Duration::from_millis(10));
     }
+    assert!(checkpointer.stats().stand_asides > 0);
     assert_eq!(database_bytes(&path), before, "the checkpointer copied");
     while database_bytes(&path) == before {
         assert!(
@@ -1014,6 +1033,207 @@ fn the_checkpointer_stands_aside_while_the_writer_is_at_the_limit() {
     }
     drop(nudge);
     checkpointer.join().unwrap();
+}
+
+/// Writes old results in transactions of 100 until the log holds at least
+/// `frames` frames, returning how many it wrote.
+async fn old_results_until(store: &Store, day: Day, frames: u64) -> i64 {
+    let mut written = 0;
+    loop {
+        let log = store
+            .writer
+            .run(move |conn| {
+                for i in 0..100 {
+                    conn.execute(
+                        "INSERT INTO check_result (node_id, check_id, started_at, duration_ms, health, error)
+                         VALUES ('node-a', 'web', ?1, 1, 'up', hex(randomblob(1500)))",
+                        params![day.start_ms() + written + i],
+                    )?;
+                }
+                Ok(checkpoint::log_frames())
+            })
+            .await
+            .unwrap();
+        written += 100;
+        if log >= frames {
+            return written;
+        }
+    }
+}
+
+fn results(path: &Path) -> i64 {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row("SELECT count(*) FROM check_result", [], |row| row.get(0))
+        .unwrap()
+}
+
+/// Retention writes no faster than the checkpointer copies (TOC-62): with
+/// the log past the soft limit and a pass unable to copy it, retention
+/// writes nothing, and once a pass can, it carries on well inside its wait.
+/// `finalized` rolls the old day up first, so retention's first write is a
+/// delete rather than the rollup.
+async fn retention_waits_for_a_pass_past_the_soft_limit(finalized: bool) {
+    let (_dir, store) = open();
+    let day: Day = "2026-10-01".parse().unwrap();
+    let now = day.plus(10).start_ms();
+    let policy = Retention {
+        days: 3,
+        chunk_rows: 50,
+        pause: Duration::from_millis(10),
+    };
+    let cutoff = day.plus(7).start_ms();
+    // Every pass finds the lock taken, so none copies the log.
+    let holder = CheckpointHolder::hold(store.path());
+    let written = old_results_until(&store, day, soft_limit_frames() + 200).await;
+    if finalized {
+        while let Some(plan) = store
+            .read(move |conn| rollup::plan_finalize(conn, cutoff, now))
+            .await
+            .unwrap()
+        {
+            store
+                .writer
+                .run(move |conn| rollup::finalize(conn, plan))
+                .await
+                .unwrap();
+        }
+    }
+    let store = Arc::new(store);
+    let retention = {
+        let store = Arc::clone(&store);
+        tokio::spawn(async move { store.apply_retention(policy, now).await })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        store.daily_rollups(day).await.unwrap().len(),
+        usize::from(finalized),
+        "retention rolled up past the soft limit before a pass copied the log"
+    );
+    assert_eq!(
+        results(store.path()),
+        written,
+        "retention deleted past the soft limit before a pass copied the log"
+    );
+    assert!(!retention.is_finished());
+    // Waiting holds neither the writer nor a transaction: a check result
+    // still commits.
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        store.writer.run(move |conn| {
+            conn.execute(
+                "INSERT INTO check_result (node_id, check_id, started_at, duration_ms, health)
+                 VALUES ('node-a', 'web', ?1, 1, 'up')",
+                params![now],
+            )?;
+            Ok(())
+        }),
+    )
+    .await
+    .expect("a write waited behind retention's wait for the checkpointer")
+    .unwrap();
+    assert!(!retention.is_finished());
+    holder.join();
+    let released = Instant::now();
+    // The checkpointer tries a busy pass again a second later.
+    let report = tokio::time::timeout(Duration::from_secs(3), retention)
+        .await
+        .expect("retention waited past a pass that copied the log")
+        .unwrap()
+        .unwrap();
+    assert!(released.elapsed() < Duration::from_secs(3));
+    assert_eq!(report.deleted, usize::try_from(written).unwrap());
+    let stats = store.checkpoint_stats();
+    assert!(stats.paced_writes > 0);
+    assert!(stats.paced_wait_max >= Duration::from_millis(500));
+    assert_eq!(stats.limit_writes, 0, "retention reached the hard limit");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retention_rolls_up_only_once_a_pass_has_copied_the_log() {
+    retention_waits_for_a_pass_past_the_soft_limit(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retention_deletes_only_once_a_pass_has_copied_the_log() {
+    retention_waits_for_a_pass_past_the_soft_limit(true).await;
+}
+
+/// A pass that never copies the log holds retention up for no longer than
+/// the writer would wait at the hard limit, and says so: one warning with
+/// the log's length and the wait, then retention writes.
+#[test]
+fn retention_that_waits_out_its_cap_warns_and_carries_on() {
+    let logs = Captured::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (waited, stats) = logs.run(|| {
+        runtime.block_on(async {
+            let (_dir, store) = open();
+            let day: Day = "2026-10-01".parse().unwrap();
+            let holder = CheckpointHolder::hold(store.path());
+            old_results_until(&store, day, soft_limit_frames() + 200).await;
+            let started = Instant::now();
+            store.checkpointer.make_room().await;
+            let waited = started.elapsed();
+            holder.join();
+            (waited, store.checkpoint_stats())
+        })
+    });
+    assert!(waited >= checkpoint::PACE_WAIT, "{waited:?}");
+    assert!(stats.paced_wait_max >= checkpoint::PACE_WAIT, "{stats:?}");
+    let warnings = logs.at(tracing::Level::WARN);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("frames="), "{warnings:?}");
+    assert!(warnings[0].contains("waited=5"), "{warnings:?}");
+}
+
+/// A wait that a pass ends before the cap logs nothing.
+#[test]
+fn retention_that_a_pass_lets_through_does_not_warn() {
+    let logs = Captured::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (waited, stats) = logs.run(|| {
+        runtime.block_on(async {
+            let (_dir, store) = open();
+            let day: Day = "2026-10-01".parse().unwrap();
+            let holder = CheckpointHolder::hold(store.path());
+            old_results_until(&store, day, soft_limit_frames() + 200).await;
+            let release = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                holder.join();
+            });
+            let started = Instant::now();
+            store.checkpointer.make_room().await;
+            let waited = started.elapsed();
+            release.join().unwrap();
+            (waited, store.checkpoint_stats())
+        })
+    });
+    assert!(waited >= Duration::from_millis(200), "{waited:?}");
+    assert!(waited < checkpoint::PACE_WAIT, "{waited:?}");
+    assert_eq!(stats.paced_writes, 1, "{stats:?}");
+    let warnings = logs.at(tracing::Level::WARN);
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// Below the soft limit retention never waits for the checkpointer.
+#[tokio::test]
+async fn retention_below_the_soft_limit_does_not_wait() {
+    let (_dir, store) = open();
+    let day: Day = "2026-10-01".parse().unwrap();
+    let written = old_results_until(&store, day, 0).await;
+    let report = store
+        .apply_retention(Retention::days(3), day.plus(10).start_ms())
+        .await
+        .unwrap();
+    assert_eq!(report.deleted, usize::try_from(written).unwrap());
+    assert_eq!(store.checkpoint_stats().paced_writes, 0);
 }
 
 /// Below the hard limit the writer does no checkpoint work at all, so no
@@ -1056,6 +1276,9 @@ fn below_the_hard_limit_the_writer_neither_copies_nor_waits() {
     }
     holder.join();
     assert_eq!(passes.waits(), 0, "the writer waited below the hard limit");
+    let stats = nudge.stats();
+    assert_eq!(stats.limit_writes, 0, "{stats:?}");
+    assert!(stats.frames_high >= halfway, "{stats:?}");
     assert_eq!(passes.polls(), 0, "the writer polled below the hard limit");
 }
 

@@ -59,7 +59,10 @@ threshold SQLite's own automatic checkpoint uses, or a minute after the
 first of fewer, so a quiet store still checkpoints. A WAL hook on the
 writer counts the frames each commit appends. A passive checkpoint takes
 no lock the writer or the readers need and skips frames a reader still
-uses, so it never holds them up; one that a reader held back is tried
+uses, so it never blocks them on a lock. That is all the separate thread
+guarantees: it takes the copy and its fsyncs out of the writer's commits,
+not off the disk the writer commits to, and a write can still stall while
+a pass runs (see below). One that a reader held back is tried
 again a second later until it copies the whole log, and ten in a row
 that leave 1000 frames or more behind log a warning.
 
@@ -133,10 +136,54 @@ test beside a 60 GB file copy, 21 of 43 writes at the hard limit waited,
 for 0.4 ms at the median; one waited the whole 5 seconds behind an
 11-second pass and started a lockout.
 
-The disk is still shared: on ext4 a write can wait for the filesystem
-journal while a checkpoint's fsync commits it. On a runner still flushing
-a gigabyte of build output that cost single writes up to 200 ms, while the
-p99 stayed under 12 ms. If the checkpointer thread ever dies, the writer
+**Retention waits for the checkpointer.** Retention's purge is the one
+writer that outruns the checkpointer: each chunk of 2000 rows appends
+hundreds of frames, chunks follow each other 10 ms apart, and the passes
+chasing them each copy the 16 MB above the soft limit. In the bench the
+purge carried the log to the hard limit, and the check result that landed
+there waited out the writer's copy: on CI the log reached 8262 frames
+during the purge, and once 32.1 MB with a 576 ms worst write (TOC-62). So
+before each of its writes, the rollup and every delete chunk, retention
+checks the log: past the soft limit, with frames that no complete pass has
+copied, it waits for the checkpointer, checking every 10 ms, for at most
+the same 5 seconds. A pass that copied everything lets retention's next
+commit rewind the log, so the purge runs at the speed the disk copies it,
+and its frames are paid for by the purge rather than by a check result
+queued behind it. A pass a reader held back is tried again a second
+later, so a chunk can wait that long. A wait that times out writes
+anyway and logs a warning with the frames in the log and how long it
+waited; the hard limit still bounds the log. Retention waits between its
+writes, never inside one: it holds no transaction and no place in the
+writer's queue while it waits, so check results keep committing.
+
+`Store::checkpoint_stats` counts every path above: writes at the hard
+limit, how long they waited and copied, lockouts, stand-asides, passes
+(longest and p99), chase passes, rewinds, the longest write, and
+retention's waits, and keeps each write, pass or wait over 10 ms as a
+timed event. The write-latency bench prints them beside its latency table,
+with every stall over budget and the events that overlapped it, so a
+failing run names its path.
+
+Writes still stall below both limits, while a pass is running. On CI the
+bench recorded a write of one check result taking 93 ms with the log far
+under the soft limit, entirely inside a 222 ms pass:
+
+```text
+- 16.048–16.141 s write 92.76ms, log at 2079 frames after
+- 15.919–16.141 s checkpointer pass 222.30ms
+```
+
+Locally, on a shared rotational disk beside a loop of synced writes,
+commits of a single row took up to 1.38 s inside a 1.42 s pass. The
+working hypothesis is that the two connections are coupled through the
+filesystem rather than through SQLite: the writer commits with
+`synchronous = NORMAL`, which does not sync, and the passive pass takes no
+lock it needs, but on ext4 a write can wait for the filesystem journal
+while the pass's fsync commits it. Nothing here has measured that wait
+directly; the evidence is only that the stalls fall inside passes and
+that no SQLite lock explains them. Durability is not lowered to chase
+them. If they break the latency budget, the lever is shorter passes (fewer
+frames copied per pass), measured first. If the checkpointer thread ever dies, the writer
 logs an error and turns automatic checkpoints back on rather than let the
 log grow without bound. On close, and when the writer thread unwinds from
 a panic, the writer's connection closes before it lets go of the

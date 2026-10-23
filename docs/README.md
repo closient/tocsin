@@ -1,0 +1,37 @@
+# tocsin documentation
+
+## Start
+
+- [Quick start](quickstart.md): one check running in five minutes.
+- [Installing](install.md): release archives and their checksums, the
+  container image, and the hardened systemd unit.
+- [Running behind Cloudflare](cloudflare-access.md): a Tunnel, a public
+  page, and the admin page behind Access.
+
+## Configure
+
+- [Configuration](config.md): every table, with examples.
+- [Configuration reference](config-reference.md): every key, type, bound
+  and default, generated from the JSON Schema.
+- [Probes and assertions](probes.md): what each check type observes,
+  which assertions apply, and `tocsin probe run`.
+- [Heartbeats](heartbeats.md): watching jobs that report in.
+- [Alerting](alerting.md): notifiers, routes and their payloads.
+
+## Use
+
+- [Incidents and maintenance](incidents.md).
+- [Releases and the timeline](releases.md), and
+  [recording them from CI](release-ci.md).
+- [The admin page](admin.md): signing in through a proxy, and its threat
+  model.
+- [HTTP API](api.md), described by the OpenAPI document
+  [`schema/openapi.json`](../schema/openapi.json); a running server serves
+  it at `/api/v1/openapi.json`, and `tocsin openapi` prints it.
+- [Operating tocsin with a coding agent](agent-guide.md): the JSON and
+  exit-code contract, and the edit, check, probe loop.
+
+## Internals
+
+- [The engine](engine.md): scheduling, confirmation and component state.
+- [Storage](storage.md): the SQLite schema and retention.

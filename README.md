@@ -11,6 +11,8 @@ tocsin is early: the workspace and CLI skeleton exist, and the monitor is being 
 
 ## Quick start
 
+Release binaries, a container image and a systemd unit are described in [docs/install.md](docs/install.md), and [docs/quickstart.md](docs/quickstart.md) goes from nothing to a running check; [docs/](docs/README.md) indexes the rest. From source:
+
 ```sh
 cargo build --release
 mkdir -p config

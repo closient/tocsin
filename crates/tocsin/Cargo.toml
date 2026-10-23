@@ -50,3 +50,8 @@ tocsin-core.workspace = true
 tower = { version = "0.5", default-features = false, features = ["util"] }
 # Paused time for the key-cache tests.
 tokio = { workspace = true, features = ["test-util"] }
+
+# The workspace sets `publish = false`, which `dist` reads as "do not
+# release"; this is the one package it builds (dist-workspace.toml).
+[package.metadata.dist]
+dist = true

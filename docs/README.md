@@ -34,6 +34,8 @@
   rules to start from.
 - [Operating tocsin with a coding agent](agent-guide.md): the JSON and
   exit-code contract, and the edit, check, probe loop.
+- [MCP server](mcp.md): `/mcp` and `tocsin mcp` for Claude Code and other
+  MCP clients, every tool and the scope each needs.
 
 ## Internals
 

@@ -5,7 +5,7 @@ A single-binary uptime monitor, public status page and release log, written in R
 - **Files are the only configuration.** A folder of TOML files says what is watched, who is alerted and how the page looks. There is no settings UI and no config API, so git, Ansible or a coding agent is the whole management story.
 - **SQLite holds history.** Check results, outages, incidents and releases live in one database file in a data folder.
 - **Releases on the same timeline as outages.** CI pushes each release and deploy, so "what changed right before this broke" is one glance.
-- **Built for coding agents.** Schema-validated config, `--json` on every command, stable exit codes, and one-shot probe runs that explain their verdict.
+- **Built for coding agents.** Schema-validated config, `--json` on every command, stable exit codes, one-shot probe runs that explain their verdict, and an MCP server (`/mcp` on a running server, or `tocsin mcp` over stdio; [docs/mcp.md](docs/mcp.md)).
 
 tocsin is early: the workspace and CLI skeleton exist, and the monitor is being built now. [DESIGN.md](DESIGN.md) is the plan.
 

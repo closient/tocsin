@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! A blocking client for a running tocsin's HTTP API, for the CLI.
+//! A client for a running tocsin's HTTP API: blocking for the CLI, async
+//! for `tocsin mcp`.
 //!
 //! Server answers map onto the exit-code contract: a 4xx is the caller's
 //! input (exit 2, with the server's field errors), a 5xx or no answer at
@@ -21,14 +22,16 @@ use crate::output::Failure;
 /// How long one request may take.
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-pub struct Client {
+/// A tocsin's HTTP API, async: what [`Client`] blocks on for the CLI and
+/// what `tocsin mcp` calls from its own runtime.
+#[derive(Clone)]
+pub struct Api {
     base: Url,
     token: Option<String>,
     http: reqwest::Client,
-    runtime: tokio::runtime::Runtime,
 }
 
-impl Client {
+impl Api {
     pub fn new(server: &ServerArgs) -> Result<Self, Failure> {
         let mut base = Url::parse(&server.url).map_err(|error| {
             Failure::new(
@@ -49,83 +52,42 @@ impl Client {
         let http = crate::net::http_client(TIMEOUT).build().map_err(|error| {
             Failure::new(Exit::Runtime, format!("cannot start HTTP client: {error}"))
         })?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| {
-                Failure::new(Exit::Runtime, format!("cannot start runtime: {error}"))
-            })?;
-        Ok(Client {
+        Ok(Api {
             base,
             token: server.token.clone().filter(|token| !token.is_empty()),
             http,
-            runtime,
         })
     }
 
-    /// `GET path`, unauthenticated.
-    pub fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Failure> {
-        self.request(&Method::GET, path, &[], None::<&()>, false)
+    /// Whether a token is set.
+    pub fn has_token(&self) -> bool {
+        self.token.is_some()
     }
 
-    /// `GET path` with the token, for a read the server never answers
-    /// without one.
-    pub fn get_with_token<T: DeserializeOwned>(&self, path: &str) -> Result<T, Failure> {
-        self.request(&Method::GET, path, &[], None::<&()>, true)
-    }
-
-    /// `GET path`, with the token when one is set: the server answers
-    /// without one as it does the public. The answer comes back as the
-    /// server sent it, any JSON at all; a body that is not JSON is a
-    /// runtime failure.
-    pub fn read(&self, path: &str) -> Result<Value, Failure> {
-        self.request(&Method::GET, path, &[], None::<&()>, self.token.is_some())
-    }
-
-    /// A write: `method path` with a JSON body and the token.
-    pub fn write<B: Serialize, T: DeserializeOwned>(
-        &self,
-        method: &Method,
-        path: &str,
-        body: &B,
-    ) -> Result<T, Failure> {
-        self.request(method, path, &[], Some(body), true)
-    }
-
-    /// A write with no body: `POST` with the token to the path made of
-    /// `segments` under the base, plus `query`. Each segment is pushed
+    /// The URL made of `segments` under the base. Each segment is pushed
     /// percent-encoded, so a `/` or `?` in one stays inside it.
-    pub fn post_query<T: DeserializeOwned>(
-        &self,
-        segments: &[&str],
-        query: &[(&str, &str)],
-    ) -> Result<T, Failure> {
+    pub fn url(&self, segments: &[&str]) -> Url {
         let mut url = self.base.clone();
         url.path_segments_mut()
             .expect("new() accepts only a URL that can be a base")
             .pop_if_empty()
             .extend(segments);
-        self.send(&Method::POST, url, query, None::<&()>, true)
+        url
     }
 
-    fn request<B: Serialize, T: DeserializeOwned>(
-        &self,
-        method: &Method,
-        path: &str,
-        query: &[(&str, &str)],
-        body: Option<&B>,
-        authenticated: bool,
-    ) -> Result<T, Failure> {
-        let url = self.base.join(path).map_err(|error| {
+    /// `path` joined onto the base.
+    pub fn join(&self, path: &str) -> Result<Url, Failure> {
+        self.base.join(path).map_err(|error| {
             Failure::new(
                 Exit::InvalidInput,
                 format!("bad request path {path}: {error}"),
             )
-        })?;
-        self.send(method, url, query, body, authenticated)
+        })
     }
 
-    fn send<B: Serialize, T: DeserializeOwned>(
+    /// `method url` with `query`, a JSON `body` when given and the token
+    /// when `authenticated`; the answer decoded as `T`.
+    pub async fn send<B: Serialize, T: DeserializeOwned>(
         &self,
         method: &Method,
         mut url: Url,
@@ -154,19 +116,18 @@ impl Client {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(bytes);
         }
-        let (status, bytes) = self
-            .runtime
-            .block_on(async {
-                let response = request.send().await?;
-                let status = response.status();
-                Ok::<_, reqwest::Error>((status, response.bytes().await?))
-            })
-            .map_err(|error| {
-                Failure::new(
-                    Exit::Runtime,
-                    format!("{method} {url} failed: {}", chain(&error.without_url())),
-                )
-            })?;
+        let (status, bytes) = async {
+            let response = request.send().await?;
+            let status = response.status();
+            Ok::<_, reqwest::Error>((status, response.bytes().await?))
+        }
+        .await
+        .map_err(|error| {
+            Failure::new(
+                Exit::Runtime,
+                format!("{method} {url} failed: {}", chain(&error.without_url())),
+            )
+        })?;
         if !status.is_success() {
             return Err(failure(method, &url, status, &bytes));
         }
@@ -176,6 +137,79 @@ impl Client {
                 format!("{method} {url}: the server's answer is not what tocsin expects: {error}"),
             )
         })
+    }
+}
+
+/// A blocking client for the CLI: [`Api`] on a runtime of its own.
+pub struct Client {
+    api: Api,
+    runtime: tokio::runtime::Runtime,
+}
+
+impl Client {
+    pub fn new(server: &ServerArgs) -> Result<Self, Failure> {
+        let api = Api::new(server)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| {
+                Failure::new(Exit::Runtime, format!("cannot start runtime: {error}"))
+            })?;
+        Ok(Client { api, runtime })
+    }
+
+    /// `GET path`, unauthenticated.
+    pub fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Failure> {
+        self.request(&Method::GET, path, None::<&()>, false)
+    }
+
+    /// `GET path` with the token, for a read the server never answers
+    /// without one.
+    pub fn get_with_token<T: DeserializeOwned>(&self, path: &str) -> Result<T, Failure> {
+        self.request(&Method::GET, path, None::<&()>, true)
+    }
+
+    /// `GET path`, with the token when one is set: the server answers
+    /// without one as it does the public. The answer comes back as the
+    /// server sent it, any JSON at all; a body that is not JSON is a
+    /// runtime failure.
+    pub fn read(&self, path: &str) -> Result<Value, Failure> {
+        self.request(&Method::GET, path, None::<&()>, self.api.has_token())
+    }
+
+    /// A write: `method path` with a JSON body and the token.
+    pub fn write<B: Serialize, T: DeserializeOwned>(
+        &self,
+        method: &Method,
+        path: &str,
+        body: &B,
+    ) -> Result<T, Failure> {
+        self.request(method, path, Some(body), true)
+    }
+
+    /// A write with no body: `POST` with the token to the path made of
+    /// `segments` under the base, plus `query`. Each segment is pushed
+    /// percent-encoded, so a `/` or `?` in one stays inside it.
+    pub fn post_query<T: DeserializeOwned>(
+        &self,
+        segments: &[&str],
+        query: &[(&str, &str)],
+    ) -> Result<T, Failure> {
+        let url = self.api.url(segments);
+        self.runtime
+            .block_on(self.api.send(&Method::POST, url, query, None::<&()>, true))
+    }
+
+    fn request<B: Serialize, T: DeserializeOwned>(
+        &self,
+        method: &Method,
+        path: &str,
+        body: Option<&B>,
+        authenticated: bool,
+    ) -> Result<T, Failure> {
+        let url = self.api.join(path)?;
+        self.runtime
+            .block_on(self.api.send(method, url, &[], body, authenticated))
     }
 }
 

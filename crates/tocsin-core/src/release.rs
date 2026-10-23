@@ -11,6 +11,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -84,7 +85,7 @@ impl Release {
 
 /// `POST /api/v1/releases`: publish a release, or update the one with the
 /// same project, version and environment.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NewRelease {
     /// A configured `[[project]]` id.
@@ -92,15 +93,18 @@ pub struct NewRelease {
     /// 1 to 64 characters: ASCII letters, digits and `.`, `_`, `+`, `-`,
     /// starting with a letter or digit, such as `v1.4.0` or `2026.10.23+5`.
     #[schema(max_length = 64, pattern = "^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")]
+    #[schemars(pattern("^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$"))]
     pub version: String,
     /// Defaults to `production`. 1 to 32 characters, the same set as
     /// `version`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(max_length = 32, pattern = "^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$")]
+    #[schemars(pattern("^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$"))]
     pub environment: Option<String>,
     /// One line, at most 200 characters. Defaults to the version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(max_length = 200)]
+    #[schemars(length(max = 200))]
     pub title: Option<String>,
     /// Markdown, at most 64 KiB. Defaults to none.
     #[serde(default)]

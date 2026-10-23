@@ -33,7 +33,7 @@ use super::{AppState, now};
 pub const TAG: &str = "releases";
 
 /// Page size when `limit` is not given.
-const DEFAULT_LIMIT: u32 = 50;
+pub const DEFAULT_LIMIT: u32 = 50;
 /// Largest page.
 pub const MAX_LIMIT: u32 = 200;
 
@@ -63,20 +63,20 @@ pub fn visible_projects(config: &Config, viewer: Viewer) -> Projects {
 }
 
 /// `?project=&since=&before=&limit=` on the list.
-#[derive(Debug, Deserialize, IntoParams)]
+#[derive(Debug, Default, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 #[serde(deny_unknown_fields)]
 pub struct ListQuery {
     /// Only this project's releases. A project the reader may not see
     /// matches nothing, like one that does not exist.
-    project: Option<String>,
+    pub project: Option<String>,
     /// Only releases published at or after this instant (RFC 3339).
-    since: Option<Timestamp>,
+    pub since: Option<Timestamp>,
     /// Only releases older than the previous page's last: its
     /// `next_before`.
-    before: Option<String>,
+    pub before: Option<String>,
     /// Page size, 1 to 200; default 50.
-    limit: Option<u32>,
+    pub limit: Option<u32>,
 }
 
 /// Published releases, newest first. Without a `status:read` token only
@@ -100,6 +100,20 @@ pub async fn list_releases(
 ) -> Result<Json<ReleaseList>, ApiError> {
     let Query(query) = query
         .map_err(|rejection| ApiError::invalid(vec![FieldError::new("", rejection.body_text())]))?;
+    list(&state, viewer, query).await.map(Json)
+}
+
+/// One page of the releases `viewer` may see, newest first: the read
+/// behind `GET /api/v1/releases`.
+///
+/// # Errors
+///
+/// 422 for a bad `before` or `limit`.
+pub async fn list(
+    state: &AppState,
+    viewer: Viewer,
+    query: ListQuery,
+) -> Result<ReleaseList, ApiError> {
     let mut errors = Vec::new();
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT);
     if !(1..=MAX_LIMIT).contains(&limit) {
@@ -136,11 +150,11 @@ pub async fn list_releases(
         .filter(|_| truncated)
         .and_then(ReleaseCursor::after)
         .map(|cursor| cursor.to_string());
-    Ok(Json(ReleaseList {
+    Ok(ReleaseList {
         releases,
         truncated,
         next_before,
-    }))
+    })
 }
 
 /// Publish a release. Posting the same project, version and environment

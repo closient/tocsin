@@ -38,36 +38,36 @@ pub fn router() -> OpenApiRouter<AppState> {
 }
 
 /// `?since=&before=&limit=` on a check's results.
-#[derive(Debug, Deserialize, IntoParams)]
+#[derive(Debug, Default, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 #[serde(deny_unknown_fields)]
 pub struct ResultsParams {
     /// The start of the window (RFC 3339): at most 366 days ago; default
     /// one day ago. Keep it the same while paging.
-    since: Option<Timestamp>,
+    pub since: Option<Timestamp>,
     /// Only results after the previous page's last: its `next_before`.
     /// One that names no result of this check (purged since, or from
     /// another read) is 422; start again without it.
-    before: Option<i64>,
+    pub before: Option<i64>,
     /// Results, 1 to 500; default 100.
-    limit: Option<u32>,
+    pub limit: Option<u32>,
 }
 
 /// `?since=&before=&limit=` on outages.
-#[derive(Debug, Deserialize, IntoParams)]
+#[derive(Debug, Default, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 #[serde(deny_unknown_fields)]
 pub struct OutageParams {
     /// The start of the window (RFC 3339): outages still open at or after
     /// it. At most 366 days ago; default 30 days ago. Keep it the same
     /// while paging.
-    since: Option<Timestamp>,
+    pub since: Option<Timestamp>,
     /// Only outages after the previous page's last: its `next_before`.
     /// One that names no outage (purged since) is 422; start again
     /// without it.
-    before: Option<i64>,
+    pub before: Option<i64>,
     /// Outages, 1 to 500; default 100.
-    limit: Option<u32>,
+    pub limit: Option<u32>,
 }
 
 /// One check's or heartbeat's raw results, newest first.
@@ -91,10 +91,24 @@ pub async fn get_results(
     Path(id): Path<String>,
     query: Result<Query<ResultsParams>, QueryRejection>,
 ) -> Result<Json<CheckResults>, ApiError> {
+    let Query(query) = query.map_err(|rejection| rejected(&rejection))?;
+    results(&state, id, query).await.map(Json)
+}
+
+/// One page of check `id`'s results: the read behind
+/// `GET /api/v1/checks/{id}/results`.
+///
+/// # Errors
+///
+/// 404 for an unknown check, 422 for a bad window.
+pub async fn results(
+    state: &AppState,
+    id: String,
+    query: ResultsParams,
+) -> Result<CheckResults, ApiError> {
     if !knows_check(&state.config, &id) {
         return Err(ApiError::not_found(format!("no check {id}")));
     }
-    let Query(query) = query.map_err(|rejection| rejected(&rejection))?;
     let page = page(
         query.since,
         DEFAULT_RESULTS_WINDOW_MS,
@@ -103,12 +117,12 @@ pub async fn get_results(
     )?;
     let mut results = state.store.check_results(&id, more(page)).await?;
     let next_before = trim(&mut results, page.limit, |result| result.id);
-    Ok(Json(CheckResults {
+    Ok(CheckResults {
         check_id: id,
         since: page.since,
         results,
         next_before,
-    }))
+    })
 }
 
 /// Outages open at any moment in the window, newest start first.
@@ -130,14 +144,23 @@ pub async fn list_outages(
     query: Result<Query<OutageParams>, QueryRejection>,
 ) -> Result<Json<OutageList>, ApiError> {
     let Query(query) = query.map_err(|rejection| rejected(&rejection))?;
+    outages(&state, query).await.map(Json)
+}
+
+/// One page of outages: the read behind `GET /api/v1/outages`.
+///
+/// # Errors
+///
+/// 422 for a bad window.
+pub async fn outages(state: &AppState, query: OutageParams) -> Result<OutageList, ApiError> {
     let page = page(query.since, DEFAULT_WINDOW_MS, query.before, query.limit)?;
     let mut outages = state.store.outages(more(page)).await?;
     let next_before = trim(&mut outages, page.limit, |outage| outage.id);
-    Ok(Json(OutageList {
+    Ok(OutageList {
         since: page.since,
         outages,
         next_before,
-    }))
+    })
 }
 
 fn rejected(rejection: &QueryRejection) -> ApiError {

@@ -155,6 +155,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route(llms::PATH, get(llms::get_llms_txt))
         .route(metrics::PATH, get(metrics::get_metrics))
+        .merge(crate::mcp::http::router(&state))
         .fallback(|| async { ApiError::not_found("no such route") })
         .method_not_allowed_fallback(|| async { ApiError::method_not_allowed() })
         .layer(DefaultBodyLimit::max(BODY_LIMIT))

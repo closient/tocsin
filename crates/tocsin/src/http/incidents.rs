@@ -26,9 +26,9 @@ use super::{AppState, now};
 pub const TAG: &str = "incidents";
 
 /// Page size when `limit` is not given.
-const DEFAULT_LIMIT: u32 = 20;
+pub const DEFAULT_LIMIT: u32 = 20;
 /// Largest page.
-const MAX_LIMIT: u32 = 100;
+pub const MAX_LIMIT: u32 = 100;
 
 pub fn router() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
@@ -38,14 +38,14 @@ pub fn router() -> OpenApiRouter<AppState> {
 }
 
 /// `?before=&limit=` on the list.
-#[derive(Debug, Deserialize, IntoParams)]
+#[derive(Debug, Default, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 #[serde(deny_unknown_fields)]
 pub struct ListQuery {
     /// Only incidents with a smaller id: the previous page's `next_before`.
-    before: Option<i64>,
+    pub before: Option<i64>,
     /// Page size, 1 to 100; default 20.
-    limit: Option<u32>,
+    pub limit: Option<u32>,
 }
 
 /// List incidents and maintenance, newest first.
@@ -68,6 +68,16 @@ pub async fn list_incidents(
 ) -> Result<Json<IncidentList>, ApiError> {
     let Query(query) = query
         .map_err(|rejection| ApiError::invalid(vec![FieldError::new("", rejection.body_text())]))?;
+    list(&state, query).await.map(Json)
+}
+
+/// One page of incidents and maintenance, newest first: the read behind
+/// `GET /api/v1/incidents`.
+///
+/// # Errors
+///
+/// 422 for a `limit` out of range.
+pub async fn list(state: &AppState, query: ListQuery) -> Result<IncidentList, ApiError> {
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT);
     if !(1..=MAX_LIMIT).contains(&limit) {
         return Err(ApiError::invalid(vec![FieldError::new(
@@ -84,10 +94,10 @@ pub async fn list_incidents(
         .last()
         .filter(|_| more)
         .map(|incident| incident.id);
-    Ok(Json(IncidentList {
+    Ok(IncidentList {
         incidents,
         next_before,
-    }))
+    })
 }
 
 /// One incident with every update.

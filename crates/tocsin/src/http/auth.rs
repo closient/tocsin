@@ -111,18 +111,61 @@ fn authorize<S: Scope>(parts: &Parts, state: &AppState) -> Result<Authorized<S>,
     };
     let token = find_token(&state.config.tokens, secret.as_bytes())
         .ok_or_else(|| ApiError::unauthorized("unknown token"))?;
-    if !token.scopes.contains(&S::SCOPE) {
-        tracing::warn!(token = %token.id, scope = S::NAME, "token lacks the scope");
+    Ok(Authorized {
+        actor: grant::<S>(token.id.as_str(), &token.scopes)?,
+        scope: PhantomData,
+    })
+}
+
+/// The actor for a write needing `S` by the token `id` holding `scopes`;
+/// 403 without the scope. Every route and MCP tool checks a scope here.
+fn grant<S: Scope>(id: &str, scopes: &[TokenScope]) -> Result<Actor, ApiError> {
+    if !scopes.contains(&S::SCOPE) {
+        tracing::warn!(token = %id, scope = S::NAME, "token lacks the scope");
         return Err(ApiError::forbidden(format!(
-            "token {} does not have the `{}` scope",
-            token.id.as_str(),
+            "token {id} does not have the `{}` scope",
             S::NAME
         )));
     }
-    Ok(Authorized {
-        actor: Actor::token(token.id.as_str()),
-        scope: PhantomData,
-    })
+    Ok(Actor::token(id))
+}
+
+/// A known token without its secret: who sent a request to `/mcp`. The
+/// request is authenticated once, as on any route; each tool call then
+/// checks the scope it needs, as each route does.
+#[derive(Debug, Clone)]
+pub struct Caller {
+    id: String,
+    scopes: Vec<TokenScope>,
+}
+
+impl Caller {
+    /// The token the `Authorization: Bearer` header names.
+    ///
+    /// # Errors
+    ///
+    /// 401 when the header is missing, malformed or names no token.
+    pub fn authenticate(parts: &Parts, state: &AppState) -> Result<Caller, ApiError> {
+        authenticate(parts, state).map(|token| Caller {
+            id: token.id.as_str().to_owned(),
+            scopes: token.scopes.clone(),
+        })
+    }
+
+    /// The actor to record for a write needing `S`.
+    ///
+    /// # Errors
+    ///
+    /// 403 without the scope, worded as the routes word it.
+    pub fn grant<S: Scope>(&self) -> Result<Actor, ApiError> {
+        grant::<S>(&self.id, &self.scopes)
+    }
+
+    /// What the token may read, as [`Viewer`] decides for a route.
+    #[must_use]
+    pub fn viewer(&self) -> Viewer {
+        Viewer::holding(&self.scopes)
+    }
 }
 
 /// The `[[token]]` an `Authorization: Bearer` header names: 401 when the
@@ -151,6 +194,17 @@ pub enum Viewer {
     Trusted,
 }
 
+impl Viewer {
+    /// The viewer a known token holding `scopes` is.
+    fn holding(scopes: &[TokenScope]) -> Viewer {
+        if scopes.contains(&TokenScope::StatusRead) {
+            Viewer::Trusted
+        } else {
+            Viewer::Public
+        }
+    }
+}
+
 impl FromRequestParts<AppState> for Viewer {
     type Rejection = ApiError;
 
@@ -159,13 +213,7 @@ impl FromRequestParts<AppState> for Viewer {
         state: &AppState,
     ) -> impl Future<Output = Result<Self, ApiError>> + Send {
         std::future::ready(if parts.headers.contains_key(header::AUTHORIZATION) {
-            authenticate(parts, state).map(|token| {
-                if token.scopes.contains(&TokenScope::StatusRead) {
-                    Viewer::Trusted
-                } else {
-                    Viewer::Public
-                }
-            })
+            authenticate(parts, state).map(|token| Viewer::holding(&token.scopes))
         } else {
             Ok(Viewer::Public)
         })

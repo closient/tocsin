@@ -11,6 +11,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use utoipa::ToSchema;
 use utoipa::openapi::schema::{KnownFormat, ObjectBuilder, SchemaFormat, Type};
@@ -26,7 +27,7 @@ macro_rules! text_enum {
         }
     ) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema, ::schemars::JsonSchema)]
         #[serde(rename_all = "snake_case")]
         pub enum $name {
             $($(#[$variant_meta])* $variant,)+
@@ -277,6 +278,25 @@ impl utoipa::PartialSchema for Timestamp {
 
 impl ToSchema for Timestamp {}
 
+impl JsonSchema for Timestamp {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Timestamp".into()
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC 3339; written in UTC with millisecond precision, read with any offset.",
+            "examples": ["2026-10-23T14:05:00.000Z"],
+        })
+    }
+}
+
 /// An incident or scheduled maintenance, with every update.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Incident {
@@ -328,7 +348,7 @@ pub struct IncidentUpdate {
 }
 
 /// `POST /api/v1/incidents`: open an incident or announce maintenance.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NewIncident {
     /// Defaults to `incident`.
@@ -336,6 +356,7 @@ pub struct NewIncident {
     pub kind: IncidentKind,
     /// One line, not empty, at most 200 characters.
     #[schema(max_length = 200)]
+    #[schemars(length(max = 200))]
     pub title: String,
     /// Defaults to `none`.
     #[serde(default = "default_impact")]

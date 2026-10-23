@@ -22,11 +22,14 @@ use serde::{Deserialize, Serialize};
 
 pub use assertion::{
     Assertion, CONDITION_KEYS, Comparison, Condition, FailureState, HeaderAssertion, JsonAssertion,
-    JsonPathStep, RecordsAssertion, TextAssertion, parse_json_path,
+    RecordsAssertion, TextAssertion,
 };
-pub use check::{Check, CheckType, DnsSettings, HttpMethod, HttpSettings, RecordType, TlsSettings};
+pub use check::{
+    BasicAuth, Check, CheckType, DnsSettings, HttpMethod, HttpSettings, RecordType, TcpSettings,
+    TlsSettings,
+};
 pub use diagnostic::Diagnostic;
-pub use load::{Environment, Source, load};
+pub use load::{Environment, Source, host_and_port, load};
 pub use notifier::{
     AlertmanagerSettings, DiscordSettings, EmailSettings, Notifier, NotifierSettings, NotifierType,
     NtfySettings, PushoverSettings, SlackSettings, TelegramSettings, WebhookSettings,

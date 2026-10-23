@@ -74,24 +74,43 @@ and the next commit rewinds the log. Only one connection can checkpoint at
 a time, and a passive checkpoint that finds another one running copies
 nothing at all. The checkpointer's pass can take seconds on a disk busy
 flushing other work, and writes that went on past it let the log reach
-12005 frames (49 MB) on CI (TOC-59). So when the writer's checkpoint is
-locked out it tries again every millisecond, committing nothing meanwhile,
-until it gets the lock and copies the rest. That makes the bound exact: the
-log never holds more than 3999 frames plus those of the one commit that
-reached the limit, however long the writes go on. A frame is a 4096-byte
-page and a 24-byte header, after a 32-byte file header. A full batch of 256
-check results commits 27 to 47 frames, so under results alone the log
-stays within 4046 frames, 16,669,552 bytes; a bigger commit, such as a
-retention chunk, adds its own frames once instead. The
-writer waits at most 5 seconds, then logs an error and lets that write go
-past the limit, so a checkpoint that never finishes shows up instead of
-stalling every write. It does not wait for readers: `RESTART` or `TRUNCATE`
-would, but they wait while holding the write lock, which puts reads back
-in front of writes. If a long read keeps the log growing anyway, the
-writer logs an error each time it doubles past 8000 frames. A writer
-waiting out the checkpointer's pass holds every write behind it for that
-long; under a 30 GB file copy to the same disk that was up to 2.5 seconds,
-and none reached the 5. The disk is still shared: on ext4 a write can wait for the filesystem
+12005 frames (49 MB) on CI, then 16004 (TOC-59). So when the
+checkpointer's pass holds the lock, the writer waits for it to end, on a
+condition variable the pass signals, committing nothing meanwhile, and
+then copies the rest; when another process holds it, the writer tries
+again every 10 ms. While the writer checkpoints at the limit, and for a
+second after, the checkpointer starts no pass of its own, which would
+only take the lock again the moment the last one ended. The log then
+holds at most 3999 frames plus those of the one commit that reached the
+limit. A frame is a 4096-byte page and a 24-byte header, after a 32-byte
+file header. A full batch of 256 check results commits 27 to 47 frames,
+so under results alone the log stays within 4046 frames, 16,669,552
+bytes; a bigger commit, such as a retention chunk, adds its own frames
+once instead.
+
+The bound has three exceptions. A long read can hold frames the
+checkpoint may not copy: the writer does not wait for readers, since
+`RESTART` or `TRUNCATE` would, but they wait while holding the write
+lock, which puts reads back in front of writes; instead the writer logs
+an error each time the log doubles past 8000 frames. The writer waits at
+most 5 seconds (the connections' busy timeout), so a checkpoint that
+does not finish shows up instead of stalling every write. And the writer's
+checkpoint can fail. Either of the last two starts a lockout: the writer
+logs one error, with SQLite's if there is one, and writes past the limit
+try to checkpoint once each without waiting, until one succeeds. Then it
+logs one line saying how long the lockout lasted and the most frames the
+log held. A writer waiting out the checkpointer's pass holds every write
+behind it for that long. Under a 60 GB file copy to the same disk, in
+twelve runs of the bound's test, 31 of 36 writes at the limit waited,
+for 0.57 seconds at the median and 4.9 at the most, and none timed out.
+The longest pass took 5.9 seconds, longer than the writer waits, so a
+pass like it can still start a lockout. The same load against a writer
+that polled every 10 ms instead, beside a checkpointer that started its
+next pass straight away, timed out four times, once after a 4.9-second
+pass because the next pass had already started, and twice let the log
+reach 11928 and 16001 frames behind a pass that outlasted the wait.
+
+The disk is still shared: on ext4 a write can wait for the filesystem
 journal while a checkpoint's fsync commits it. On a runner still flushing
 a gigabyte of build output that cost single writes up to 200 ms, while the
 p99 stayed under 12 ms. If the checkpointer thread ever dies, the writer

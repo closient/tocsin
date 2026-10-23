@@ -26,13 +26,17 @@
 //! work (TOC-59), so a writer that carried on past the limit would grow the
 //! log by as much as it can write in that time. It waits for the other
 //! checkpoint instead, for up to [`CHECKPOINT_WAIT`], and commits nothing
-//! meanwhile.
+//! meanwhile. A wait that times out, or a checkpoint that fails, starts a
+//! lockout: one error is logged, and writes past the limit try once without
+//! waiting until a checkpoint succeeds again. While the writer checkpoints
+//! at the limit, this thread starts no pass of its own, which would only
+//! take the lock from it.
 
 use std::cell::Cell;
 use std::os::raw::c_int;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -40,6 +44,7 @@ use rusqlite::Connection;
 use rusqlite::hooks::Wal;
 
 use crate::error::Result;
+use crate::schema;
 
 /// Uncopied frames that start a checkpoint: SQLite's own automatic threshold,
 /// about 4 MB at the default page size.
@@ -62,11 +67,11 @@ pub(crate) const LOG_LIMIT_FRAMES: c_int = 4000;
 /// Longest the writer waits at [`LOG_LIMIT_FRAMES`] for another connection's
 /// checkpoint to finish: the `busy_timeout` every connection uses, several
 /// times the longest pass measured on CI runners (794 ms, TOC-57).
-const CHECKPOINT_WAIT: Duration = Duration::from_secs(5);
+const CHECKPOINT_WAIT: Duration = schema::BUSY_TIMEOUT;
 
-/// How often the waiting writer tries its checkpoint again. A try that finds
-/// the lock taken costs tens of microseconds.
-const CHECKPOINT_POLL: Duration = Duration::from_millis(1);
+/// How often the waiting writer tries its checkpoint again when the lock is
+/// held by another process, whose checkpoint it cannot wait on directly.
+const CHECKPOINT_POLL: Duration = Duration::from_millis(10);
 
 /// The log file's size once a rewind has emptied it: about
 /// [`LOG_LIMIT_FRAMES`] frames of 4 KiB pages. A log that a long read kept
@@ -105,6 +110,8 @@ fn on_commit(_: &Wal, frames: c_int) -> rusqlite::Result<()> {
 
 pub(crate) struct Checkpointer {
     thread: JoinHandle<()>,
+    #[cfg(test)]
+    passes: Arc<Passes>,
 }
 
 /// The writer's end: tells the checkpointer a write committed, and
@@ -113,15 +120,100 @@ pub(crate) struct Nudge {
     link: Option<Link>,
     /// The log length that next logs an error; doubles each time.
     alarm: c_int,
+    /// Set while the writer's checkpoints at the limit time out or fail.
+    lockout: Option<Lockout>,
 }
 
 struct Link {
     sender: SyncSender<()>,
     /// Frames appended to the log, ever.
     appended: Arc<AtomicU64>,
-    /// The checkpointer is partway through a pass. Only reported: the writer
-    /// waits on SQLite's own lock, which any connection can hold.
-    checkpointing: Arc<AtomicBool>,
+    passes: Arc<Passes>,
+}
+
+/// The writer's checkpoints at the limit have timed out or failed since
+/// `since`, and the log has held up to `peak` frames meanwhile.
+struct Lockout {
+    since: Instant,
+    peak: c_int,
+}
+
+/// The checkpointer's passes, which the writer at the limit waits out on a
+/// condition variable rather than by polling.
+#[derive(Default)]
+pub(crate) struct Passes {
+    state: Mutex<State>,
+    /// Notified when a pass ends.
+    ended: Condvar,
+    /// Writes at the limit that found the log locked and waited.
+    #[cfg(test)]
+    waits: AtomicU64,
+    /// Steps of [`CHECKPOINT_POLL`] those writes slept.
+    #[cfg(test)]
+    polls: AtomicU64,
+    /// Passes the checkpointer skipped to stand aside for the writer.
+    #[cfg(test)]
+    skips: AtomicU64,
+}
+
+#[derive(Default)]
+struct State {
+    /// A pass is running.
+    running: bool,
+    /// No pass starts before this: the writer is checkpointing at the
+    /// limit, and a pass would only take the lock from it.
+    stand_aside_until: Option<Instant>,
+}
+
+/// A pass of the checkpointer's, running until this is dropped.
+pub(crate) struct Pass<'a>(&'a Passes);
+
+impl Passes {
+    /// Starts a pass, unless the checkpointer is to stand aside.
+    pub(crate) fn begin(&self) -> Option<Pass<'_>> {
+        let mut state = self.state();
+        if state
+            .stand_aside_until
+            .is_some_and(|until| Instant::now() < until)
+        {
+            return None;
+        }
+        state.running = true;
+        Some(Pass(self))
+    }
+
+    /// Keeps the checkpointer from starting a pass until `until`.
+    fn stand_aside_until(&self, until: Option<Instant>) {
+        self.state().stand_aside_until = until;
+    }
+
+    /// Waits until no pass is running, or until `deadline`. False if none
+    /// was running, so it is another process that holds the lock.
+    fn wait_out(&self, deadline: Instant) -> bool {
+        let state = self.state();
+        if !state.running {
+            return false;
+        }
+        let timeout = deadline.saturating_duration_since(Instant::now());
+        drop(
+            self.ended
+                .wait_timeout_while(state, timeout, |state| state.running)
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        true
+    }
+
+    /// Locks the state, which a panic cannot leave inconsistent.
+    fn state(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Drop for Pass<'_> {
+    fn drop(&mut self) {
+        self.0.state().running = false;
+        self.0.ended.notify_all();
+    }
 }
 
 impl Checkpointer {
@@ -131,17 +223,21 @@ impl Checkpointer {
         // One pending nudge is enough: it means "the log has grown".
         let (sender, nudges) = mpsc::sync_channel(1);
         let appended = Arc::new(AtomicU64::new(0));
-        let checkpointing = Arc::new(AtomicBool::new(false));
+        let passes = Arc::new(Passes::default());
         let thread = {
             let appended = Arc::clone(&appended);
-            let checkpointing = Arc::clone(&checkpointing);
+            let passes = Arc::clone(&passes);
             std::thread::Builder::new()
                 .name("tocsin-store-checkpointer".into())
-                .spawn(move || run(&conn, &nudges, &appended, &checkpointing))?
+                .spawn(move || run(&conn, &nudges, &appended, &passes))?
         };
         Ok((
-            Checkpointer { thread },
-            Nudge::new(sender, appended, checkpointing),
+            Checkpointer {
+                thread,
+                #[cfg(test)]
+                passes: Arc::clone(&passes),
+            },
+            Nudge::new(sender, appended, passes),
         ))
     }
 
@@ -159,34 +255,49 @@ impl Checkpointer {
         while !thread.is_finished() {
             std::thread::yield_now();
         }
-        Checkpointer { thread }
+        Checkpointer {
+            thread,
+            passes: Arc::default(),
+        }
+    }
+
+    /// Writes at the limit that found the log locked and waited.
+    pub(crate) fn waits(&self) -> u64 {
+        self.passes.waits.load(Ordering::Relaxed)
     }
 }
 
 impl Nudge {
-    fn new(
-        sender: SyncSender<()>,
-        appended: Arc<AtomicU64>,
-        checkpointing: Arc<AtomicBool>,
-    ) -> Nudge {
+    fn new(sender: SyncSender<()>, appended: Arc<AtomicU64>, passes: Arc<Passes>) -> Nudge {
         Nudge {
             link: Some(Link {
                 sender,
                 appended,
-                checkpointing,
+                passes,
             }),
             alarm: 2 * LOG_LIMIT_FRAMES,
+            lockout: None,
         }
     }
 
     /// Called by the writer after each write. Waits only once the log has
-    /// reached [`LOG_LIMIT_FRAMES`] and another checkpoint is running.
+    /// reached [`LOG_LIMIT_FRAMES`], another checkpoint is running, and no
+    /// lockout is.
     pub(crate) fn after_write(&mut self, conn: &Connection) {
         let Some(link) = &self.link else {
             return;
         };
         let (frames, appended) = LOG.get();
         link.appended.store(appended, Ordering::Relaxed);
+        // At the limit, the checkpointer starts no pass while this write
+        // checkpoints, nor for a while after in case the next write is at the
+        // limit too: a pass starting the moment the last ended, as a pass
+        // that commits raced does, would take the lock again before this
+        // checkpoint could. Set before the nudge, which could start one.
+        let started = Instant::now();
+        link.passes.stand_aside_until(
+            (frames >= LOG_LIMIT_FRAMES).then(|| started + CHECKPOINT_WAIT + RETRY),
+        );
         // Full means a nudge is already pending, which is all one says.
         if let Err(TrySendError::Disconnected(())) = link.sender.try_send(()) {
             // The thread can only end early by panicking. Without it the log
@@ -204,45 +315,40 @@ impl Nudge {
         }
         if frames < LOG_LIMIT_FRAMES {
             self.alarm = 2 * LOG_LIMIT_FRAMES;
+            // The log rewound, so a checkpoint copied all of it.
+            self.recovered();
             return;
         }
         // The checkpointer's passes keep being raced by commits, or a read
         // holds the log. Copy what is left here, where nothing can commit
         // meanwhile, so the next commit can rewind the log. If another
         // checkpoint holds the lock, wait for it rather than append past
-        // the limit for as long as it runs.
-        let started = Instant::now();
-        let mut outcome = passive(conn);
-        let checkpointer_in_flight = link.checkpointing.load(Ordering::Relaxed);
-        while locked_out(&outcome) && started.elapsed() < CHECKPOINT_WAIT {
-            std::thread::sleep(CHECKPOINT_POLL);
-            outcome = passive(conn);
-        }
-        let took = started.elapsed();
+        // the limit for as long as it runs; in a lockout, waiting would
+        // hold every write for the whole wait, so try once.
+        let outcome = if self.lockout.is_some() {
+            passive(conn)
+        } else {
+            wait_and_checkpoint(conn, &link.passes)
+        };
+        link.passes.stand_aside_until(Some(Instant::now() + RETRY));
         tracing::debug!(
             frames,
             ?outcome,
-            checkpointer_in_flight,
-            ?took,
+            took = ?started.elapsed(),
             "the writer checkpointed a log at its limit"
         );
-        if locked_out(&outcome) {
-            tracing::error!(
-                frames,
-                checkpointer_in_flight,
-                ?took,
-                "another checkpoint held the write-ahead log for longer than {CHECKPOINT_WAIT:?}; \
-                 the next write goes past the log's limit"
-            );
+        match &outcome {
+            Ok(done) if !done.busy => self.recovered(),
+            _ => self.locked_out(frames, started, &outcome),
         }
         if frames >= self.alarm {
             self.alarm = self.alarm.saturating_mul(2);
-            if locked_out(&outcome) {
+            if self.lockout.is_some() {
                 tracing::error!(
                     frames,
                     ?outcome,
                     "the write-ahead log is past twice its limit and still growing; \
-                     another checkpoint keeps holding it"
+                     another checkpoint keeps holding it, or checkpoints keep failing"
                 );
             } else {
                 tracing::error!(
@@ -254,6 +360,78 @@ impl Nudge {
             }
         }
     }
+
+    /// Starts a lockout, with its one error, or records how far the log
+    /// has grown in the current one.
+    fn locked_out(&mut self, frames: c_int, started: Instant, outcome: &rusqlite::Result<Outcome>) {
+        if let Some(lockout) = &mut self.lockout {
+            lockout.peak = lockout.peak.max(frames);
+            return;
+        }
+        self.lockout = Some(Lockout {
+            since: started,
+            peak: frames,
+        });
+        if let Err(error) = outcome {
+            tracing::error!(
+                frames,
+                %error,
+                "the writer's checkpoint of the write-ahead log failed; writes go past the \
+                 log's limit until a checkpoint succeeds"
+            );
+        } else {
+            tracing::error!(
+                frames,
+                "another checkpoint held the write-ahead log for longer than {CHECKPOINT_WAIT:?}; \
+                 writes go past the log's limit, without waiting, until a checkpoint succeeds"
+            );
+        }
+    }
+
+    /// Ends a lockout, if there is one, with one line saying how it went.
+    fn recovered(&mut self) {
+        if let Some(Lockout { since, peak }) = self.lockout.take() {
+            tracing::info!(
+                lasted = ?since.elapsed(),
+                peak_frames = peak,
+                "checkpoints of the write-ahead log succeed again; the lockout is over"
+            );
+        }
+    }
+}
+
+/// The writer's checkpoint at the limit. If another checkpoint holds the
+/// lock, waits for it, up to [`CHECKPOINT_WAIT`], and tries again: on the
+/// checkpointer's pass if one is running, otherwise (the holder is another
+/// process) in steps of [`CHECKPOINT_POLL`].
+///
+/// This cannot deadlock. The checkpointer never waits on the writer: a pass
+/// is one `PASSIVE` checkpoint, which never waits for a lock or calls a busy
+/// handler, and the writer waits here between transactions, holding no
+/// SQLite lock, and holding the passes' state only inside the condition
+/// variable's wait, which releases it; a pass the checkpointer stands aside
+/// from is skipped, not waited for. Every pass therefore ends, and the
+/// deadline bounds the wait regardless.
+fn wait_and_checkpoint(conn: &Connection, passes: &Passes) -> rusqlite::Result<Outcome> {
+    let deadline = Instant::now() + CHECKPOINT_WAIT;
+    let mut outcome = passive(conn);
+    #[cfg(test)]
+    if locked_out(&outcome) {
+        passes.waits.fetch_add(1, Ordering::Relaxed);
+    }
+    while locked_out(&outcome) {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        if !passes.wait_out(deadline) {
+            #[cfg(test)]
+            passes.polls.fetch_add(1, Ordering::Relaxed);
+            std::thread::sleep(CHECKPOINT_POLL.min(deadline - now));
+        }
+        outcome = passive(conn);
+    }
+    outcome
 }
 
 /// Another connection's checkpoint held the lock, so `outcome`'s copied
@@ -281,9 +459,32 @@ impl Nudge {
         let (sender, nudges) = mpsc::sync_channel(1);
         (Nudge::new(sender, Arc::default(), Arc::default()), nudges)
     }
+
+    /// The passes the writer waits out; the test runs its own.
+    pub(crate) fn passes(&self) -> Arc<Passes> {
+        Arc::clone(&self.link.as_ref().expect("a linked nudge").passes)
+    }
 }
 
-fn run(conn: &Connection, nudges: &Receiver<()>, appended: &AtomicU64, checkpointing: &AtomicBool) {
+#[cfg(test)]
+impl Passes {
+    /// Writes at the limit that found the log locked and waited.
+    pub(crate) fn waits(&self) -> u64 {
+        self.waits.load(Ordering::Relaxed)
+    }
+
+    /// Steps of [`CHECKPOINT_POLL`] those writes slept.
+    pub(crate) fn polls(&self) -> u64 {
+        self.polls.load(Ordering::Relaxed)
+    }
+
+    /// Passes the checkpointer skipped to stand aside for the writer.
+    pub(crate) fn skips(&self) -> u64 {
+        self.skips.load(Ordering::Relaxed)
+    }
+}
+
+fn run(conn: &Connection, nudges: &Receiver<()>, appended: &AtomicU64, passes: &Passes) {
     // The appended count the last checkpoint started from: frames past it
     // have not been copied.
     let mut copied_to = 0;
@@ -307,10 +508,19 @@ fn run(conn: &Connection, nudges: &Receiver<()>, appended: &AtomicU64, checkpoin
         if target - copied_to < THRESHOLD_FRAMES && now < due_at {
             continue;
         }
+        let Some(pass) = passes.begin() else {
+            #[cfg(test)]
+            passes.skips.fetch_add(1, Ordering::Relaxed);
+            // Try again once the writer has gone quiet; leaving `due` as it
+            // was would spin while it is past.
+            due = Some(Instant::now() + RETRY);
+            continue;
+        };
         copied_to = target;
-        checkpointing.store(true, Ordering::Relaxed);
-        let complete = checkpoint(conn, &mut stalled);
-        checkpointing.store(false, Ordering::Relaxed);
+        let complete = {
+            let _pass = pass;
+            checkpoint(conn, &mut stalled)
+        };
         due = if !complete {
             Some(Instant::now() + RETRY)
         } else if appended.load(Ordering::Relaxed) > copied_to {
@@ -343,13 +553,14 @@ impl Outcome {
 /// waits: frames a reader's snapshot still uses are left for later, and
 /// another checkpoint in progress skips this one (see [`locked_out`]).
 fn passive(conn: &Connection) -> rusqlite::Result<Outcome> {
-    conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
-        Ok(Outcome {
-            busy: row.get(0)?,
-            log: row.get(1)?,
-            copied: row.get(2)?,
+    conn.prepare_cached("PRAGMA wal_checkpoint(PASSIVE)")?
+        .query_row([], |row| {
+            Ok(Outcome {
+                busy: row.get(0)?,
+                log: row.get(1)?,
+                copied: row.get(2)?,
+            })
         })
-    })
 }
 
 /// Runs a checkpoint; true if it copied the whole log. Warns once when

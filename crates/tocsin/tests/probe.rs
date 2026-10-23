@@ -5,7 +5,7 @@
 //! `tests/snapshots/`; timings, the date header and the server's port are
 //! normalized first because they change from run to run.
 
-use std::net::{SocketAddr, TcpListener};
+use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -14,6 +14,9 @@ use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use serde_json::Value;
+
+#[allow(dead_code)]
+mod support;
 
 /// An Atlassian Statuspage `components.json` body, cut down to the fields
 /// a vendor-status check reads.
@@ -109,22 +112,16 @@ fn server() -> u16 {
     port
 }
 
-/// A port nothing listens on: bound, then released.
-fn closed_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("binds");
-    let address: SocketAddr = listener.local_addr().expect("has an address");
-    address.port()
-}
-
 struct Fixture {
     config: tempfile::TempDir,
     port: u16,
-    closed: u16,
+    /// Holds the refused port for as long as the test runs.
+    closed: support::RefusedPort,
 }
 
 fn fixture() -> Fixture {
     let port = server();
-    let closed = closed_port();
+    let closed = support::RefusedPort::new();
     let config = tempfile::tempdir().expect("temp folder");
     write(config.path(), "server.toml", "[server]\n");
     write(
@@ -132,7 +129,7 @@ fn fixture() -> Fixture {
         "checks.toml",
         &CHECKS
             .replace("PORT", &port.to_string())
-            .replace("CLOSED", &closed.to_string()),
+            .replace("CLOSED", &closed.port().to_string()),
     );
     Fixture {
         config,
@@ -161,7 +158,7 @@ impl Fixture {
         String::from_utf8(output.stdout.clone())
             .expect("UTF-8")
             .replace(&format!(":{}", self.port), ":PORT")
-            .replace(&format!(":{}", self.closed), ":CLOSED")
+            .replace(&format!(":{}", self.closed.port()), ":CLOSED")
     }
 
     /// Stdout as exactly one JSON document, normalized for a snapshot.

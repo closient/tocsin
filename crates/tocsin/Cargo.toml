@@ -21,6 +21,8 @@ clap.workspace = true
 # `stream::unfold`, to turn the event bus into an SSE response.
 futures-util.workspace = true
 gethostname.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 jiff.workspace = true
 notify.workspace = true
 prometheus-client.workspace = true
@@ -54,6 +56,8 @@ insta = { workspace = true }
 html5ever = "0.40"
 regex.workspace = true
 tempfile = "3"
+# A bound, never-listening socket: a port that refuses connections and stays ours.
+socket2 = "0.6"
 tocsin-core.workspace = true
 # Paused time for the key-cache tests.
 tokio = { workspace = true, features = ["test-util"] }

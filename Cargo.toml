@@ -30,6 +30,10 @@ hmac = "0.12"
 hickory-proto = { version = "0.26", default-features = false, features = ["std"] }
 hickory-resolver = { version = "0.26", default-features = false, features = ["system-config", "tokio"] }
 http = "1.5"
+# `serve` owns its connection tasks, so a shutdown can abort and await
+# them; axum already builds on these two.
+hyper = { version = "1.12", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "0.1.21", default-features = false, features = ["http1", "server", "server-graceful", "service", "tokio"] }
 insta = { version = "1.49", features = ["json"] }
 # Email over SMTP, with rustls on ring and the platform verifier like reqwest.
 # The default features pull in native-tls, and "builder" pulls in

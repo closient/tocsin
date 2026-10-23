@@ -15,6 +15,9 @@ use tocsin_core::Health::{self, Degraded, Down, Up};
 use tocsin_core::incident::Timestamp;
 use tocsin_store::{NewCheckResult, NewOutage, Store, SubjectKind};
 
+#[allow(dead_code)]
+mod support;
+
 const CONFIG: &str = r#"
 [server]
 listen = "127.0.0.1:0"
@@ -463,11 +466,9 @@ fn bad_windows_are_invalid_input() {
 
 #[test]
 fn an_unreachable_server_is_a_runtime_failure() {
-    // Bind and drop: nothing listens on the port afterwards.
-    let address = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap();
+    // Bound and never listening: connections are refused, and the port stays ours.
+    let refused = support::RefusedPort::new();
+    let address = refused.address();
     for command in ["status", "outages", "timeline"] {
         let output = cli(&format!("http://{address}"), None, &[command]);
         assert_eq!(output.status.code(), Some(3), "{command}");

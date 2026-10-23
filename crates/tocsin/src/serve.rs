@@ -8,6 +8,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Body;
+use axum::extract::ConnectInfo;
+use axum::http::Request;
+use hyper::body::Incoming;
+use hyper::server::conn::http1;
+use hyper_util::rt::TokioIo;
+use hyper_util::server::graceful::GracefulShutdown;
+use hyper_util::service::TowerToHyperService;
 use serde_json::json;
 use tocsin_alert::{
     AlertMetrics, Alerter, AlertingHistory, HTTP_TIMEOUT, Notifiers, Router, WorkerSettings,
@@ -17,10 +25,12 @@ use tocsin_engine::ports::{Clock, History, ProbeRunner, SystemClock};
 use tocsin_engine::{Engine, HeartbeatHandle, Parts, Plan, StatusHandle};
 use tocsin_probe::ProbeContext;
 use tocsin_store::{DB_FILE, Retention, Store};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::{oneshot, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle, JoinSet};
 use tokio::time::MissedTickBehavior;
+use tower::ServiceExt as _;
 
 use crate::exit::Exit;
 use crate::http::events::{EventBus, wake_on_incident_changes};
@@ -122,11 +132,9 @@ async fn serve(
         .map(Arc::new);
     let store = open_store(data)?;
     let listen = config.server.listen;
-    let listener = tokio::net::TcpListener::bind(listen)
-        .await
-        .map_err(|error| {
-            Failure::new(Exit::Runtime, format!("cannot listen on {listen}: {error}"))
-        })?;
+    let listener = TcpListener::bind(listen).await.map_err(|error| {
+        Failure::new(Exit::Runtime, format!("cannot listen on {listen}: {error}"))
+    })?;
     let address = listener.local_addr().map_err(|error| {
         Failure::new(Exit::Runtime, format!("cannot listen on {listen}: {error}"))
     })?;
@@ -173,7 +181,7 @@ async fn serve(
         monitor,
         Some(hangup),
     );
-    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let (stop, stopped) = oneshot::channel::<()>();
     let server = spawn_server(listener, service, stopped, events);
     // Logged only once both handlers exist and the socket is bound, so a
     // signal sent after this line is always handled and a request sent
@@ -195,34 +203,10 @@ async fn serve(
         maintenance,
         Some(reloader),
         store,
+        Grace::SHUTDOWN,
     )
     .await;
     outcome
-}
-
-/// Serves `app` on `listener` until `stopped` fires, then ends the event
-/// streams on `events` and finishes the requests in flight.
-fn spawn_server(
-    listener: tokio::net::TcpListener,
-    app: axum::Router,
-    stopped: oneshot::Receiver<()>,
-    events: EventBus,
-) -> JoinHandle<io::Result<()>> {
-    tokio::spawn(async move {
-        // Peer addresses let `trusted_header` auth check where a request
-        // came from.
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move {
-            let _ = stopped.await;
-            // An event stream never finishes by itself; without this the
-            // drain waits out every open status page.
-            events.close();
-        })
-        .await
-    })
 }
 
 /// The running checks: the engine, the task that wakes it when an
@@ -485,15 +469,19 @@ fn probe_context(config: &Config) -> ProbeContext {
 async fn supervise(
     shutdown: impl Future<Output = &'static str>,
     stop: oneshot::Sender<()>,
-    mut server: JoinHandle<io::Result<()>>,
+    mut server: JoinHandle<Connections>,
     maintenance: JoinHandle<()>,
     reloader: Option<Reloader>,
     store: Arc<Store>,
+    grace: Grace,
 ) -> (Result<&'static str, Failure>, bool) {
     let ended = tokio::select! {
         signal_name = shutdown => Ok(signal_name),
         result = &mut server => Err(result),
     };
+    // Connections a server that ended on its own handed back; nothing
+    // serves them any more, but they still hold the store.
+    let mut stranded = None;
     let outcome = match ended {
         Ok(signal_name) => {
             tracing::info!(signal = signal_name, "shutting down");
@@ -501,8 +489,10 @@ async fn supervise(
         }
         Err(result) => {
             let message = match result {
-                Ok(Ok(())) => "the HTTP server stopped on its own".to_owned(),
-                Ok(Err(error)) => format!("the HTTP server failed: {error}"),
+                Ok(connections) => {
+                    stranded = Some(connections);
+                    "the HTTP server stopped on its own".to_owned()
+                }
                 Err(error) => format!("the HTTP server panicked: {error}"),
             };
             tracing::error!("{message}; shutting down");
@@ -513,44 +503,178 @@ async fn supervise(
         reloader.stop().await;
     }
     if outcome.is_ok() {
-        drain(stop, server).await;
+        drain(stop, server, grace.drain).await;
+    } else if let Some(connections) = stranded {
+        connections.abort().await;
     }
     maintenance.abort();
     // An aborted task drops its handle on the store at its next await,
     // which `await` on the join handle waits for.
     let _ = maintenance.await;
-    (outcome, close(store).await)
+    (outcome, close_within(store, grace.release).await)
 }
 
 /// Stops accepting, then lets requests in flight finish so their writes
-/// commit before the store closes.
-async fn drain(stop: oneshot::Sender<()>, mut server: JoinHandle<io::Result<()>>) {
+/// commit before the store closes; those still running after `drain_for`
+/// are aborted. Returns once every connection task has ended.
+async fn drain(stop: oneshot::Sender<()>, server: JoinHandle<Connections>, drain_for: Duration) {
     let _ = stop.send(());
-    match tokio::time::timeout(DRAIN_FOR, &mut server).await {
-        Ok(Ok(Ok(()))) => {}
-        Ok(Ok(Err(error))) => tracing::warn!(%error, "HTTP server stopped with an error"),
-        Ok(Err(error)) => tracing::warn!(%error, "HTTP server panicked while draining"),
-        Err(_) => {
-            // axum owns the connection tasks: aborting the server stops
-            // the accept loop, not a request still running, which keeps
-            // its handle on the store. `close` reports it if it outlives
-            // the grace period.
-            tracing::warn!(
-                seconds = DRAIN_FOR.as_secs(),
-                "requests still running; dropping them"
-            );
-            server.abort();
-            let _ = server.await;
+    // The accept loop hands its connections back as soon as it is told.
+    match server.await {
+        Ok(connections) => {
+            connections.close(drain_for).await;
+        }
+        // Unwinding dropped the connections, which aborts them; `close`
+        // gives them a moment to let go of the store.
+        Err(error) => tracing::warn!(%error, "HTTP server panicked while draining"),
+    }
+}
+
+/// Answers HTTP on `listener` with `service` until `stopped`, then ends
+/// the event streams on `events` and hands back its connections, still
+/// finishing their requests.
+///
+/// The server owns a task per connection, unlike `axum::serve`, which
+/// detaches them: a request that runs past the drain can then be aborted,
+/// and awaited, so it lets go of the store before the store closes.
+fn spawn_server(
+    listener: TcpListener,
+    service: axum::Router,
+    mut stopped: oneshot::Receiver<()>,
+    events: EventBus,
+) -> JoinHandle<Connections> {
+    tokio::spawn(async move {
+        let mut connections = Connections::default();
+        loop {
+            tokio::select! {
+                _ = &mut stopped => break,
+                accepted = listener.accept() => match accepted {
+                    Ok((stream, peer)) => connections.serve(stream, peer, service.clone()),
+                    // The peer gave up before it was accepted.
+                    Err(error) if is_connection_error(&error) => {}
+                    // Out of file descriptors, most likely: as axum does,
+                    // say so and try again in a moment rather than stop
+                    // serving.
+                    Err(error) => {
+                        tracing::error!(%error, "cannot accept a connection; retrying");
+                        tokio::select! {
+                            _ = &mut stopped => break,
+                            () = tokio::time::sleep(ACCEPT_RETRY) => {}
+                        }
+                    }
+                },
+                Some(ended) = connections.tasks.join_next() => reap(ended),
+            }
+        }
+        // An event stream never finishes by itself; without this the
+        // drain waits out every open status page.
+        events.close();
+        connections
+    })
+}
+
+/// Errors that end one connection, not the listener.
+fn is_connection_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+    )
+}
+
+/// Logs a connection task that panicked; one that ended or was aborted
+/// needs nothing.
+fn reap(ended: Result<(), JoinError>) {
+    if let Err(error) = ended
+        && error.is_panic()
+    {
+        tracing::error!(%error, "an HTTP connection panicked");
+    }
+}
+
+/// Waits for every connection task to end. An aborted task drops what it
+/// holds only when the runtime next gets to it; joining waits for that.
+async fn join(tasks: &mut JoinSet<()>) {
+    while let Some(ended) = tasks.join_next().await {
+        reap(ended);
+    }
+}
+
+/// The HTTP connections a server has open, each a task owned here.
+struct Connections {
+    tasks: JoinSet<()>,
+    graceful: GracefulShutdown,
+}
+
+impl Default for Connections {
+    fn default() -> Self {
+        Connections {
+            tasks: JoinSet::new(),
+            graceful: GracefulShutdown::new(),
         }
     }
 }
 
-/// Closes the store once this is the last handle on it. A connection
-/// task drops its handle a moment after the server sees it finish, so
-/// this waits up to [`RELEASE_FOR`] before giving up. Says whether the
-/// store closed; logs an error when it did not.
+impl Connections {
+    /// Serves HTTP/1 on `stream` in a task of its own. Each request carries
+    /// the peer's address, which `trusted_header` auth checks.
+    fn serve(&mut self, stream: TcpStream, peer: SocketAddr, service: axum::Router) {
+        let service = service.map_request(move |request: Request<Incoming>| {
+            let mut request = request.map(Body::new);
+            request.extensions_mut().insert(ConnectInfo(peer));
+            request
+        });
+        let connection = http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), TowerToHyperService::new(service));
+        let connection = self.graceful.watch(connection);
+        self.tasks.spawn(async move {
+            if let Err(error) = connection.await {
+                tracing::debug!(%peer, %error, "HTTP connection failed");
+            }
+        });
+    }
+
+    /// Asks every connection to finish the request it is on and close,
+    /// waits up to `drain_for` for them, then aborts the rest. Returns once
+    /// every connection task has ended, so nothing a request held outlives
+    /// this. Says whether they all finished in time.
+    async fn close(mut self, drain_for: Duration) -> bool {
+        let finished = tokio::time::timeout(drain_for, self.graceful.shutdown())
+            .await
+            .is_ok();
+        if !finished {
+            tracing::warn!(
+                connections = self.tasks.len(),
+                seconds = drain_for.as_secs_f64(),
+                "requests still running after the drain; aborting them"
+            );
+            self.tasks.abort_all();
+        }
+        join(&mut self.tasks).await;
+        finished
+    }
+
+    /// Aborts every connection task without draining, for connections no
+    /// server serves any more, and waits for each to end.
+    async fn abort(mut self) {
+        self.tasks.abort_all();
+        join(&mut self.tasks).await;
+    }
+}
+
+/// Closes the store once this is the last handle on it, waiting up to
+/// [`RELEASE_FOR`]: see [`close_within`].
 async fn close(store: Arc<Store>) -> bool {
-    let deadline = tokio::time::Instant::now() + RELEASE_FOR;
+    close_within(store, RELEASE_FOR).await
+}
+
+/// Closes the store once this is the last handle on it. A task aborted
+/// without being awaited drops its handle a moment later, so this waits
+/// up to `release_for` before giving up. Says whether the store closed;
+/// logs an error when it did not.
+async fn close_within(store: Arc<Store>, release_for: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + release_for;
     while Arc::strong_count(&store) > 1 && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -572,11 +696,32 @@ async fn close(store: Arc<Store>) -> bool {
     }
 }
 
+/// How long shutdown waits on what still holds the store.
+#[derive(Clone, Copy, Debug)]
+struct Grace {
+    /// For requests in flight to finish before they are aborted.
+    drain: Duration,
+    /// For the last other handle on the store to go: see [`close_within`].
+    release: Duration,
+}
+
+impl Grace {
+    /// What `tocsin serve` waits.
+    const SHUTDOWN: Grace = Grace {
+        drain: DRAIN_FOR,
+        release: RELEASE_FOR,
+    };
+}
+
 /// How long requests in flight may run after a shutdown signal.
 const DRAIN_FOR: Duration = Duration::from_secs(10);
 
 /// How long [`close`] waits for the last other handle on the store to go.
 const RELEASE_FOR: Duration = Duration::from_secs(1);
+
+/// How long the server waits after an accept error that is not one
+/// connection's, before it accepts again.
+const ACCEPT_RETRY: Duration = Duration::from_secs(1);
 
 /// How often rollups are brought up to date and retention runs.
 const MAINTENANCE_EVERY: Duration = Duration::from_hours(1);
@@ -679,8 +824,12 @@ mod tests {
     use std::sync::{Arc, Mutex, Weak};
     use std::time::Duration;
 
+    use std::net::SocketAddr;
+
     use axum::body::Body;
+    use axum::extract::{ConnectInfo, State};
     use axum::http::{Request, StatusCode, header};
+    use axum::routing::get;
     use serde_json::json;
     use tocsin_core::Health;
     use tocsin_core::config::{Environment, Source};
@@ -691,15 +840,19 @@ mod tests {
         DB_FILE, LastUp, LatestResult, NewCheckResult, Outage, OutageChange, Retention, Store,
         SubjectKind,
     };
-    use tokio::sync::oneshot;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::{mpsc, oneshot};
     use tower::ServiceExt;
 
     use super::{
-        AlertMetrics, Monitor, ReloadError, close, io, spawn_server, start_checks, supervise,
+        AlertMetrics, Connections, Grace, Monitor, ReloadError, close, spawn_server, start_checks,
+        supervise,
     };
     use crate::exit::Exit;
     use crate::http::events::{Event, EventBus};
     use crate::http::{self, AppState};
+    use crate::testing::Captured;
 
     fn open() -> (tempfile::TempDir, Arc<Store>) {
         let dir = tempfile::tempdir().unwrap();
@@ -707,32 +860,46 @@ mod tests {
         (dir, Arc::new(store))
     }
 
-    /// A task that holds a handle on the store until it is aborted.
-    fn holding(store: &Arc<Store>) -> tokio::task::JoinHandle<()> {
+    /// Waits that keep these tests quick. With no wait for the store's
+    /// last holders, the store closes only if shutdown has awaited every
+    /// task that held it.
+    const SHORT: Grace = Grace {
+        drain: Duration::from_millis(200),
+        release: Duration::ZERO,
+    };
+
+    /// Holds a handle on the store until aborted.
+    fn holding_until_aborted(store: &Arc<Store>) -> impl Future<Output = ()> + use<> {
         let store = Arc::clone(store);
-        tokio::spawn(async move {
+        async move {
             let _store = store;
             pending::<()>().await;
-        })
+        }
     }
 
+    /// A task that holds a handle on the store until it is aborted.
+    fn holding(store: &Arc<Store>) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(holding_until_aborted(store))
+    }
+
+    /// A server that ends on its own leaves its connections behind, still
+    /// holding the store: they are aborted, and the store still closes.
     #[tokio::test]
-    async fn a_failed_server_still_stops_maintenance_and_closes_the_store() {
+    async fn a_server_that_ends_on_its_own_still_stops_everything_and_closes_the_store() {
         let (_dir, store) = open();
         let weak: Weak<Store> = Arc::downgrade(&store);
-        let held = Arc::clone(&store);
-        let server = tokio::spawn(async move {
-            let _store = held;
-            Err(io::Error::other("accept failed"))
-        });
+        let mut connections = Connections::default();
+        connections.tasks.spawn(holding_until_aborted(&store));
+        let server = tokio::spawn(ready(connections));
         let maintenance = holding(&store);
         let (stop, _stopped) = oneshot::channel();
 
-        let (outcome, closed) = supervise(pending(), stop, server, maintenance, None, store).await;
+        let (outcome, closed) =
+            supervise(pending(), stop, server, maintenance, None, store, SHORT).await;
 
         let failure = outcome.unwrap_err();
         assert_eq!(failure.exit, Exit::Runtime);
-        assert_eq!(failure.message, "the HTTP server failed: accept failed");
+        assert_eq!(failure.message, "the HTTP server stopped on its own");
         assert!(closed, "the store was not closed");
         assert!(weak.upgrade().is_none(), "something still holds the store");
     }
@@ -746,12 +913,20 @@ mod tests {
         let server = tokio::spawn(async move {
             let _store = held;
             let _ = stopped.await;
-            Ok(())
+            Connections::default()
         });
         let maintenance = holding(&store);
 
-        let (outcome, closed) =
-            supervise(ready("SIGTERM"), stop, server, maintenance, None, store).await;
+        let (outcome, closed) = supervise(
+            ready("SIGTERM"),
+            stop,
+            server,
+            maintenance,
+            None,
+            store,
+            SHORT,
+        )
+        .await;
 
         assert_eq!(outcome.unwrap(), "SIGTERM");
         assert!(closed, "the store was not closed");
@@ -802,8 +977,16 @@ mod tests {
         let maintenance = holding(&store);
 
         let started = std::time::Instant::now();
-        let (outcome, closed) =
-            supervise(ready("SIGTERM"), stop, server, maintenance, None, store).await;
+        let (outcome, closed) = supervise(
+            ready("SIGTERM"),
+            stop,
+            server,
+            maintenance,
+            None,
+            store,
+            Grace::SHUTDOWN,
+        )
+        .await;
 
         assert_eq!(outcome.unwrap(), "SIGTERM");
         assert!(
@@ -824,16 +1007,199 @@ mod tests {
         let (stop, stopped) = oneshot::channel();
         let server = tokio::spawn(async move {
             let _ = stopped.await;
-            Ok(())
+            Connections::default()
         });
         let maintenance = holding(&store);
 
-        let (outcome, closed) =
-            supervise(ready("SIGINT"), stop, server, maintenance, None, store).await;
+        let (outcome, closed) = supervise(
+            ready("SIGINT"),
+            stop,
+            server,
+            maintenance,
+            None,
+            store,
+            SHORT,
+        )
+        .await;
 
         assert_eq!(outcome.unwrap(), "SIGINT");
         assert!(!closed, "closed a store something else still holds");
         assert_eq!(Arc::strong_count(&straggler), 1);
+    }
+
+    /// A server on a loopback port whose `/slow` holds a handle on the
+    /// store, says on the returned channel that it has started, then
+    /// answers after `hold`, or never.
+    async fn slow_server(
+        store: &Arc<Store>,
+        hold: Option<Duration>,
+    ) -> (
+        SocketAddr,
+        oneshot::Sender<()>,
+        tokio::task::JoinHandle<Connections>,
+        mpsc::UnboundedReceiver<()>,
+    ) {
+        let (started, starts) = mpsc::unbounded_channel();
+        let app = axum::Router::new()
+            .route(
+                "/slow",
+                get(async move |State(store): State<Arc<Store>>| {
+                    let _store = store;
+                    let _ = started.send(());
+                    match hold {
+                        Some(hold) => tokio::time::sleep(hold).await,
+                        None => pending().await,
+                    }
+                    "done"
+                }),
+            )
+            .with_state(Arc::clone(store));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, stopped) = oneshot::channel();
+        (
+            address,
+            stop,
+            spawn_server(listener, app, stopped, EventBus::new()),
+            starts,
+        )
+    }
+
+    /// Sends `GET path` on a new connection.
+    async fn get_on_new_connection(address: SocketAddr, path: &str) -> TcpStream {
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(format!("GET {path} HTTP/1.1\r\nhost: tocsin\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        client
+    }
+
+    /// Everything the server sends until it closes the connection.
+    async fn read_until_closed(mut client: TcpStream) -> String {
+        let mut received = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            // A reset after an abort ends the read as well as a close does.
+            let _ = client.read_to_end(&mut received).await;
+        })
+        .await
+        .expect("the server closed the connection");
+        String::from_utf8_lossy(&received).into_owned()
+    }
+
+    /// A request still running when the drain runs out is aborted and
+    /// awaited, so it lets go of the store and the store still closes.
+    #[tokio::test]
+    async fn a_request_running_past_the_drain_is_aborted_and_the_store_closes() {
+        let log = Captured::default();
+        let _log = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(log.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+        let (_dir, store) = open();
+        let weak = Arc::downgrade(&store);
+        let (address, stop, server, mut starts) = slow_server(&store, None).await;
+        let client = get_on_new_connection(address, "/slow").await;
+        starts.recv().await.expect("the request is running");
+        // Maintenance that has already ended: awaiting it does not yield,
+        // so nothing gives the runtime a chance to reap the aborted request
+        // between the drain and the close, unless the drain waited for it.
+        let maintenance = tokio::spawn(async {});
+        while !maintenance.is_finished() {
+            tokio::task::yield_now().await;
+        }
+
+        let (outcome, closed) = tokio::time::timeout(
+            Duration::from_secs(10),
+            supervise(
+                ready("SIGTERM"),
+                stop,
+                server,
+                maintenance,
+                None,
+                store,
+                SHORT,
+            ),
+        )
+        .await
+        .expect("shutdown finished");
+
+        assert_eq!(outcome.unwrap(), "SIGTERM");
+        assert!(closed, "the store was not closed");
+        assert!(weak.upgrade().is_none(), "something still holds the store");
+        let logged = log.text();
+        assert!(
+            logged.contains("requests still running after the drain; aborting them"),
+            "{logged}"
+        );
+        assert!(!logged.contains("database still in use"), "{logged}");
+        assert_eq!(
+            read_until_closed(client).await,
+            "",
+            "the request was answered"
+        );
+    }
+
+    /// A request that finishes within the drain is answered before the
+    /// store closes.
+    #[tokio::test]
+    async fn a_request_finishing_within_the_drain_is_answered() {
+        let (_dir, store) = open();
+        let (address, stop, server, mut starts) =
+            slow_server(&store, Some(Duration::from_millis(50))).await;
+        let client = get_on_new_connection(address, "/slow").await;
+        starts.recv().await.expect("the request is running");
+        let maintenance = holding(&store);
+        let grace = Grace {
+            drain: Duration::from_secs(10),
+            ..SHORT
+        };
+
+        let (outcome, closed) = supervise(
+            ready("SIGTERM"),
+            stop,
+            server,
+            maintenance,
+            None,
+            store,
+            grace,
+        )
+        .await;
+
+        assert_eq!(outcome.unwrap(), "SIGTERM");
+        assert!(closed, "the store was not closed");
+        let response = read_until_closed(client).await;
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        assert!(response.ends_with("done"), "{response}");
+    }
+
+    /// `trusted_header` auth reads the peer's address from each request.
+    #[tokio::test]
+    async fn requests_carry_the_peer_address() {
+        let app = axum::Router::new().route(
+            "/peer",
+            get(async |ConnectInfo(peer): ConnectInfo<SocketAddr>| peer.to_string()),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, stopped) = oneshot::channel();
+        let server = spawn_server(listener, app, stopped, EventBus::new());
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(b"GET /peer HTTP/1.1\r\nhost: tocsin\r\nconnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let peer = client.local_addr().unwrap();
+
+        // Read the answer before stopping: a stop sent first could beat the
+        // accept, leaving the connection to the closed listener.
+        let response = read_until_closed(client).await;
+        let _ = stop.send(());
+        assert!(server.await.unwrap().close(SHORT.drain).await);
+
+        assert!(response.ends_with(&peer.to_string()), "{response}");
     }
 
     /// The engine re-reads incidents on its own only once a minute; a write
@@ -1002,11 +1368,13 @@ mod tests {
     #[tokio::test]
     async fn the_alerts_of_a_removed_notifier_end_at_startup_and_at_reload() {
         let (_dir, store) = open();
-        // Nothing listens there once the listener is dropped.
-        let closed = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
+        // Bound and never listening: refused, and no other test can take it.
+        let socket =
+            socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+        socket
+            .bind(&std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)).into())
             .unwrap();
+        let closed = socket.local_addr().unwrap().as_socket().unwrap();
         let check = format!(
             "[[check]]\nid = \"db\"\ntype = \"tcp\"\ntarget = \"{closed}\"\n\
              interval = \"1s\"\ntimeout = \"500ms\"\nconfirm = 1\n"

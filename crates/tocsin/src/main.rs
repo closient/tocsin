@@ -28,6 +28,8 @@ mod query;
 mod release;
 mod reload;
 mod serve;
+#[cfg(test)]
+mod testing;
 mod web;
 
 use std::io::IsTerminal;

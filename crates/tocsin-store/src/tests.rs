@@ -1056,6 +1056,9 @@ async fn old_results_until(store: &Store, day: Day, frames: u64) -> i64 {
             .unwrap();
         written += 100;
         if log >= frames {
+            // The writer replies before it tells the checkpointer how long
+            // the log is; the next job starts only once it has.
+            store.writer.run(|_| Ok(())).await.unwrap();
             return written;
         }
     }

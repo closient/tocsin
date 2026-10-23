@@ -116,7 +116,7 @@ fn authorize<S: Scope>(parts: &Parts, state: &AppState) -> Result<Authorized<S>,
 pub enum Viewer {
     /// Anyone: sees public projects only.
     Public,
-    /// A token with `status:read`: sees every project.
+    /// A token with `status:read`: sees every project and check targets.
     // TODO(TOC-48): the private status page admits the same viewer.
     Trusted,
 }

@@ -730,3 +730,33 @@ async fn a_component_with_no_checks_is_unknown() {
         ]
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_status_handle_reads_the_running_engine_and_nothing_after() {
+    let runner = FakeRunner::always(Down);
+    let toml = component("api", "worst") + &check("api", Some("api"), 60, 1);
+    let engine = Engine::start(
+        plan(&toml),
+        parts(
+            &runner,
+            &FakeHistory::new(),
+            &FakeNotices::new(Vec::new()),
+            &common::Events::new(),
+        ),
+    )
+    .await
+    .unwrap();
+    let handle = engine.status_handle();
+    tokio::time::sleep(MINUTE).await;
+    let live = handle.snapshot();
+    assert_eq!(live, engine.snapshot());
+    assert_eq!(live.components[0].status, ComponentStatus::Down);
+    assert_eq!(live.checks[0].state.map(|state| state.health), Some(Down));
+
+    engine.shutdown().await;
+    let after = handle.snapshot();
+    assert!(
+        after.checks.is_empty() && after.components.is_empty(),
+        "a handle must not keep a stopped engine's state alive: {after:?}"
+    );
+}

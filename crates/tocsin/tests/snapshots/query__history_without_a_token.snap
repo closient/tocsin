@@ -1,0 +1,10 @@
+---
+source: crates/tocsin/tests/query.rs
+expression: error
+---
+{
+  "error": {
+    "kind": "invalid_input",
+    "message": "GET [url]/api/v1/checks/api-https/results: 401 Unauthorized: send a token as `Authorization: Bearer <token>`"
+  }
+}

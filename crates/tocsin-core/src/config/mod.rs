@@ -458,8 +458,8 @@ pub enum TokenScope {
     Incident,
     /// Releases and deploys.
     Release,
-    /// Reading what is not public: non-public projects' releases in the
-    /// read API.
+    /// Reading what is not public in the read API: non-public projects'
+    /// releases and deploys, check targets, and raw check results.
     // TODO(TOC-48): the private status page reads with this scope too.
     #[serde(rename = "status:read")]
     StatusRead,

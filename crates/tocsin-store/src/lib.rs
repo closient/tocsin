@@ -16,6 +16,7 @@ pub mod alert;
 mod checkpoint;
 pub mod day;
 mod error;
+mod history;
 mod incident;
 mod outage;
 mod readers;
@@ -34,6 +35,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use tocsin_core::Health;
 use tocsin_core::incident::{Actor, Incident, IncidentEdit, NewIncident, NewUpdate, Timestamp};
 use tocsin_core::release::{DeployStamp, NewRelease, Release, Timeline};
+use tocsin_core::status::{CheckResult, OutageRecord};
 
 pub use crate::alert::{
     AlertRouting, AlertTarget, DeliveryKind, DeliveryOutcome, DeliveryPrune, DeliveryRetention,
@@ -42,6 +44,7 @@ pub use crate::alert::{
 use crate::checkpoint::Checkpointer;
 pub use crate::day::Day;
 pub use crate::error::{Error, Result};
+pub use crate::history::HistoryPage;
 pub use crate::incident::OpenIncident;
 pub use crate::outage::{LastUp, Outage};
 use crate::readers::Readers;
@@ -665,6 +668,42 @@ impl Store {
     /// The read fails.
     pub async fn open_incidents(&self) -> Result<Vec<OpenIncident>> {
         self.read(incident::open).await
+    }
+
+    /// Every incident not yet resolved and every maintenance not yet
+    /// completed, scheduled ones included, newest first, with components
+    /// and updates: what a status page lists.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn unresolved_incidents(&self) -> Result<Vec<Incident>> {
+        self.read(incident::unresolved).await
+    }
+
+    /// One page of `check_id`'s raw results, newest first.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn check_results(
+        &self,
+        check_id: &str,
+        page: HistoryPage,
+    ) -> Result<Vec<CheckResult>> {
+        let check_id = check_id.to_owned();
+        self.read(move |conn| history::results(conn, &check_id, page))
+            .await
+    }
+
+    /// One page of the outages open at any moment since `page.since`,
+    /// newest start first.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn outages(&self, page: HistoryPage) -> Result<Vec<OutageRecord>> {
+        self.read(move |conn| history::outages(conn, page)).await
     }
 
     /// For each of `check_ids` that `node_id` has an `up` result for, when

@@ -12,5 +12,6 @@ pub mod link;
 pub mod probe;
 pub mod release;
 pub mod state;
+pub mod status;
 
 pub use health::Health;

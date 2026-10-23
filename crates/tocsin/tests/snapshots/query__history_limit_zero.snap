@@ -1,0 +1,20 @@
+---
+source: crates/tocsin/tests/query.rs
+expression: error
+---
+{
+  "error": {
+    "errors": [
+      {
+        "column": null,
+        "file": null,
+        "hint": null,
+        "line": null,
+        "message": "must be 1 to 500",
+        "path": "limit"
+      }
+    ],
+    "kind": "invalid_input",
+    "message": "GET [url]/api/v1/checks/api-https/results?limit=0: 422 Unprocessable Entity: limit: must be 1 to 500"
+  }
+}

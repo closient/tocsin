@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -95,7 +95,7 @@ impl std::error::Error for StartError {
 }
 
 /// The engine's view of every check and component at one moment.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Snapshot {
     /// Every check, ordered by id.
     pub checks: Vec<CheckSnapshot>,
@@ -145,6 +145,24 @@ impl NoticesHandle {
     /// Asks the engine to re-read incidents and maintenance windows now.
     pub fn notices_changed(&self) {
         self.0.notify_one();
+    }
+}
+
+/// Reads a running engine's [`Snapshot`], for the HTTP API; see
+/// [`Engine::status_handle`]. It holds the engine weakly, so it never keeps
+/// the store open; once the engine has stopped it reads an empty snapshot.
+#[derive(Debug, Clone)]
+pub struct StatusHandle(Weak<Shared>);
+
+impl StatusHandle {
+    /// The current state of every check and component; empty once the
+    /// engine has stopped.
+    #[must_use]
+    pub fn snapshot(&self) -> Snapshot {
+        self.0
+            .upgrade()
+            .map(|shared| shared.lock().snapshot())
+            .unwrap_or_default()
     }
 }
 
@@ -268,6 +286,13 @@ impl Engine {
     #[must_use]
     pub fn notices_handle(&self) -> NoticesHandle {
         NoticesHandle(Arc::clone(&self.shared.notices_changed))
+    }
+
+    /// A handle that reads what [`Engine::snapshot`] does, for the HTTP
+    /// API, which outlives the engine during shutdown.
+    #[must_use]
+    pub fn status_handle(&self) -> StatusHandle {
+        StatusHandle(Arc::downgrade(&self.shared))
     }
 
     /// Stops every task and waits for them. A check whose probe is in

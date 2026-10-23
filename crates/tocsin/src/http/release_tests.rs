@@ -96,6 +96,7 @@ fn api() -> Api {
         config: Arc::new(config),
         events: EventBus::new(),
         admin: None,
+        live: Arc::new(tocsin_engine::Snapshot::default()),
     };
     Api {
         _dir: dir,

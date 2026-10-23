@@ -139,6 +139,7 @@ async fn serve(
         config: Arc::clone(config),
         events,
         admin,
+        live: Arc::new(monitor.engine.status_handle()),
     });
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(async move {
@@ -591,6 +592,7 @@ mod tests {
             config,
             events,
             admin: None,
+            live: Arc::new(monitor.engine.status_handle()),
         });
 
         let body = json!({

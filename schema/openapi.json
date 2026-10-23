@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "tocsin",
-    "description": "Uptime monitor, status page and release log. Reads are public; writes need a `[[token]]` with the route's scope, and a `status:read` token also sees non-public projects.",
+    "description": "Uptime monitor, status page and release log. Reads are public; writes need a `[[token]]` with the route's scope, and a `status:read` token also sees non-public projects, check targets and raw check results.",
     "license": {
       "name": "AGPL-3.0-only",
       "identifier": "AGPL-3.0-only"
@@ -10,6 +10,228 @@
     "version": "1"
   },
   "paths": {
+    "/api/v1/checks": {
+      "get": {
+        "tags": [
+          "status"
+        ],
+        "summary": "Every check and heartbeat with its current state.",
+        "operationId": "list_checks",
+        "responses": {
+          "200": {
+            "description": "Checks, then heartbeats",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "An `Authorization` header with an unknown token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A token without the `status:read` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/checks/{id}/results": {
+      "get": {
+        "tags": [
+          "history"
+        ],
+        "summary": "One check's or heartbeat's raw results, newest first.",
+        "operationId": "get_results",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Check or heartbeat id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "The start of the window (RFC 3339): at most 366 days ago; default\none day ago. Keep it the same while paging.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Timestamp"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Only results after the previous page's last: its `next_before`.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Results, 1 to 500; default 100.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckResults"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks the `status:read` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No `[[check]]` or `[[heartbeat]]` has that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A bad `since`, `before` or `limit`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/components/{id}": {
+      "get": {
+        "tags": [
+          "status"
+        ],
+        "summary": "One component: its status, its checks and heartbeats, and the open\nincidents naming it.",
+        "operationId": "get_component",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Component id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The component",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComponentDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "An `Authorization` header with an unknown token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A token without the `status:read` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No `[[component]]` has that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/incidents": {
       "get": {
         "tags": [
@@ -345,6 +567,69 @@
         ]
       }
     },
+    "/api/v1/outages": {
+      "get": {
+        "tags": [
+          "history"
+        ],
+        "summary": "Outages open at any moment in the window, newest start first.",
+        "operationId": "list_outages",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "description": "The start of the window (RFC 3339): outages still open at or after\nit. At most 366 days ago; default 30 days ago. Keep it the same\nwhile paging.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Timestamp"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Only outages after the previous page's last: its `next_before`.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Outages, 1 to 500; default 100.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutageList"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A bad `since`, `before` or `limit`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/releases": {
       "get": {
         "tags": [
@@ -629,6 +914,27 @@
         ]
       }
     },
+    "/api/v1/status.json": {
+      "get": {
+        "tags": [
+          "status"
+        ],
+        "summary": "The page's overall status, every component's, and the open incidents.",
+        "operationId": "get_status",
+        "responses": {
+          "200": {
+            "description": "The status now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusDocument"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/timeline": {
       "get": {
         "tags": [
@@ -753,6 +1059,303 @@
         "enum": [
           "token",
           "person"
+        ]
+      },
+      "CheckKind": {
+        "type": "string",
+        "description": "Whether a member of a component is probed or pinged.",
+        "enum": [
+          "check",
+          "heartbeat"
+        ]
+      },
+      "CheckList": {
+        "type": "object",
+        "description": "`GET /api/v1/checks`: every check and heartbeat.",
+        "required": [
+          "checks"
+        ],
+        "properties": {
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckState"
+            },
+            "description": "Checks, then heartbeats, each in configuration order."
+          }
+        }
+      },
+      "CheckResult": {
+        "type": "object",
+        "description": "One probe run, as stored.",
+        "required": [
+          "id",
+          "node_id",
+          "started_at",
+          "duration_ms",
+          "health"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "How each assertion fared, as `tocsin probe run` reports it.\nDiagnostic: its shape may change between versions."
+          },
+          "duration_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long it took."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it failed, when it did."
+          },
+          "health": {
+            "$ref": "#/components/schemas/Health",
+            "description": "The verdict."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Its id."
+          },
+          "node_id": {
+            "type": "string",
+            "description": "The node that ran it."
+          },
+          "started_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When it started."
+          },
+          "status_code": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The protocol status code, when the check has one (HTTP).",
+            "minimum": 0
+          }
+        }
+      },
+      "CheckResults": {
+        "type": "object",
+        "description": "`GET /api/v1/checks/{id}/results`: one page of raw results, newest\nfirst.",
+        "required": [
+          "check_id",
+          "since",
+          "results"
+        ],
+        "properties": {
+          "check_id": {
+            "type": "string",
+            "description": "The check or heartbeat."
+          },
+          "next_before": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Pass as `before`, with the same `since`, for the next page; `null`\non the last."
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckResult"
+            },
+            "description": "Newest first."
+          },
+          "since": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "The start of the window: results that started at or after it."
+          }
+        }
+      },
+      "CheckState": {
+        "type": "object",
+        "description": "One check or heartbeat and its current state.",
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "interval"
+        ],
+        "properties": {
+          "component": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `[[component]]` whose health it sets."
+          },
+          "health": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Health",
+                "description": "Its confirmed health; `null` until confirmed."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "type": "string",
+            "description": "Its id; checks and heartbeats never share one."
+          },
+          "interval": {
+            "type": "string",
+            "description": "How often it runs, or how often a heartbeat expects a ping, such\nas `30s` or `1h30m`."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CheckKind",
+            "description": "Check or heartbeat."
+          },
+          "last_health": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Health",
+                "description": "Its latest result's health, which may not be confirmed yet."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_result_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When its latest result started."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": "string",
+            "description": "Its display name: the id when none is configured."
+          },
+          "since": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "Since when it has had that health."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What a check probes. Only with a `status:read` token, since it can\nname internal hosts; absent otherwise and for heartbeats."
+          },
+          "type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The probe a check runs (`http`, `tcp`, `dns`, `icmp`, `tls`);\n`null` for a heartbeat."
+          }
+        }
+      },
+      "ComponentDetail": {
+        "type": "object",
+        "description": "`GET /api/v1/components/{id}`: one component, its checks and the open\nincidents naming it.",
+        "required": [
+          "component",
+          "checks",
+          "incidents"
+        ],
+        "properties": {
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckState"
+            },
+            "description": "The checks and heartbeats that set its health."
+          },
+          "component": {
+            "$ref": "#/components/schemas/ComponentState",
+            "description": "The component."
+          },
+          "incidents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Incident"
+            },
+            "description": "Open incidents and maintenance naming it, newest first."
+          }
+        }
+      },
+      "ComponentState": {
+        "type": "object",
+        "description": "One `[[component]]` and what the status page shows for it.",
+        "required": [
+          "id",
+          "name",
+          "status"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The line shown with it."
+          },
+          "group": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `[[group]]` it is shown under."
+          },
+          "health": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Health",
+                "description": "Its health from its checks alone; `null` until one reports."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "type": "string",
+            "description": "Its id."
+          },
+          "name": {
+            "type": "string",
+            "description": "Its display name."
+          },
+          "status": {
+            "$ref": "#/components/schemas/ComponentStatus",
+            "description": "What the status page shows: its checks' health, overridden by\nincidents and maintenance. `unknown` until a check reports."
+          }
+        }
+      },
+      "ComponentStatus": {
+        "type": "string",
+        "description": "What the status page shows for a component.",
+        "enum": [
+          "operational",
+          "degraded",
+          "down",
+          "maintenance",
+          "unknown"
         ]
       },
       "DeployStamp": {
@@ -1242,6 +1845,87 @@
         },
         "additionalProperties": false
       },
+      "OutageList": {
+        "type": "object",
+        "description": "`GET /api/v1/outages`: one page of outages, newest first.",
+        "required": [
+          "since",
+          "outages"
+        ],
+        "properties": {
+          "next_before": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Pass as `before`, with the same `since`, for the next page; `null`\non the last."
+          },
+          "outages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OutageRecord"
+            },
+            "description": "Newest first, by start."
+          },
+          "since": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "The start of the window: outages still open at or after it."
+          }
+        }
+      },
+      "OutageRecord": {
+        "type": "object",
+        "description": "A machine-detected outage: a check confirmed degraded or down.",
+        "required": [
+          "id",
+          "node_id",
+          "check_id",
+          "health",
+          "started_at"
+        ],
+        "properties": {
+          "check_id": {
+            "type": "string",
+            "description": "The failing check."
+          },
+          "component_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The check's component when the outage opened, if any."
+          },
+          "ended_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When it ended; `null` while it is open."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "health": {
+            "$ref": "#/components/schemas/Health",
+            "description": "`degraded` or `down`."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Its id."
+          },
+          "node_id": {
+            "type": "string",
+            "description": "The node that saw it."
+          },
+          "started_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When it began."
+          }
+        }
+      },
       "Release": {
         "type": "object",
         "description": "A release of a project to one environment.",
@@ -1355,6 +2039,45 @@
           "truncated": {
             "type": "boolean",
             "description": "Whether more matched than `limit`."
+          }
+        }
+      },
+      "StatusDocument": {
+        "type": "object",
+        "description": "`GET /api/v1/status.json`: everything a status page shows right now.",
+        "required": [
+          "title",
+          "status",
+          "generated_at",
+          "components",
+          "incidents"
+        ],
+        "properties": {
+          "components": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ComponentState"
+            },
+            "description": "Every `[[component]]`, in configuration order."
+          },
+          "generated_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When the server read the status."
+          },
+          "incidents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Incident"
+            },
+            "description": "Incidents not yet resolved and maintenance not yet completed,\nscheduled ones included, newest first."
+          },
+          "status": {
+            "$ref": "#/components/schemas/ComponentStatus",
+            "description": "The worst component status: operational, unknown, maintenance,\ndegraded, down, in that order; unknown with no components."
+          },
+          "title": {
+            "type": "string",
+            "description": "The `[page]` title."
           }
         }
       },
@@ -1589,6 +2312,14 @@
     }
   },
   "tags": [
+    {
+      "name": "status",
+      "description": "What is up right now: components and checks"
+    },
+    {
+      "name": "history",
+      "description": "Outages and raw check results"
+    },
     {
       "name": "incidents",
       "description": "Incidents and scheduled maintenance"

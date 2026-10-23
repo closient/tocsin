@@ -17,7 +17,8 @@ pub struct Report {
     pub json: Value,
     pub text: String,
     /// [`Exit::Ok`], or [`Exit::CheckFailed`] when the command ran a check
-    /// and the check failed; the output is printed the same either way.
+    /// and the check failed, or found the status degraded or down; the
+    /// output is printed the same either way.
     pub exit: Exit,
 }
 

@@ -26,7 +26,7 @@ pub mod ports;
 
 pub use crate::engine::{
     CheckSnapshot, ComponentSnapshot, Engine, LastResult, NoticesHandle, PROBE_BACKSTOP, Parts,
-    Snapshot, StartError,
+    Snapshot, StartError, StatusHandle,
 };
 pub use crate::event::{CheckChange, ComponentChange, EngineEvent};
 pub use crate::notice::{Notice, impact_health};

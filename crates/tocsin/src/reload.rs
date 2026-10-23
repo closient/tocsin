@@ -765,12 +765,7 @@ scopes = ["release"]
     #[tokio::test]
     async fn a_bad_reload_keeps_the_last_good_configuration_and_says_why_everywhere() {
         let log = Captured::default();
-        let _log = tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .with_writer(log.clone())
-                .with_ansi(false)
-                .finish(),
-        );
+        let _log = log.capture();
         let (target, _accepting) = target().await;
         let mut served = Served::start(&target).await;
         assert_eq!(served.ping("nightly").await, StatusCode::NOT_FOUND);

@@ -2970,6 +2970,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "tracing-core",
  "tracing-subscriber",
  "url",
  "utoipa",
@@ -3064,6 +3065,7 @@ dependencies = [
  "tocsin-core",
  "tokio",
  "tracing",
+ "tracing-core",
  "tracing-subscriber",
 ]
 

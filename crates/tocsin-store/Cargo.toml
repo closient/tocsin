@@ -22,6 +22,7 @@ tracing.workspace = true
 rusqlite = { version = "0.40", features = ["bundled", "hooks", "trace"] }
 tempfile = "3"
 # The lockout tests count log lines.
+tracing-core.workspace = true
 tracing-subscriber.workspace = true
 
 [lints]

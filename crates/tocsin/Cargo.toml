@@ -67,6 +67,8 @@ socket2 = "0.6"
 tocsin-core.workspace = true
 # Paused time for the key-cache tests.
 tokio = { workspace = true, features = ["test-util"] }
+# The log-capturing tests rebuild tracing's cache of which lines are wanted.
+tracing-core.workspace = true
 
 # The workspace sets `publish = false`, which `dist` reads as "do not
 # release"; this is the one package it builds (dist-workspace.toml).

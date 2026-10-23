@@ -830,13 +830,40 @@ async fn the_writer_waits_at_the_limit_for_another_checkpoint() {
 
 /// The log events of a thread that runs under [`Captured::run`], with their
 /// fields.
+///
+/// One subscriber, the global default, hands each event to the `Captured`
+/// its thread runs under. A subscriber per test, set with `with_default`,
+/// loses events: tracing caches whether each log line is wanted once for
+/// the whole process, and a thread with no subscriber that reaches a line
+/// first, while one test's subscriber is the only one registered, caches
+/// "never" for every thread.
 #[derive(Clone, Default)]
 struct Captured(Arc<Mutex<Vec<(tracing::Level, String)>>>);
 
+thread_local! {
+    static CAPTURING: std::cell::RefCell<Option<Captured>> = const { std::cell::RefCell::new(None) };
+}
+
 impl Captured {
     fn run<T>(&self, f: impl FnOnce() -> T) -> T {
-        use tracing_subscriber::layer::SubscriberExt;
-        tracing::subscriber::with_default(tracing_subscriber::registry().with(self.clone()), f)
+        /// Puts back the thread's previous capture, even if `f` panics.
+        struct Restore(Option<Captured>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                CAPTURING.set(self.0.take());
+            }
+        }
+        static ROUTER: std::sync::Once = std::sync::Once::new();
+        ROUTER.call_once(|| {
+            use tracing_subscriber::layer::SubscriberExt;
+            tracing::subscriber::set_global_default(tracing_subscriber::registry().with(Router))
+                .expect("nothing else sets a global subscriber in these tests");
+            // A line first reached after the subscriber registered, but
+            // before it became the default, cached "never".
+            tracing_core::callsite::rebuild_interest_cache();
+        });
+        let _restore = Restore(CAPTURING.replace(Some(self.clone())));
+        f()
     }
 
     /// The fields of each event at `level`.
@@ -850,7 +877,11 @@ impl Captured {
     }
 }
 
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Captured {
+/// The global subscriber's one layer: records each event in its thread's
+/// [`Captured`], if it has one.
+struct Router;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Router {
     fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
         struct Fields(String);
         impl tracing::field::Visit for Fields {
@@ -858,9 +889,12 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Captured {
                 let _ = write!(self.0, "{}={value:?} ", field.name());
             }
         }
+        let Some(captured) = CAPTURING.with_borrow(Option::clone) else {
+            return;
+        };
         let mut fields = Fields(String::new());
         event.record(&mut fields);
-        let mut events = self.0.lock().unwrap();
+        let mut events = captured.0.lock().unwrap();
         events.push((*event.metadata().level(), fields.0));
     }
 }
@@ -993,6 +1027,44 @@ fn a_failing_checkpoint_is_a_lockout_that_logs_its_error() {
     let recoveries = logs.at(tracing::Level::INFO);
     assert_eq!(recoveries.len(), 1, "{recoveries:?}");
     assert_eq!(passes.waits(), 0);
+}
+
+/// A thread with no capture that reaches a log line first does not hide it
+/// from a capture that reaches it later.
+#[test]
+fn a_capture_sees_a_line_another_thread_reached_first() {
+    let logs = Captured::default();
+    let (errors, recoveries, lockouts) = logs.run(|| {
+        // The same lockout, on a thread that captures nothing. It ends in
+        // its transaction, so it reaches the error but not the recovery.
+        std::thread::spawn(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let conn = log_at_limit(&dir.path().join(DB_FILE));
+            let (mut nudge, _nudges) = Nudge::detached();
+            conn.execute_batch("BEGIN").unwrap();
+            add_row(&conn);
+            nudge.after_write(&conn);
+            assert_eq!(nudge.stats().lockouts, 1);
+        })
+        .join()
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let conn = log_at_limit(&dir.path().join(DB_FILE));
+        let (mut nudge, _nudges) = Nudge::detached();
+        conn.execute_batch("BEGIN").unwrap();
+        add_row(&conn);
+        nudge.after_write(&conn);
+        conn.execute_batch("COMMIT").unwrap();
+        nudge.after_write(&conn);
+        (
+            logs.at(tracing::Level::ERROR),
+            logs.at(tracing::Level::INFO),
+            nudge.stats().lockouts,
+        )
+    });
+    assert_eq!(lockouts, 1);
+    assert_eq!(recoveries.len(), 1, "{recoveries:?}");
+    assert_eq!(errors.len(), 1, "{errors:?}, with {recoveries:?}");
 }
 
 /// When the checkpointer's own pass holds the lock, the writer at the limit

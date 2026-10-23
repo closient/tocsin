@@ -126,6 +126,18 @@ pub fn emit(result: Result<Report, Failure>, json: bool) -> ExitCode {
     }
 }
 
+/// For a command whose stdout belongs to a protocol: nothing on stdout,
+/// a failure on stderr, and the exit code.
+pub fn emit_quiet(result: Result<(), Failure>) -> ExitCode {
+    match result {
+        Ok(()) => Exit::Ok.into(),
+        Err(failure) => {
+            write_stderr(&failure.text());
+            failure.exit.into()
+        }
+    }
+}
+
 /// `--help` prints help and exits 0; every other parse error exits 2.
 pub fn emit_parse_error(error: &clap::Error, json: bool) -> ExitCode {
     use clap::error::ErrorKind;

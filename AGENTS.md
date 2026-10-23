@@ -72,6 +72,7 @@ tocsin status --json                                    # HTTP client: the page 
 tocsin history <check> --since 2h --json                # raw results; TOCSIN_TOKEN needs status:read
 tocsin outages --since 7d --json
 tocsin timeline --component <id> --since 1d --json      # docs/api.md
+tocsin mcp                                              # MCP tools on stdio for an agent, calling TOCSIN_URL; docs/mcp.md
 ```
 
 `--config` defaults to `/etc/tocsin`; a folder with no `*.toml` file is an error (exit 2).
@@ -83,6 +84,8 @@ The storage schema and its rules are in [`docs/storage.md`](docs/storage.md); `s
 `tocsin probe run` needs no server or database; it exits 0 when the check is up, 1 when it is degraded or down, 2 for an unknown check or invalid configuration, and 3 when the probe cannot run on this machine. Its output, each probe's facts and the ICMP permissions are documented in [`docs/probes.md`](docs/probes.md); the JSON shape is pinned by the snapshots in `crates/tocsin/tests/snapshots/`.
 
 `serve` answers HTTP on `[server] listen`. The incident API, CLI, export format and token setup are in [`docs/incidents.md`](docs/incidents.md). Releases, the timeline API, `/releases` and `/admin/timeline` are in [`docs/releases.md`](docs/releases.md). Heartbeat pings, their deadlines and `tocsin heartbeat ping` are in [`docs/heartbeats.md`](docs/heartbeats.md). The read API (`/api/v1/status.json`, components, checks, check results, outages), `/llms.txt`, the `status:read` scope and the query commands are in [`docs/api.md`](docs/api.md); public data needs no token, and a non-public project never appears without `status:read`. After changing an API type or route, regenerate the committed document with `cargo run -- openapi > schema/openapi.json` (a test fails until you do). New routes register in `crates/tocsin/src/http/openapi.rs`; writes take the `Authorized<scope::...>` extractor from `http/auth.rs`, and every read takes `Viewer`, so a malformed or unknown token is 401 on it.
+
+The MCP server (`/mcp` and `tocsin mcp`, [`docs/mcp.md`](docs/mcp.md)) lives in `crates/tocsin/src/mcp/`. Each tool calls the same service function its REST handler calls (`incidents::open`, `history::results`, ...) and checks the same scope through `auth::Caller`, so a new operation goes in the handler's module first and the tool calls it; `tocsin mcp` reaches the route through `client::Api`. A tool that lists takes a `limit` held to its route's `MAX_LIMIT`. `crates/tocsin/tests/mcp.rs` drives every tool over both transports.
 
 Server-rendered pages (the admin page now) live in `crates/tocsin/src/web/`: askama templates in `crates/tocsin/templates/`, assets compiled in from `crates/tocsin/static/` and served by content hash, and the `Admin` / `AdminForm` extractors for a signed-in person. [`docs/admin.md`](docs/admin.md) has the pattern for a new page and the `[server.auth]` threat model.
 

@@ -27,6 +27,7 @@ codes never change meaning. This page is the contract an agent can rely on.
 | What the keys mean, with examples | [config.md](config.md) |
 | A working configuration to copy | [examples/config/](../examples/config/) |
 | The HTTP API | `tocsin openapi`, or `GET /api/v1/openapi.json` on a running server; [api.md](api.md) |
+| Tools instead of commands, over MCP | `/mcp` on a running server, or `tocsin mcp`; [mcp.md](mcp.md) |
 | What a probe observes and each assertion reads | [probes.md](probes.md) |
 
 Point editors and language servers at the schema with a first line of

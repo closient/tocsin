@@ -49,6 +49,8 @@ pulldown-cmark = { version = "0.13", default-features = false, features = ["html
 regex = "1.12"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 ring = "0.17"
+# The MCP server: streamable HTTP at /mcp and stdio for `tocsin mcp`.
+rmcp = { version = "3.7", default-features = false, features = ["server", "macros", "transport-streamable-http-server", "transport-io"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8"
 rustls-webpki = { version = "0.103", default-features = false, features = ["ring", "std"] }

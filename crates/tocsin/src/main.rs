@@ -19,6 +19,7 @@ mod heartbeat;
 mod http;
 mod incident;
 mod lock;
+mod mcp;
 mod metrics;
 mod net;
 mod notify;
@@ -52,6 +53,10 @@ fn main() -> ExitCode {
         }
     };
     init_tracing();
+    if let Some(Command::Mcp { server }) = &cli.command {
+        // Stdout is the protocol's, so there is no report to print.
+        return output::emit_quiet(mcp::stdio::run(server));
+    }
     let json = cli.json;
     output::emit(run(cli), json)
 }
@@ -111,6 +116,7 @@ fn run(cli: Cli) -> Result<Report, Failure> {
             after.as_deref(),
             limit,
         ),
+        Some(Command::Mcp { .. }) => unreachable!("main serves `tocsin mcp` before run"),
         None => Err(Failure::new(
             Exit::InvalidInput,
             "no command given; run `tocsin --help` for usage",

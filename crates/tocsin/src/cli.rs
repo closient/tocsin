@@ -133,6 +133,12 @@ pub enum Command {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// Serve the MCP tools over stdin and stdout for an agent, calling a
+    /// running server's HTTP API. Stdout carries only the protocol.
+    Mcp {
+        #[command(flatten)]
+        server: ServerArgs,
+    },
 }
 
 /// The window and page of a newest-first history read.

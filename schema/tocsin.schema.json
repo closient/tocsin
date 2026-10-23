@@ -195,6 +195,13 @@
           "default": "1m",
           "description": "How often the probe runs."
         },
+        "link": {
+          "description": "Links shown with the check, such as its dashboard or runbook, each a\n`[[check.link]]` table.",
+          "items": {
+            "$ref": "#/definitions/Link"
+          },
+          "type": "array"
+        },
         "name": {
           "description": "Display name; the id is shown when it is absent.",
           "type": [
@@ -548,6 +555,13 @@
           ],
           "description": "How often a ping is expected."
         },
+        "link": {
+          "description": "Links shown with the heartbeat, such as the job's logs or runbook,\neach a `[[heartbeat.link]]` table.",
+          "items": {
+            "$ref": "#/definitions/Link"
+          },
+          "type": "array"
+        },
         "name": {
           "description": "Display name; the id is shown when it is absent.",
           "type": [
@@ -678,6 +692,25 @@
       },
       "required": [
         "path"
+      ],
+      "type": "object"
+    },
+    "Link": {
+      "additionalProperties": false,
+      "description": "A `[[check.link]]` or `[[heartbeat.link]]`: a named link to somewhere an\noperator looks next, such as a dashboard, logs or a runbook.",
+      "properties": {
+        "name": {
+          "description": "The link text.",
+          "type": "string"
+        },
+        "url": {
+          "description": "Where it goes: an absolute `http://` or `https://` URL.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "url"
       ],
       "type": "object"
     },

@@ -9,6 +9,10 @@ component = "nightly-backup"
 interval = "1d"
 grace = "1h"
 
+[[heartbeat.link]]
+name = "Backup logs"
+url = "https://logs.example.com/search?q=nightly-backup"
+
 [[project]]
 id = "api"
 name = "API"

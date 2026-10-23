@@ -436,6 +436,59 @@ fn notifier_settings_must_match_the_type() {
 }
 
 #[test]
+fn checks_and_heartbeats_carry_links() {
+    let check = "[[check]]\nid = \"web\"\ntype = \"tcp\"\ntarget = \"example.com:443\"\n\n[[check.link]]\nname = \"Dashboard\"\nurl = \"https://grafana.example.com/d/web\"\n";
+    let heartbeat = "[[heartbeat]]\nid = \"backup\"\ninterval = \"1d\"\n[[heartbeat.link]]\nname = \"Logs\"\nurl = \"http://logs.example.com/?q=backup\"\n";
+    let config = run(&[("checks.toml", check), ("heartbeats.toml", heartbeat)]).expect("valid");
+    assert_eq!(config.checks[0].links[0].name, "Dashboard");
+    assert_eq!(
+        config.checks[0].links[0].url,
+        "https://grafana.example.com/d/web"
+    );
+    assert_eq!(
+        config.heartbeats[0].links[0].url,
+        "http://logs.example.com/?q=backup"
+    );
+    let shown = serde_json::to_value(&config).unwrap();
+    assert_eq!(shown["check"][0]["link"][0]["name"], "Dashboard");
+}
+
+#[test]
+fn links_need_a_name_and_an_absolute_http_url() {
+    let text = "[[check]]\nid = \"web\"\ntype = \"tcp\"\ntarget = \"example.com:443\"\n\n[[check.link]]\nname = \"Dashboard\"\nurl = \"https://grafana.example.com/d/web\"\n\n[[check.link]]\nname = \" \"\nurl = \"/runbooks/web\"\n\n[[heartbeat]]\nid = \"backup\"\ninterval = \"1d\"\n\n[[heartbeat.link]]\nname = \"Logs\"\nurl = \"ftp://logs.example.com\"\n";
+    assert_eq!(
+        errors(&[("links.toml", text)]),
+        [
+            "links.toml:11:8: a link needs a non-empty `name`",
+            "links.toml:12:7: `/runbooks/web` is not an http:// or https:// URL",
+            "links.toml:20:7: `ftp://logs.example.com` is not an http:// or https:// URL",
+        ]
+    );
+    let diagnostics = run(&[("links.toml", text)]).expect_err("invalid");
+    let paths: Vec<_> = diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.path.as_deref())
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            Some("check[0].link[1].name"),
+            Some("check[0].link[1].url"),
+            Some("heartbeat[0].link[0].url")
+        ]
+    );
+
+    let unknown = "[[heartbeat]]\nid = \"backup\"\ninterval = \"1d\"\n[[heartbeat.link]]\nname = \"Logs\"\nhref = \"https://logs.example.com\"\n";
+    let diagnostic = only_error(&[("links.toml", unknown)]);
+    assert_eq!(diagnostic.location().as_deref(), Some("links.toml:6:1"));
+    assert!(
+        diagnostic.message.starts_with("unknown field `href`"),
+        "{}",
+        diagnostic.message
+    );
+}
+
+#[test]
 fn diagnostics_serialize_with_every_key() {
     let diagnostic = only_error(&[("a.toml", "[sever]\n")]);
     let json = serde_json::to_value(&diagnostic).expect("serializes");

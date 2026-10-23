@@ -21,7 +21,7 @@ use super::diagnostic::{Diagnostic, LineIndex};
 use super::notifier::NotifierType;
 use super::values::{Id, Secret, email_address, is_unanswerable};
 use super::{
-    Check, Component, Config, Group, Heartbeat, Notifier, Page, Project, Route, Server, Token,
+    Check, Component, Config, Group, Heartbeat, Link, Notifier, Page, Project, Route, Server, Token,
 };
 
 /// One configuration file's name and contents.
@@ -528,8 +528,10 @@ impl<'a> Loader<'a> {
         }
         for check in &mut items.checks {
             self.validate_check(check);
+            self.validate_links(&check.origin, &check.value.links);
         }
         for heartbeat in &items.heartbeats {
+            self.validate_links(&heartbeat.origin, &heartbeat.value.links);
             if heartbeat.value.interval.get() < std::time::Duration::from_secs(1) {
                 self.report(
                     &heartbeat.origin.key("interval"),
@@ -851,6 +853,16 @@ impl<'a> Loader<'a> {
                 "`chat_id` must not be empty",
                 None,
             );
+        }
+    }
+
+    fn validate_links(&mut self, origin: &Origin, links: &[Link]) {
+        for (index, link) in links.iter().enumerate() {
+            let origin = origin.key("link").index(index);
+            if link.name.trim().is_empty() {
+                self.report(&origin.key("name"), "a link needs a non-empty `name`", None);
+            }
+            self.url(&origin.key("url"), &link.url);
         }
     }
 

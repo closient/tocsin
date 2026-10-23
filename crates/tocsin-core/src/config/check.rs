@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::Link;
 use super::assertion::Assertion;
 use super::values::{Duration, Id};
 
@@ -54,6 +55,10 @@ pub struct Check {
     /// 2xx or 3xx status).
     #[serde(default, rename = "assert", skip_serializing_if = "Vec::is_empty")]
     pub assertions: Vec<Assertion>,
+    /// Links shown with the check, such as its dashboard or runbook, each a
+    /// `[[check.link]]` table.
+    #[serde(default, rename = "link", skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Link>,
 }
 
 fn default_interval() -> Duration {

@@ -268,6 +268,21 @@ pub struct Heartbeat {
     /// How late a ping may be before the heartbeat is down.
     #[serde(default = "default_grace")]
     pub grace: Duration,
+    /// Links shown with the heartbeat, such as the job's logs or runbook,
+    /// each a `[[heartbeat.link]]` table.
+    #[serde(default, rename = "link", skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Link>,
+}
+
+/// A `[[check.link]]` or `[[heartbeat.link]]`: a named link to somewhere an
+/// operator looks next, such as a dashboard, logs or a runbook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Link {
+    /// The link text.
+    pub name: String,
+    /// Where it goes: an absolute `http://` or `https://` URL.
+    pub url: String,
 }
 
 fn default_grace() -> Duration {

@@ -182,6 +182,21 @@ json = { path = "$.status", eq = "ok" }
 
 A JSON `path` starts with `$`, then any of `.key`, `[index]`, `["key"]` or `['key']`: `$.checks[0].status`.
 
+### Links: `[[check.link]]` and `[[heartbeat.link]]`
+
+Named links to where an operator looks next, such as a dashboard, logs or a runbook, shown with the check or heartbeat on the internal board. Each needs both keys:
+
+| Key | Type | |
+|-----|------|-|
+| `name` | string | Required, not blank. The link text. |
+| `url` | URL | Required. An absolute `http://` or `https://` URL. |
+
+```toml
+[[check.link]]
+name = "Runbook"
+url = "https://wiki.example.com/runbooks/api"
+```
+
 ## `[[heartbeat]]`
 
 A ping tocsin expects to receive, such as a cron job reporting in. Pings arrive through the write API with a token that has the `heartbeat` scope.
@@ -193,6 +208,8 @@ A ping tocsin expects to receive, such as a cron job reporting in. Pings arrive 
 | `component` | component id | none | The component whose state this heartbeat sets. |
 | `interval` | duration | | Required. How often a ping is expected. At least `1s`. |
 | `grace` | duration | `"60s"` | How late a ping may be before the heartbeat is down. |
+
+A heartbeat takes `[[heartbeat.link]]` tables, the same as [check links](#links-checklink-and-heartbeatlink).
 
 ## `[[project]]`
 

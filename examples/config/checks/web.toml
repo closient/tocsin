@@ -46,3 +46,12 @@ json = { path = "$.status", eq = "ok" }
 [[check.assert]]
 certificate_days_remaining = { gt = 14 }
 on_fail = "degraded"
+
+# Links shown with the check on the internal board.
+[[check.link]]
+name = "Dashboard"
+url = "https://grafana.example.com/d/api"
+
+[[check.link]]
+name = "Runbook"
+url = "https://wiki.example.com/runbooks/api"

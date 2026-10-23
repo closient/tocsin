@@ -3,6 +3,7 @@
 //! Tests that need the writer's internals.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use rusqlite::{TransactionBehavior, params};
@@ -507,36 +508,230 @@ fn empty_log(path: &Path) {
         .unwrap();
 }
 
+/// The size of a log file of `frames` frames: a 32-byte header, then a
+/// 24-byte header and a page for each frame.
+fn log_file_bytes(path: &Path, frames: u64) -> u64 {
+    let page: u32 = rusqlite::Connection::open(path)
+        .unwrap()
+        .pragma_query_value(None, "page_size", |row| row.get(0))
+        .unwrap();
+    32 + frames * (24 + u64::from(page))
+}
+
+/// The writer at the limit copies the log and the next commit rewinds it,
+/// so the log never holds more than the limit's frames, less one, plus the
+/// frames of the one write that reached it.
+fn log_bound(write_frames: u64) -> u64 {
+    u64::try_from(checkpoint::LOG_LIMIT_FRAMES).unwrap() - 1 + write_frames
+}
+
+/// The largest the log got, in frames and file bytes, and the most frames
+/// one write appended.
+#[derive(Default)]
+struct LogHighs {
+    frames: u64,
+    bytes: u64,
+    write_frames: u64,
+    appended: u64,
+}
+
+impl LogHighs {
+    /// Records one write that left `frames` in the log and `appended` ever.
+    fn record(&mut self, path: &Path, (appended, frames): (u64, u64)) {
+        self.write_frames = self.write_frames.max(appended - self.appended);
+        self.appended = appended;
+        self.frames = self.frames.max(frames);
+        self.bytes = self.bytes.max(log_bytes(path));
+    }
+
+    /// Asserts the log stayed within [`log_bound`] in frames and in bytes.
+    fn assert_bounded(&self, path: &Path) {
+        let bound = log_bound(self.write_frames);
+        assert!(
+            self.frames <= bound,
+            "the log reached {} frames, over {bound} (the limit plus one write of {})",
+            self.frames,
+            self.write_frames
+        );
+        let bytes = log_file_bytes(path, bound);
+        assert!(
+            self.bytes <= bytes,
+            "the log file reached {} bytes, over {bytes}",
+            self.bytes
+        );
+    }
+}
+
+/// Writes one ~3 KB row; returns the frames ever appended and those in the
+/// log after it.
+async fn write_row(writer: &Writer) -> (u64, u64) {
+    writer
+        .run(|conn| {
+            conn.execute(
+                "INSERT INTO check_result (node_id, check_id, started_at, duration_ms, health, error)
+                 VALUES ('node-a', 'steady', 1, 1, 'up', hex(randomblob(1500)))",
+                [],
+            )?;
+            Ok((checkpoint::appended(), checkpoint::log_frames()))
+        })
+        .await
+        .unwrap()
+}
+
 /// Writes that never pause race every checkpoint the checkpointer runs, so
 /// none of them leaves the whole log copied and SQLite never rewinds it.
-/// Once the log reaches its limit the writer copies the rest itself, which
-/// keeps the log file under twice the limit however long the writes go on.
+/// Once the log reaches its limit the writer copies the rest itself,
+/// waiting out any pass of the checkpointer's still running, which keeps
+/// the log within [`log_bound`] however long the writes go on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_log_stays_bounded_under_writes_that_never_pause() {
     let (dir, store) = open();
     let path = dir.path().join(DB_FILE);
-    let bound = 2 * u64::try_from(checkpoint::LOG_LIMIT_BYTES).unwrap();
     let limit_frames = u64::try_from(checkpoint::LOG_LIMIT_FRAMES).unwrap();
-    let mut largest = 0;
-    let mut appended = 0;
-    while appended < 4 * limit_frames {
-        appended = store
+    let mut highs = LogHighs {
+        appended: store
             .writer
-            .run(|conn| {
-                conn.execute(
-                    "INSERT INTO check_result (node_id, check_id, started_at, duration_ms, health, error)
-                     VALUES ('node-a', 'steady', 1, 1, 'up', hex(randomblob(1500)))",
-                    [],
-                )?;
-                Ok(checkpoint::appended())
-            })
+            .run(|_| Ok(checkpoint::appended()))
             .await
-            .unwrap();
-        largest = largest.max(log_bytes(&path));
+            .unwrap(),
+        ..LogHighs::default()
+    };
+    while highs.appended < 4 * limit_frames {
+        let write = write_row(&store.writer).await;
+        highs.record(&path, write);
     }
+    highs.assert_bounded(&path);
+    store.close().await.unwrap();
+}
+
+// A busy handler is a plain function, so it reaches these through statics,
+// shared by the whole test binary: only one test may hold a checkpoint at a
+// time this way.
+
+/// Set by [`keep_checkpointing`] once it is holding the checkpoint lock.
+static CHECKPOINT_HELD: AtomicBool = AtomicBool::new(false);
+/// Lets [`keep_checkpointing`] go.
+static CHECKPOINT_RELEASED: AtomicBool = AtomicBool::new(false);
+
+/// A busy handler for a `FULL` checkpoint waiting for the write lock: it
+/// waits, holding the checkpoint lock, until [`CHECKPOINT_RELEASED`], then
+/// gives up the write lock, so the checkpoint finishes as a `PASSIVE` one.
+fn keep_checkpointing(_: i32) -> bool {
+    CHECKPOINT_HELD.store(true, Ordering::SeqCst);
+    while !CHECKPOINT_RELEASED.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    false
+}
+
+/// A checkpoint of the test's own, holding SQLite's checkpoint lock and no
+/// other lock, as the checkpointer does through a slow pass.
+struct CheckpointHolder {
+    thread: std::thread::JoinHandle<()>,
+    interrupt: rusqlite::InterruptHandle,
+}
+
+impl CheckpointHolder {
+    /// Takes the checkpoint lock on `path` and holds it until
+    /// [`CheckpointHolder::release`].
+    fn hold(path: &Path) -> CheckpointHolder {
+        CHECKPOINT_HELD.store(false, Ordering::SeqCst);
+        CHECKPOINT_RELEASED.store(false, Ordering::SeqCst);
+        // A FULL checkpoint takes the checkpoint lock first, then calls its
+        // busy handler while the write lock is taken.
+        let write_lock = rusqlite::Connection::open(path).unwrap();
+        write_lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let conn = rusqlite::Connection::open(path).unwrap();
+        // With no syncing, nothing it does once released waits on the disk.
+        conn.execute_batch("PRAGMA synchronous = OFF").unwrap();
+        conn.busy_handler(Some(keep_checkpointing)).unwrap();
+        let interrupt = conn.get_interrupt_handle();
+        let thread = std::thread::spawn(move || {
+            // Interrupted before it copies a frame, unless there was none.
+            let _ = conn.query_row("PRAGMA wal_checkpoint(FULL)", [], |_| Ok(()));
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !CHECKPOINT_HELD.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < deadline,
+                "the test's checkpoint never waited"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // The checkpoint stays in its handler, now holding only its own lock.
+        write_lock.execute_batch("ROLLBACK").unwrap();
+        CheckpointHolder { thread, interrupt }
+    }
+
+    /// Lets the lock go at once: the checkpoint is interrupted before it
+    /// copies anything, so a slow disk cannot keep holding it (a copy here
+    /// once ran past the writer's wait under heavy disk load).
+    fn release(&self) {
+        self.interrupt.interrupt();
+        CHECKPOINT_RELEASED.store(true, Ordering::SeqCst);
+    }
+
+    fn join(self) {
+        self.release();
+        self.thread.join().unwrap();
+    }
+}
+
+/// The checkpointer's pass can run for seconds on a disk busy flushing
+/// other work, holding the one checkpoint lock, and the writer's own
+/// checkpoint at the limit then copies nothing (TOC-59: the log reached
+/// 12005 frames on CI). The writer must wait for the lock rather than keep
+/// appending. Here a connection of the test's own holds that lock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_writer_waits_at_the_limit_for_another_checkpoint() {
+    let (dir, store) = open();
+    let path = dir.path().join(DB_FILE);
+    empty_log(&path);
+    let limit_frames = u64::try_from(checkpoint::LOG_LIMIT_FRAMES).unwrap();
+    let mut highs = LogHighs {
+        appended: store
+            .writer
+            .run(|_| Ok(checkpoint::appended()))
+            .await
+            .unwrap(),
+        ..LogHighs::default()
+    };
+    let holder = CheckpointHolder::hold(&path);
+    let probe: (bool, i64, i64) = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap();
+    assert_eq!(
+        probe,
+        (true, -1, -1),
+        "the test's checkpoint does not hold the lock"
+    );
+    // Writes below the limit go on as usual. Past it, the next one waits
+    // behind the writer for as long as the lock is held.
+    let mut stalled_at = None;
+    while highs.appended < 2 * limit_frames {
+        let mut write = std::pin::pin!(write_row(&store.writer));
+        let written = if stalled_at.is_none() && highs.frames >= limit_frames {
+            if let Ok(written) = tokio::time::timeout(Duration::from_millis(500), &mut write).await
+            {
+                written
+            } else {
+                stalled_at = Some(highs.frames);
+                holder.release();
+                write.await
+            }
+        } else {
+            write.await
+        };
+        highs.record(&path, written);
+    }
+    holder.join();
+    highs.assert_bounded(&path);
     assert!(
-        largest < bound,
-        "the log file reached {largest} bytes, over {bound}"
+        stalled_at.is_some(),
+        "the writer never waited for the checkpoint lock"
     );
     store.close().await.unwrap();
 }

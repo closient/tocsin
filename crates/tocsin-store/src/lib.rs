@@ -14,6 +14,7 @@
 pub mod day;
 mod error;
 mod incident;
+mod outage;
 mod readers;
 mod rollup;
 mod schema;
@@ -31,6 +32,7 @@ use tocsin_core::incident::{Actor, Incident, IncidentEdit, NewIncident, NewUpdat
 
 pub use crate::day::Day;
 pub use crate::error::{Error, Result};
+pub use crate::outage::Outage;
 use crate::readers::Readers;
 pub use crate::rollup::DailyRollup;
 use crate::writer::{Insert, Writer};
@@ -346,6 +348,16 @@ impl Store {
     pub async fn incidents(&self, before: Option<i64>, limit: u32) -> Result<Vec<Incident>> {
         self.read(move |conn| incident::list(conn, before, limit))
             .await
+    }
+
+    /// Every outage `node_id` has open, ordered by check.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn open_outages(&self, node_id: &str) -> Result<Vec<Outage>> {
+        let node_id = node_id.to_owned();
+        self.read(move |conn| outage::open(conn, &node_id)).await
     }
 
     /// Runs `query` on a pooled read connection. Read connections refuse

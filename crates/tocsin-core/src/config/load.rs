@@ -612,6 +612,13 @@ impl<'a> Loader<'a> {
                 None,
             );
         }
+        if value.max_concurrent_checks == 0 {
+            self.report(
+                &origin.key("max_concurrent_checks"),
+                "`max_concurrent_checks` must be at least 1",
+                None,
+            );
+        }
         let Some(email) = &value.email else { return };
         for (key, address) in [("from", &email.from), ("reply_to", &email.reply_to)] {
             let Some(address) = address else { continue };

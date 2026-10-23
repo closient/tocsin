@@ -138,6 +138,10 @@ pub struct Server {
     /// Days of check results kept.
     #[serde(default = "default_retention_days")]
     pub retention_days: u32,
+    /// The most checks that may run at once across the node. Checks due
+    /// while the limit is reached wait for a free slot.
+    #[serde(default = "default_max_concurrent_checks")]
+    pub max_concurrent_checks: u32,
     /// Sender settings for every email tocsin sends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<ServerEmail>,
@@ -154,6 +158,7 @@ impl Default for Server {
             node_id: None,
             data_dir: None,
             retention_days: default_retention_days(),
+            max_concurrent_checks: default_max_concurrent_checks(),
             email: None,
             auth: None,
         }
@@ -166,6 +171,10 @@ fn default_listen() -> SocketAddr {
 
 fn default_retention_days() -> u32 {
     90
+}
+
+fn default_max_concurrent_checks() -> u32 {
+    64
 }
 
 /// `[server.email]`. Required, with `from`, `reply_to` and `smtp_url`,
@@ -237,6 +246,21 @@ pub struct Component {
     /// The `[[group]]` the component is shown under.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<Id>,
+    /// How the health of the component's checks combines into its own.
+    #[serde(default)]
+    pub rule: ComponentRule,
+}
+
+/// How a component's health is derived from the health of its checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ComponentRule {
+    /// The worst check decides: one check down makes the component down.
+    #[default]
+    Worst,
+    /// The worst state that more than half of the checks share or exceed:
+    /// one check down out of three leaves the component up.
+    Majority,
 }
 
 /// `[[group]]`: a heading collecting components on the status page.

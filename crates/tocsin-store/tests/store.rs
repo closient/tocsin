@@ -250,6 +250,59 @@ async fn an_outage_only_ever_gets_ended_once() {
     fixture.store.open_outage(outage()).await.unwrap();
 }
 
+#[tokio::test]
+async fn open_outages_lists_only_this_nodes_unended_outages() {
+    let fixture = open();
+    let outage = |node: &str, check: &str, health| NewOutage {
+        node_id: node.into(),
+        check_id: check.into(),
+        component_id: None,
+        health,
+        started_at_ms: 5_000,
+    };
+    let ended = fixture
+        .store
+        .open_outage(outage("node-a", "api", Health::Down))
+        .await
+        .unwrap();
+    fixture.store.end_outage(ended, 6_000).await.unwrap();
+    let web = fixture
+        .store
+        .open_outage(outage("node-a", "web", Health::Degraded))
+        .await
+        .unwrap();
+    let api = fixture
+        .store
+        .open_outage(outage("node-a", "api", Health::Down))
+        .await
+        .unwrap();
+    fixture
+        .store
+        .open_outage(outage("node-b", "web", Health::Down))
+        .await
+        .unwrap();
+    let open = fixture.store.open_outages("node-a").await.unwrap();
+    let summary: Vec<_> = open
+        .iter()
+        .map(|outage| {
+            (
+                outage.id,
+                outage.check_id.as_str(),
+                outage.health,
+                outage.ended_at_ms,
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (api, "api", Health::Down, None),
+            (web, "web", Health::Degraded, None)
+        ]
+    );
+    assert_eq!(fixture.store.open_outages("node-c").await.unwrap(), []);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_appends_batch_and_a_bad_row_spoils_only_itself() {
     let fixture = open();

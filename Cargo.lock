@@ -2289,6 +2289,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tocsin-engine"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tocsin-core",
+ "tocsin-probe",
+ "tocsin-store",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "tocsin-probe"
 version = "0.1.0"
 dependencies = [

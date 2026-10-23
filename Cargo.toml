@@ -15,6 +15,7 @@ publish = false
 tocsin-core = { path = "crates/tocsin-core" }
 tocsin-store = { path = "crates/tocsin-store" }
 tocsin-probe = { path = "crates/tocsin-probe" }
+tocsin-engine = { path = "crates/tocsin-engine" }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 gethostname = "1.1"

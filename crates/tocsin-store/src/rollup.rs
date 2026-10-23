@@ -266,7 +266,7 @@ pub(crate) fn delete_chunk(conn: &mut Connection, before_ms: i64, limit: u32) ->
     Ok(deleted)
 }
 
-fn parse_column<T: std::str::FromStr>(index: usize, text: &str) -> rusqlite::Result<T>
+pub(crate) fn parse_column<T: std::str::FromStr>(index: usize, text: &str) -> rusqlite::Result<T>
 where
     T::Err: std::error::Error + Send + Sync + 'static,
 {

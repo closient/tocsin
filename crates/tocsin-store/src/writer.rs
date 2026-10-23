@@ -137,6 +137,7 @@ fn run(mut session: Session, mut receiver: mpsc::Receiver<Command>) {
         let Some(command) = next.take().or_else(|| receiver.blocking_recv()) else {
             break;
         };
+        nudge.before_write();
         match command {
             Command::Run(job) => job(conn),
             Command::Insert(insert, reply) => {

@@ -23,6 +23,7 @@ mod readers;
 mod release;
 mod rollup;
 mod schema;
+mod stats;
 #[cfg(test)]
 mod tests;
 mod writer;
@@ -50,6 +51,7 @@ pub use crate::outage::{LastUp, LatestResult, Outage};
 use crate::readers::Readers;
 pub use crate::release::{ComponentScope, Order, Projects, ReleaseQuery, TimelineQuery, Written};
 pub use crate::rollup::DailyRollup;
+pub use crate::stats::{CheckpointEvent, CheckpointStats};
 use crate::writer::{Insert, Writer};
 
 /// The database file's name inside the data folder.
@@ -267,6 +269,15 @@ impl Store {
     #[must_use]
     pub fn writes_queued(&self) -> u64 {
         self.writer.queued()
+    }
+
+    /// What the writer and the checkpointer have done since the store
+    /// opened to keep the write-ahead log bounded, for the write-latency
+    /// bench and diagnostics: a slow write can be traced to the path that
+    /// made it slow.
+    #[must_use]
+    pub fn checkpoint_stats(&self) -> CheckpointStats {
+        self.checkpointer.stats()
     }
 
     /// Appends a check result; resolves with its id once committed.

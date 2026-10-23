@@ -619,6 +619,11 @@ async fn the_log_stays_bounded_under_writes_that_never_pause() {
         highs.record(&path, write);
     }
     highs.assert_bounded(&path);
+    // What the store reports it did, as the bench prints it (TOC-62).
+    let stats = store.checkpoint_stats();
+    assert!(stats.passes > 0, "{stats:?}");
+    assert!(stats.rewinds > 0, "{stats:?}");
+    assert!(stats.frames_high > 0, "{stats:?}");
     store.close().await.unwrap();
 }
 
@@ -905,6 +910,15 @@ fn a_lockout_logs_once_and_later_writes_do_not_wait() {
     assert_eq!(passes.waits(), 1);
     // The test's checkpoint is not the checkpointer's, so the writer polls.
     assert!(passes.polls() > 0);
+    let stats = nudge.stats();
+    assert_eq!(stats.lockouts, 1, "{stats:?}");
+    assert_eq!(stats.limit_waits, 1, "{stats:?}");
+    assert!(
+        stats.limit_wait_max + Duration::from_millis(100) >= schema::BUSY_TIMEOUT,
+        "{stats:?}"
+    );
+    assert!(stats.inline_copies >= 1, "{stats:?}");
+    assert!(stats.rewinds >= 1, "{stats:?}");
 }
 
 /// A checkpoint that fails is a lockout too: one error, naming SQLite's,
@@ -969,6 +983,9 @@ fn the_writer_waits_out_the_checkpointers_pass_without_polling() {
     pass.join().unwrap();
     assert_eq!(passes.waits(), 1);
     assert_eq!(passes.polls(), 0, "the writer polled");
+    let stats = nudge.stats();
+    assert_eq!((stats.limit_writes, stats.limit_waits), (1, 1), "{stats:?}");
+    assert!(!stats.limit_wait_max.is_zero(), "{stats:?}");
     assert!(
         took >= PASS && took < schema::BUSY_TIMEOUT,
         "the writer was done {took:?} after the pass began"
@@ -1004,6 +1021,7 @@ fn the_checkpointer_stands_aside_while_the_writer_is_at_the_limit() {
         assert!(Instant::now() < deadline, "the checkpointer did not skip");
         std::thread::sleep(Duration::from_millis(10));
     }
+    assert!(checkpointer.stats().stand_asides > 0);
     assert_eq!(database_bytes(&path), before, "the checkpointer copied");
     while database_bytes(&path) == before {
         assert!(
@@ -1056,6 +1074,9 @@ fn below_the_hard_limit_the_writer_neither_copies_nor_waits() {
     }
     holder.join();
     assert_eq!(passes.waits(), 0, "the writer waited below the hard limit");
+    let stats = nudge.stats();
+    assert_eq!(stats.limit_writes, 0, "{stats:?}");
+    assert!(stats.frames_high >= halfway, "{stats:?}");
     assert_eq!(passes.polls(), 0, "the writer polled below the hard limit");
 }
 

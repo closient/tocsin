@@ -10,7 +10,7 @@ use std::path::Path;
 
 use serde_json::Value;
 use tocsin_core::Health;
-use tocsin_core::config::{CheckType, Config, closest};
+use tocsin_core::config::{Config, closest};
 use tocsin_core::probe::{CompiledCheck, ProbeErrorKind, ProbeOutcome};
 use tocsin_probe::ProbeContext;
 
@@ -35,15 +35,9 @@ pub fn run(check_id: &str, folder: &Path) -> Result<Report, Failure> {
     else {
         return Err(unknown_check(check_id, &configuration));
     };
-    let context = match ProbeContext::system() {
-        Ok(context) => context,
-        // Only HTTP and TLS checks verify certificates; the rest can run
-        // on a host with no root store.
-        Err(error) if matches!(check.check_type, CheckType::Http | CheckType::Tls) => {
-            return Err(Failure::new(Exit::Runtime, error.message));
-        }
-        Err(_) => ProbeContext::with_roots(rustls::RootCertStore::empty()),
-    };
+    // Without a system root store an HTTP or TLS check ends in a setup
+    // error, which fails below; the other checks run regardless.
+    let context = ProbeContext::system_or_without_roots();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

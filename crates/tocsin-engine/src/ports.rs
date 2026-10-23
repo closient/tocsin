@@ -10,7 +10,7 @@ use std::pin::Pin;
 
 use tocsin_core::probe::{CompiledCheck, ProbeOutcome};
 use tocsin_probe::ProbeContext;
-use tocsin_store::{NewCheckResult, NewOutage, Outage, Result, Store};
+use tocsin_store::{LastUp, NewCheckResult, Outage, OutageChange, Result, Store};
 
 use crate::event::EngineEvent;
 use crate::notice::Notice;
@@ -20,9 +20,11 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Runs one check once.
 pub trait Runner: Send + Sync + 'static {
-    /// Probes `check` and judges the result. The engine applies the check's
-    /// timeout around this call and stamps the result's start time and
-    /// duration from its own clock.
+    /// Probes `check` and judges the result, within the check's timeout,
+    /// stamping the outcome with when the probe started and how long it
+    /// took. The engine records those stamps as they are; it abandons a run
+    /// only well past the timeout, as a bug (see
+    /// [`PROBE_BACKSTOP`](crate::PROBE_BACKSTOP)).
     fn run<'a>(&'a self, check: &'a CompiledCheck) -> BoxFuture<'a, ProbeOutcome>;
 }
 
@@ -50,12 +52,20 @@ impl Runner for ProbeRunner {
 pub trait History: Send + Sync + 'static {
     /// Stores one raw result.
     fn append(&self, result: NewCheckResult) -> BoxFuture<'_, Result<i64>>;
-    /// Opens an outage; resolves with its id.
-    fn open_outage(&self, outage: NewOutage) -> BoxFuture<'_, Result<i64>>;
-    /// Ends an open outage.
-    fn end_outage(&self, id: i64, ended_at_ms: i64) -> BoxFuture<'_, Result<()>>;
+    /// Ends an outage and opens another, either or both, in one
+    /// transaction: both happen or neither does. Resolves with the opened
+    /// outage's id, if one was opened.
+    fn change_outage(&self, change: OutageChange) -> BoxFuture<'_, Result<Option<i64>>>;
     /// Every outage `node_id` still has open.
     fn open_outages<'a>(&'a self, node_id: &'a str) -> BoxFuture<'a, Result<Vec<Outage>>>;
+    /// For each of `check_ids` with an `up` result on `node_id` since its
+    /// last outage: when that result started, and since when the check has
+    /// been up.
+    fn last_up<'a>(
+        &'a self,
+        node_id: &'a str,
+        check_ids: Vec<String>,
+    ) -> BoxFuture<'a, Result<Vec<LastUp>>>;
 }
 
 impl History for Store {
@@ -63,16 +73,20 @@ impl History for Store {
         Box::pin(Store::append(self, result))
     }
 
-    fn open_outage(&self, outage: NewOutage) -> BoxFuture<'_, Result<i64>> {
-        Box::pin(Store::open_outage(self, outage))
-    }
-
-    fn end_outage(&self, id: i64, ended_at_ms: i64) -> BoxFuture<'_, Result<()>> {
-        Box::pin(Store::end_outage(self, id, ended_at_ms))
+    fn change_outage(&self, change: OutageChange) -> BoxFuture<'_, Result<Option<i64>>> {
+        Box::pin(Store::change_outage(self, change))
     }
 
     fn open_outages<'a>(&'a self, node_id: &'a str) -> BoxFuture<'a, Result<Vec<Outage>>> {
         Box::pin(Store::open_outages(self, node_id))
+    }
+
+    fn last_up<'a>(
+        &'a self,
+        node_id: &'a str,
+        check_ids: Vec<String>,
+    ) -> BoxFuture<'a, Result<Vec<LastUp>>> {
+        Box::pin(Store::last_up(self, node_id, check_ids))
     }
 }
 
@@ -88,7 +102,7 @@ impl Notices for Store {
     fn current(&self) -> BoxFuture<'_, Result<Vec<Notice>>> {
         Box::pin(async {
             let incidents = self.open_incidents().await?;
-            Ok(incidents.iter().filter_map(Notice::from_incident).collect())
+            Ok(incidents.iter().filter_map(Notice::from_open).collect())
         })
     }
 }

@@ -41,17 +41,25 @@ pub struct CheckChange {
     /// The outage this change opened, if the check is now degraded or down.
     pub opened_outage_id: Option<i64>,
     /// True when a maintenance window covering the check's component was
-    /// active at the change. The change is recorded as usual, but alerting
-    /// must not notify anyone about it.
+    /// active at the change. Informational: [`CheckChange::alert`] decides
+    /// whether anyone is notified.
     pub maintenance: bool,
+    /// Whether alerting notifies about this change. Every alert gets
+    /// exactly one resolve: a change that leaves up (or first finds the
+    /// check not up) alerts unless a maintenance window covers it; a move
+    /// between degraded and down alerts if the outage it ends alerted, or
+    /// else unless a window covers it; a return to up alerts exactly when
+    /// the outage it ends alerted, whatever window is active by then. The
+    /// outage records whether it alerted, so this holds across restarts.
+    pub alert: bool,
 }
 
 impl CheckChange {
-    /// Whether alerting should notify about this change: false during
-    /// maintenance.
+    /// Whether alerting should notify about this change; see
+    /// [`CheckChange::alert`].
     #[must_use]
     pub fn alerts(&self) -> bool {
-        !self.maintenance
+        self.alert
     }
 }
 

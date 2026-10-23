@@ -32,7 +32,8 @@ use tocsin_core::incident::{Actor, Incident, IncidentEdit, NewIncident, NewUpdat
 
 pub use crate::day::Day;
 pub use crate::error::{Error, Result};
-pub use crate::outage::Outage;
+pub use crate::incident::OpenIncident;
+pub use crate::outage::{LastUp, Outage};
 use crate::readers::Readers;
 pub use crate::rollup::DailyRollup;
 use crate::writer::{Insert, Writer};
@@ -82,7 +83,7 @@ pub struct NewCheckResult {
     pub status_code: Option<u16>,
 }
 
-/// A machine-detected outage, as handed to [`Store::open_outage`].
+/// A machine-detected outage, as handed to [`Store::change_outage`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewOutage {
     /// The node that saw it.
@@ -95,6 +96,27 @@ pub struct NewOutage {
     pub health: Health,
     /// When it began, unix milliseconds UTC.
     pub started_at_ms: i64,
+    /// Whether opening it alerted. Its end resolves only if it did.
+    pub alerted: bool,
+}
+
+/// An outage that ends where another opens, written in one transaction by
+/// [`Store::change_outage`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutageChange {
+    /// The open outage to end, if any.
+    pub end: Option<OutageEnd>,
+    /// The outage to open, if any.
+    pub open: Option<NewOutage>,
+}
+
+/// Which outage ends, and when.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutageEnd {
+    /// The open outage's id.
+    pub id: i64,
+    /// When it ended, unix milliseconds UTC.
+    pub ended_at_ms: i64,
 }
 
 /// How retention deletes old results.
@@ -234,7 +256,11 @@ impl Store {
     /// The check already has an open outage on that node, the health is
     /// `Up`, or the write fails.
     pub async fn open_outage(&self, outage: NewOutage) -> Result<i64> {
-        self.writer.insert(Insert::OpenOutage(outage)).await
+        let change = OutageChange {
+            end: None,
+            open: Some(outage),
+        };
+        self.writer.insert(Insert::ChangeOutage(change)).await
     }
 
     /// Ends an open outage. This is the only change an outage ever receives.
@@ -244,10 +270,29 @@ impl Store {
     /// No outage has that id, it has already ended, it ends before it
     /// started, or the write fails.
     pub async fn end_outage(&self, id: i64, ended_at_ms: i64) -> Result<()> {
+        let change = OutageChange {
+            end: Some(OutageEnd { id, ended_at_ms }),
+            open: None,
+        };
         self.writer
-            .insert(Insert::EndOutage { id, ended_at_ms })
+            .insert(Insert::ChangeOutage(change))
             .await
             .map(drop)
+    }
+
+    /// Ends one outage and opens the next in one transaction, so a check's
+    /// outage record never ends without its successor or opens beside the
+    /// one it replaces. Resolves with the opened outage's id, if it opened
+    /// one.
+    ///
+    /// # Errors
+    ///
+    /// Either half fails as [`Store::end_outage`] or [`Store::open_outage`]
+    /// would, or the write fails; nothing is written then.
+    pub async fn change_outage(&self, change: OutageChange) -> Result<Option<i64>> {
+        let opens = change.open.is_some();
+        let id = self.writer.insert(Insert::ChangeOutage(change)).await?;
+        Ok(opens.then_some(id))
     }
 
     /// Opens an incident (or announces maintenance) with its first update,
@@ -358,8 +403,20 @@ impl Store {
     /// # Errors
     ///
     /// The read fails.
-    pub async fn open_incidents(&self) -> Result<Vec<Incident>> {
+    pub async fn open_incidents(&self) -> Result<Vec<OpenIncident>> {
         self.read(incident::open).await
+    }
+
+    /// For each of `check_ids` that `node_id` has an `up` result for, when
+    /// it was last up and since when.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn last_up(&self, node_id: &str, check_ids: Vec<String>) -> Result<Vec<LastUp>> {
+        let node_id = node_id.to_owned();
+        self.read(move |conn| outage::last_up(conn, &node_id, &check_ids))
+            .await
     }
 
     /// Every outage `node_id` has open, ordered by check.

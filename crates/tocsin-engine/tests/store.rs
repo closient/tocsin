@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The engine against a real store, in real time: the outage rows it
-//! writes, and a restart that resumes an open outage instead of tripping
-//! the one-open-outage-per-check index.
+//! writes, a restart that resumes an open outage instead of tripping the
+//! one-open-outage-per-check index, and one that resumes an up check.
 
 mod common;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{Events, FakeNotices, FakeRunner, config};
+use common::{Events, FakeNotices, FakeRunner, Step, config};
 use tocsin_core::Health::{Down, Up};
 use tocsin_engine::ports::{History, Notices, Runner, Sink, SystemClock};
 use tocsin_engine::{Engine, Parts, Plan};
@@ -22,12 +22,15 @@ const CHECK: &str = "[[check]]\nid = \"api\"\ntype = \"tcp\"\ntarget = \"api.exa
 /// probe reporting `health`.
 async fn run(store: &Arc<Store>, health: tocsin_core::Health) -> Arc<Events> {
     let events = Events::new();
+    let runner = FakeRunner::with_clock(Arc::new(SystemClock), Duration::ZERO, move |_, _, _| {
+        Step::Report(health)
+    });
     let parts = Parts {
-        runner: FakeRunner::always(health) as Arc<dyn Runner>,
+        clock: Arc::clone(&runner.clock),
+        runner: runner as Arc<dyn Runner>,
         history: Arc::clone(store) as Arc<dyn History>,
         notices: FakeNotices::new(Vec::new()) as Arc<dyn Notices>,
         sink: Arc::clone(&events) as Arc<dyn Sink>,
-        clock: Arc::new(SystemClock),
     };
     let plan = Plan::from_config(&config(CHECK)).unwrap();
     let engine = Engine::start(plan, parts).await.expect("the engine starts");
@@ -72,6 +75,10 @@ async fn a_restart_resumes_and_then_ends_the_open_outage() {
     assert_eq!(store.open_outages("node-a").await.unwrap(), []);
     assert_eq!(rows(&store, "outage").await, 1, "no second outage opened");
     assert!(rows(&store, "check_result").await > results);
+
+    // Restarted at once, the up check resumes from its stored results.
+    let third = run(&store, Up).await;
+    assert_eq!(third.checks(), [], "an up check resumes as up, silently");
 
     Arc::try_unwrap(store)
         .unwrap_or_else(|_| panic!("the engines released the store"))

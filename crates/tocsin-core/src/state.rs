@@ -75,14 +75,24 @@ pub struct Transition {
 struct Run {
     count: u32,
     since_ms: i64,
+    /// The health of the run's latest result.
+    health: Health,
 }
 
 /// Turns a check's raw results into confirmed state changes.
 ///
 /// The state changes only after `confirm` consecutive results that disagree
 /// with it; any result matching the current state starts the count over. The
-/// new state is the health of the result that completes the run. A check
-/// starts with no state, and its first `confirm` results establish one.
+/// new state is the health of the result that completes the run.
+///
+/// A check starts with no state, and its first state needs `confirm`
+/// consecutive results that agree with each other: a result that differs
+/// from the one before starts the run over from itself.
+///
+/// [`observe`](Confirmation::observe) only proposes a change; the state moves
+/// when the caller [`commit`](Confirmation::commit)s it, once whatever the
+/// change must write has been written. Until then the run is kept, so the
+/// next result that continues it proposes the change again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Confirmation {
     confirm: u32,
@@ -119,39 +129,55 @@ impl Confirmation {
     }
 
     /// Records one result started at `at_ms` and returns the change it
-    /// confirms, if any.
+    /// confirms, if any, without making it: see
+    /// [`commit`](Confirmation::commit).
+    #[must_use = "the state only moves once the change is committed"]
     pub fn observe(&mut self, health: Health, at_ms: i64) -> Option<Transition> {
         let from = self.state.map(|state| state.health);
         if from == Some(health) {
             self.run = None;
             return None;
         }
+        // With no state yet, only results that agree with each other count
+        // towards the first one.
+        if from.is_none() && self.run.is_some_and(|run| run.health != health) {
+            self.run = None;
+        }
         let run = self.run.get_or_insert(Run {
             count: 0,
             since_ms: at_ms,
+            health,
         });
-        run.count += 1;
+        run.count = run.count.saturating_add(1);
+        run.health = health;
         if run.count < self.confirm {
             return None;
         }
-        let since_ms = run.since_ms;
-        self.run = None;
-        self.state = Some(Confirmed { health, since_ms });
         Some(Transition {
             from,
             to: health,
-            since_ms,
+            since_ms: run.since_ms,
             confirmed_at_ms: at_ms,
         })
+    }
+
+    /// Makes `change`, a change [`observe`](Confirmation::observe) just
+    /// returned, the confirmed state.
+    pub fn commit(&mut self, change: &Transition) {
+        self.run = None;
+        self.state = Some(Confirmed {
+            health: change.to,
+            since_ms: change.since_ms,
+        });
     }
 }
 
 /// A component's health from the confirmed health of its checks, `None` for
 /// a check with no state yet.
 ///
-/// A component with no checks is up: nothing reports it broken. A component
-/// whose checks all lack a state has no health yet. Otherwise checks without
-/// a state are left out and `rule` combines the rest:
+/// A component with no checks, or whose checks all lack a state, has no
+/// health yet: nothing measures it, so nothing says it works. Otherwise
+/// checks without a state are left out and `rule` combines the rest:
 ///
 /// - `worst`: the worst check.
 /// - `majority`: the worst state that more than half of the checks are in
@@ -159,9 +185,8 @@ impl Confirmation {
 ///   leaves the component up.
 #[must_use]
 pub fn component_health(rule: ComponentRule, checks: &[Option<Health>]) -> Option<Health> {
-    if checks.is_empty() {
-        return Some(Health::Up);
-    }
+    // TODO(TOC-43): heartbeats join components as members, so a component
+    // whose only members are heartbeats stops being empty here.
     let known: Vec<Health> = checks.iter().flatten().copied().collect();
     if known.is_empty() {
         return None;
@@ -301,14 +326,24 @@ mod tests {
         assert_eq!(jitter("web", interval), Duration::from_millis(1078));
     }
 
+    /// Observes one result and commits whatever change it confirms, as the
+    /// engine does once the change is written.
+    fn step(confirmation: &mut Confirmation, health: Health, at_ms: i64) -> Option<Transition> {
+        let change = confirmation.observe(health, at_ms);
+        if let Some(change) = &change {
+            confirmation.commit(change);
+        }
+        change
+    }
+
     #[test]
     fn first_results_establish_a_state_after_confirm() {
         let mut confirmation = Confirmation::new(3);
-        assert_eq!(confirmation.observe(Up, 10), None);
-        assert_eq!(confirmation.observe(Up, 20), None);
+        assert_eq!(step(&mut confirmation, Up, 10), None);
+        assert_eq!(step(&mut confirmation, Up, 20), None);
         assert_eq!(confirmation.state(), None);
         assert_eq!(
-            confirmation.observe(Up, 30),
+            step(&mut confirmation, Up, 30),
             Some(Transition {
                 from: None,
                 to: Up,
@@ -328,11 +363,11 @@ mod tests {
     #[test]
     fn confirm_of_one_changes_on_every_differing_result() {
         let mut confirmation = Confirmation::new(1);
-        assert_eq!(confirmation.observe(Up, 1).map(|t| t.to), Some(Up));
-        assert_eq!(confirmation.observe(Up, 2), None);
-        assert_eq!(confirmation.observe(Down, 3).map(|t| t.to), Some(Down));
+        assert_eq!(step(&mut confirmation, Up, 1).map(|t| t.to), Some(Up));
+        assert_eq!(step(&mut confirmation, Up, 2), None);
+        assert_eq!(step(&mut confirmation, Down, 3).map(|t| t.to), Some(Down));
         assert_eq!(
-            confirmation.observe(Degraded, 4).map(|t| t.to),
+            step(&mut confirmation, Degraded, 4).map(|t| t.to),
             Some(Degraded)
         );
     }
@@ -340,10 +375,10 @@ mod tests {
     #[test]
     fn a_change_needs_confirm_consecutive_differing_results() {
         let mut confirmation = Confirmation::resume(3, Up, 0);
-        assert_eq!(confirmation.observe(Down, 100), None);
-        assert_eq!(confirmation.observe(Down, 200), None);
+        assert_eq!(step(&mut confirmation, Down, 100), None);
+        assert_eq!(step(&mut confirmation, Down, 200), None);
         assert_eq!(
-            confirmation.observe(Down, 300),
+            step(&mut confirmation, Down, 300),
             Some(Transition {
                 from: Some(Up),
                 to: Down,
@@ -351,15 +386,15 @@ mod tests {
                 confirmed_at_ms: 300,
             })
         );
-        assert_eq!(confirmation.observe(Down, 400), None);
+        assert_eq!(step(&mut confirmation, Down, 400), None);
     }
 
     #[test]
     fn flapping_never_confirms() {
         let mut confirmation = Confirmation::resume(2, Up, 0);
-        for step in 0..50 {
-            let health = if step % 2 == 0 { Down } else { Up };
-            assert_eq!(confirmation.observe(health, step), None, "step {step}");
+        for at_ms in 0..50 {
+            let health = if at_ms % 2 == 0 { Down } else { Up };
+            assert_eq!(step(&mut confirmation, health, at_ms), None, "at {at_ms}");
         }
         assert_eq!(confirmation.state().map(|state| state.health), Some(Up));
     }
@@ -367,21 +402,29 @@ mod tests {
     #[test]
     fn a_matching_result_starts_the_count_over() {
         let mut confirmation = Confirmation::resume(3, Up, 0);
-        assert_eq!(confirmation.observe(Down, 1), None);
-        assert_eq!(confirmation.observe(Down, 2), None);
-        assert_eq!(confirmation.observe(Up, 3), None);
-        assert_eq!(confirmation.observe(Down, 4), None);
-        assert_eq!(confirmation.observe(Down, 5), None);
-        let change = confirmation.observe(Down, 6).expect("a change");
+        assert_eq!(step(&mut confirmation, Down, 1), None);
+        assert_eq!(step(&mut confirmation, Down, 2), None);
+        assert_eq!(step(&mut confirmation, Up, 3), None);
+        assert_eq!(step(&mut confirmation, Down, 4), None);
+        assert_eq!(step(&mut confirmation, Down, 5), None);
+        let change = step(&mut confirmation, Down, 6).expect("a change");
         assert_eq!(change.since_ms, 4);
+    }
+
+    #[test]
+    fn mixed_failures_after_a_state_still_confirm_as_the_last_one() {
+        let mut confirmation = Confirmation::resume(2, Up, 0);
+        assert_eq!(step(&mut confirmation, Down, 1), None);
+        let change = step(&mut confirmation, Degraded, 2).expect("a change");
+        assert_eq!((change.to, change.since_ms), (Degraded, 1));
     }
 
     #[test]
     fn mixed_failures_confirm_as_the_last_one() {
         let mut confirmation = Confirmation::resume(3, Up, 0);
-        assert_eq!(confirmation.observe(Down, 1), None);
-        assert_eq!(confirmation.observe(Degraded, 2), None);
-        assert_eq!(confirmation.observe(Down, 3).map(|t| t.to), Some(Down));
+        assert_eq!(step(&mut confirmation, Down, 1), None);
+        assert_eq!(step(&mut confirmation, Degraded, 2), None);
+        assert_eq!(step(&mut confirmation, Down, 3).map(|t| t.to), Some(Down));
     }
 
     #[test]
@@ -427,9 +470,75 @@ mod tests {
     #[test]
     fn components_without_known_checks() {
         for rule in [ComponentRule::Worst, ComponentRule::Majority] {
-            assert_eq!(component_health(rule, &[]), Some(Up));
+            assert_eq!(component_health(rule, &[]), None);
             assert_eq!(component_health(rule, &[None, None]), None);
         }
+        assert_eq!(
+            component_status(component_health(ComponentRule::Worst, &[]), None, false),
+            ComponentStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn a_first_state_needs_confirm_agreeing_results() {
+        let mut confirmation = Confirmation::new(3);
+        assert_eq!(step(&mut confirmation, Up, 1), None);
+        assert_eq!(step(&mut confirmation, Up, 2), None);
+        // Disagrees with the two before: the run starts over from here.
+        assert_eq!(step(&mut confirmation, Down, 3), None);
+        assert_eq!(step(&mut confirmation, Down, 4), None);
+        assert_eq!(confirmation.state(), None);
+        assert_eq!(
+            step(&mut confirmation, Down, 5),
+            Some(Transition {
+                from: None,
+                to: Down,
+                since_ms: 3,
+                confirmed_at_ms: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn mixed_first_results_never_confirm() {
+        let mut confirmation = Confirmation::new(2);
+        for (at_ms, health) in [Up, Down, Degraded, Up, Down, Up, Degraded]
+            .into_iter()
+            .enumerate()
+        {
+            let at_ms = i64::try_from(at_ms).expect("a small index");
+            assert_eq!(step(&mut confirmation, health, at_ms), None, "at {at_ms}");
+        }
+        assert_eq!(confirmation.state(), None);
+        let change = step(&mut confirmation, Degraded, 7).expect("a first state");
+        assert_eq!((change.to, change.since_ms), (Degraded, 6));
+    }
+
+    #[test]
+    fn an_uncommitted_change_is_proposed_again_by_the_next_result() {
+        let mut confirmation = Confirmation::resume(3, Up, 0);
+        assert_eq!(step(&mut confirmation, Down, 1), None);
+        assert_eq!(step(&mut confirmation, Down, 2), None);
+        let first = confirmation.observe(Down, 3).expect("a change");
+        // Not committed, as when writing the outage failed.
+        assert_eq!(confirmation.state().map(|state| state.health), Some(Up));
+        let again = confirmation.observe(Down, 4).expect("proposed again");
+        assert_eq!(
+            again,
+            Transition {
+                confirmed_at_ms: 4,
+                ..first
+            }
+        );
+        confirmation.commit(&again);
+        assert_eq!(
+            confirmation.state(),
+            Some(Confirmed {
+                health: Down,
+                since_ms: 1
+            })
+        );
+        assert_eq!(confirmation.observe(Down, 5), None);
     }
 
     #[test]

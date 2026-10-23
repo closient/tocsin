@@ -10,13 +10,14 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tocsin_core::Health;
+use tocsin_core::config::Check;
 use tocsin_core::config::ComponentRule;
 use tocsin_core::probe::{CompiledCheck, Facts, ProbeError, ProbeErrorKind, ProbeOutcome};
 use tocsin_core::state::{
-    ComponentStatus, Confirmation, Confirmed, Transition, component_health, component_status,
-    jitter,
+    ComponentStatus, Confirmation, Confirmed, JITTER_DIVISOR, Transition, component_health,
+    component_status, jitter,
 };
-use tocsin_store::{NewCheckResult, NewOutage};
+use tocsin_store::{LastUp, NewCheckResult, NewOutage, Outage, OutageChange, OutageEnd};
 use tokio::sync::{Notify, Semaphore, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
@@ -31,6 +32,11 @@ use crate::ports::{Clock, History, Notices, Runner, Sink};
 /// sooner, so incidents changed without a [`Engine::notices_changed`] call
 /// still show within this time.
 pub const NOTICES_REFRESH: Duration = Duration::from_secs(60);
+
+/// How long past a check's timeout the engine waits for a probe before
+/// abandoning it. Probes enforce the timeout themselves, so this only fires
+/// on a bug, which it logs as an error.
+pub const PROBE_BACKSTOP: Duration = Duration::from_secs(5);
 
 /// The engine's connections to the outside world.
 #[derive(Clone)]
@@ -58,6 +64,8 @@ impl fmt::Debug for Parts {
 pub enum StartError {
     /// Reading the outages left open before a restart failed.
     Outages(tocsin_store::Error),
+    /// Reading when checks were last up failed.
+    Results(tocsin_store::Error),
     /// Reading incidents and maintenance windows failed.
     Notices(tocsin_store::Error),
 }
@@ -66,6 +74,7 @@ impl fmt::Display for StartError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             StartError::Outages(error) => write!(f, "reading open outages: {error}"),
+            StartError::Results(error) => write!(f, "reading recent results: {error}"),
             StartError::Notices(error) => {
                 write!(f, "reading incidents and maintenance windows: {error}")
             }
@@ -76,7 +85,9 @@ impl fmt::Display for StartError {
 impl std::error::Error for StartError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            StartError::Outages(error) | StartError::Notices(error) => Some(error),
+            StartError::Outages(error)
+            | StartError::Results(error)
+            | StartError::Notices(error) => Some(error),
         }
     }
 }
@@ -147,25 +158,17 @@ pub struct Engine {
 impl Engine {
     /// Starts running `plan`.
     ///
-    /// Before any check runs it reads the outages this node left open, so a
-    /// check that was down before a restart resumes as down with its outage
-    /// still open, and the current incidents and maintenance windows, so
-    /// the first statuses are right.
+    /// Before any check runs it seeds every check's state from what this
+    /// node recorded before a restart (see [`seed_checks`]) and reads the
+    /// current incidents and maintenance windows, so the first statuses are
+    /// right. Seeding emits nothing.
     ///
     /// # Errors
     ///
-    /// Either read fails.
+    /// A read fails.
     pub async fn start(plan: Plan, parts: Parts) -> Result<Engine, StartError> {
-        let open = parts
-            .history
-            .open_outages(&plan.node_id)
-            .await
-            .map_err(StartError::Outages)?;
+        let mut seeds = seed_checks(&plan, parts.history.as_ref(), parts.clock.now_ms()).await?;
         let notices = parts.notices.current().await.map_err(StartError::Notices)?;
-        let mut open: HashMap<String, tocsin_store::Outage> = open
-            .into_iter()
-            .map(|outage| (outage.check_id.clone(), outage))
-            .collect();
 
         let mut runs = Vec::with_capacity(plan.checks.len());
         let mut checks = BTreeMap::new();
@@ -173,13 +176,12 @@ impl Engine {
             let check = compiled.check();
             let id = check.id.to_string();
             let component = check.component.as_ref().map(ToString::to_string);
-            let (confirmation, outage) = match open.remove(&id) {
-                Some(outage) => (
-                    Confirmation::resume(check.confirm, outage.health, outage.started_at_ms),
-                    Some(outage.id),
-                ),
-                None => (Confirmation::new(check.confirm), None),
-            };
+            let Seed {
+                confirmation,
+                outage,
+            } = seeds
+                .remove(&id)
+                .unwrap_or_else(|| Seed::unknown(check.confirm));
             checks.insert(
                 id,
                 CheckEntry {
@@ -195,14 +197,6 @@ impl Engine {
                 outage,
             });
         }
-        for outage in open.values() {
-            warn!(
-                check = %outage.check_id,
-                outage = outage.id,
-                "an outage is open for a check that is no longer configured; leaving it open"
-            );
-        }
-
         let mut components = BTreeMap::new();
         for (id, rule) in &plan.components {
             let members = checks
@@ -323,7 +317,118 @@ struct CheckRun {
     compiled: Arc<CompiledCheck>,
     component: Option<String>,
     confirmation: Confirmation,
-    outage: Option<i64>,
+    outage: Option<OpenOutage>,
+}
+
+/// A check's open outage, as its task tracks it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OpenOutage {
+    id: i64,
+    /// Whether opening it alerted, so whether ending it resolves.
+    alerted: bool,
+}
+
+/// Where a check's state starts.
+#[derive(Debug)]
+struct Seed {
+    confirmation: Confirmation,
+    outage: Option<OpenOutage>,
+}
+
+impl Seed {
+    fn unknown(confirm: u32) -> Seed {
+        Seed {
+            confirmation: Confirmation::new(confirm),
+            outage: None,
+        }
+    }
+}
+
+/// Seeds every check in `plan` from what `history` holds for this node, so
+/// a restart (or a reload) neither forgets a state nor repeats a change:
+///
+/// - A check with an open outage resumes in that outage's state, since it
+///   began, and the outage stays open.
+/// - Otherwise a check whose latest `up` result is recent, within
+///   [`up_window_ms`] of `now_ms`, resumes as up since its last outage ended
+///   (or its oldest stored result). Fewer than `confirm` results can have
+///   followed that one, so a confirmed state would still be up.
+/// - Any other check starts with no state.
+///
+/// Outages open for checks no longer configured are left open, with a
+/// warning.
+async fn seed_checks(
+    plan: &Plan,
+    history: &dyn History,
+    now_ms: i64,
+) -> Result<HashMap<String, Seed>, StartError> {
+    let open = history
+        .open_outages(&plan.node_id)
+        .await
+        .map_err(StartError::Outages)?;
+    let mut open: HashMap<String, Outage> = open
+        .into_iter()
+        .map(|outage| (outage.check_id.clone(), outage))
+        .collect();
+    let without_outage = plan
+        .checks
+        .iter()
+        .map(|compiled| compiled.check().id.to_string())
+        .filter(|id| !open.contains_key(id))
+        .collect();
+    let last_up: HashMap<String, LastUp> = history
+        .last_up(&plan.node_id, without_outage)
+        .await
+        .map_err(StartError::Results)?
+        .into_iter()
+        .map(|last| (last.check_id.clone(), last))
+        .collect();
+
+    let mut seeds = HashMap::with_capacity(plan.checks.len());
+    for compiled in &plan.checks {
+        let check = compiled.check();
+        let id = check.id.to_string();
+        let seed = if let Some(outage) = open.remove(&id) {
+            Seed {
+                confirmation: Confirmation::resume(
+                    check.confirm,
+                    outage.health,
+                    outage.started_at_ms,
+                ),
+                outage: Some(OpenOutage {
+                    id: outage.id,
+                    alerted: outage.alerted,
+                }),
+            }
+        } else if let Some(last) = last_up
+            .get(&id)
+            .filter(|last| now_ms.saturating_sub(last.last_up_ms) <= up_window_ms(check))
+        {
+            Seed {
+                confirmation: Confirmation::resume(check.confirm, Health::Up, last.since_ms),
+                outage: None,
+            }
+        } else {
+            Seed::unknown(check.confirm)
+        };
+        seeds.insert(id, seed);
+    }
+    for outage in open.values() {
+        warn!(
+            check = %outage.check_id,
+            outage = outage.id,
+            "an outage is open for a check that is no longer configured; leaving it open"
+        );
+    }
+    Ok(seeds)
+}
+
+/// How long after a check's latest `up` result it can still be confirmed
+/// up: the time `confirm` more results take, plus the jitter.
+fn up_window_ms(check: &Check) -> i64 {
+    let interval = check.interval.get();
+    let window = interval * check.confirm.max(1) + interval / JITTER_DIVISOR;
+    i64::try_from(window.as_millis()).unwrap_or(i64::MAX)
 }
 
 struct State {
@@ -437,69 +542,77 @@ async fn check_loop(
             outcome = probe(&shared, &run.compiled) => outcome,
             _ = stopped.changed() => return,
         };
-        let Some((outcome, started_at_ms, duration_ms)) = outcome else {
+        let Some(outcome) = outcome else {
             return;
         };
-        record(&shared, &mut run, &outcome, started_at_ms, duration_ms).await;
+        record(&shared, &mut run, &outcome).await;
     }
 }
 
-/// Waits for a free slot, then runs the probe within the check's timeout.
-/// Resolves with the outcome, its start time and its duration, or `None` if
-/// the slots have been closed.
-async fn probe(shared: &Shared, compiled: &CompiledCheck) -> Option<(ProbeOutcome, i64, i64)> {
+/// Waits for a free slot, then runs the probe, which enforces the check's
+/// timeout and stamps its own start and duration. Resolves with the
+/// outcome, or `None` if the slots have been closed.
+///
+/// A probe still running [`PROBE_BACKSTOP`] past its timeout is abandoned
+/// and logged as a bug, and the run counts as down.
+async fn probe(shared: &Shared, compiled: &CompiledCheck) -> Option<ProbeOutcome> {
     let _permit = shared.limit.acquire().await.ok()?;
     let check = compiled.check();
     let started_at_ms = shared.parts.clock.now_ms();
-    let begun = Instant::now();
-    let outcome = tokio::time::timeout(check.timeout.get(), shared.parts.runner.run(compiled))
+    let backstop = check.timeout.get() + PROBE_BACKSTOP;
+    let outcome = tokio::time::timeout(backstop, shared.parts.runner.run(compiled))
         .await
         .unwrap_or_else(|_| {
+            error!(
+                check = %check.id,
+                timeout = %check.timeout,
+                "bug: a probe ran {}s past its own timeout and was abandoned",
+                PROBE_BACKSTOP.as_secs()
+            );
             ProbeOutcome::failed(
                 check,
                 started_at_ms,
-                0,
+                u64::try_from(backstop.as_millis()).unwrap_or(u64::MAX),
                 ProbeError::new(
                     ProbeErrorKind::Timeout,
-                    format!("no result within the check's timeout of {}", check.timeout),
+                    format!(
+                        "no result within the check's timeout of {}; abandoned {}s later",
+                        check.timeout,
+                        PROBE_BACKSTOP.as_secs()
+                    ),
                 ),
             )
         });
-    let duration_ms = i64::try_from(begun.elapsed().as_millis()).unwrap_or(i64::MAX);
-    Some((outcome, started_at_ms, duration_ms))
+    Some(outcome)
 }
 
-/// Stores a result, feeds it to the check's confirmation and, on a
-/// confirmed change, updates the outage records, the shared state and the
-/// sink.
-async fn record(
-    shared: &Shared,
-    run: &mut CheckRun,
-    outcome: &ProbeOutcome,
-    started_at_ms: i64,
-    duration_ms: i64,
-) {
+/// Stores a result and feeds it to the check's confirmation. On a confirmed
+/// change it writes the outage records, and only once they are written
+/// moves the check's state, announces the change and updates the shared
+/// state. If the write fails the state stays put and the next result that
+/// continues the run tries the change again.
+async fn record(shared: &Shared, run: &mut CheckRun, outcome: &ProbeOutcome) {
     let check_id = run.compiled.check().id.to_string();
     let health = outcome.health;
+    let started_at_ms = outcome.started_at_ms;
     if let Err(error) = shared
         .parts
         .history
-        .append(new_result(
-            &shared.node_id,
-            &check_id,
-            outcome,
-            started_at_ms,
-            duration_ms,
-        ))
+        .append(new_result(&shared.node_id, &check_id, outcome))
         .await
     {
         error!(check = %check_id, %error, "storing a check result failed");
     }
 
-    let transition = run.confirmation.observe(health, started_at_ms);
-    let (ended_outage_id, opened_outage_id) = match &transition {
-        Some(transition) => update_outages(shared, run, &check_id, transition).await,
-        None => (None, None),
+    let change = match run.confirmation.observe(health, started_at_ms) {
+        Some(transition) => {
+            let change = write_change(shared, run, &check_id, &transition).await;
+            if change.is_some() {
+                run.confirmation.commit(&transition);
+            }
+            change
+        }
+        None => None,
     };
 
     let now_ms = shared.parts.clock.now_ms();
@@ -511,21 +624,10 @@ async fn record(
         });
         entry.state = run.confirmation.state();
     }
-    let Some(transition) = transition else {
+    let Some(change) = change else {
         return;
     };
-    let maintenance = state.maintenance(run.component.as_deref(), now_ms);
-    shared.emit(EngineEvent::CheckChanged(CheckChange {
-        check_id,
-        component_id: run.component.clone(),
-        from: transition.from,
-        to: transition.to,
-        since_ms: transition.since_ms,
-        confirmed_at_ms: transition.confirmed_at_ms,
-        ended_outage_id,
-        opened_outage_id,
-        maintenance,
-    }));
+    shared.emit(EngineEvent::CheckChanged(change));
     if let Some(component) = &run.component
         && let Some(change) = state.refresh(component, now_ms)
     {
@@ -533,62 +635,100 @@ async fn record(
     }
 }
 
-/// Ends the check's open outage and opens one for the new state if it is
+/// Writes the outage records for `transition` in one store transaction:
+/// ends the check's open outage, and opens one for the new state if it is
 /// degraded or down, both at the time the new state began. A move between
 /// degraded and down ends one outage and opens another, because an
-/// outage's health never changes. Resolves with the ids ended and opened.
-async fn update_outages(
+/// outage's health never changes.
+///
+/// Resolves with the change to announce, or `None` if the write failed, in
+/// which case nothing was written and the check still tracks its old
+/// outage.
+async fn write_change(
     shared: &Shared,
     run: &mut CheckRun,
     check_id: &str,
     transition: &Transition,
-) -> (Option<i64>, Option<i64>) {
-    let history = &shared.parts.history;
-    let mut ended = None;
-    if let Some(id) = run.outage {
-        match history.end_outage(id, transition.since_ms).await {
-            Ok(()) => {
-                run.outage = None;
-                ended = Some(id);
-            }
-            Err(error) => {
-                error!(check = %check_id, outage = id, %error, "ending an outage failed");
-                return (None, None);
-            }
-        }
-    }
-    if transition.to == Health::Up {
-        return (ended, None);
-    }
-    let outage = NewOutage {
-        node_id: shared.node_id.clone(),
-        check_id: check_id.to_owned(),
-        component_id: run.component.clone(),
-        health: transition.to,
-        started_at_ms: transition.since_ms,
+) -> Option<CheckChange> {
+    let maintenance = {
+        let now_ms = shared.parts.clock.now_ms();
+        shared.lock().maintenance(run.component.as_deref(), now_ms)
     };
-    match history.open_outage(outage).await {
-        Ok(id) => {
-            run.outage = Some(id);
-            (ended, Some(id))
+    let alert = alerts(transition, run.outage, maintenance);
+    let change = OutageChange {
+        end: run.outage.map(|outage| OutageEnd {
+            id: outage.id,
+            ended_at_ms: transition.since_ms,
+        }),
+        open: (transition.to != Health::Up).then(|| NewOutage {
+            node_id: shared.node_id.clone(),
+            check_id: check_id.to_owned(),
+            component_id: run.component.clone(),
+            health: transition.to,
+            started_at_ms: transition.since_ms,
+            alerted: alert,
+        }),
+    };
+    // A first state of up has no outage to end or open.
+    let written = if change.end.is_none() && change.open.is_none() {
+        Ok(None)
+    } else {
+        shared.parts.history.change_outage(change).await
+    };
+    match written {
+        Ok(opened) => {
+            let ended = run.outage.map(|outage| outage.id);
+            run.outage = opened.map(|id| OpenOutage { id, alerted: alert });
+            Some(CheckChange {
+                check_id: check_id.to_owned(),
+                component_id: run.component.clone(),
+                from: transition.from,
+                to: transition.to,
+                since_ms: transition.since_ms,
+                confirmed_at_ms: transition.confirmed_at_ms,
+                ended_outage_id: ended,
+                opened_outage_id: opened,
+                maintenance,
+                alert,
+            })
         }
         Err(error) => {
-            error!(check = %check_id, %error, "opening an outage failed");
-            (ended, None)
+            error!(
+                check = %check_id,
+                from = ?transition.from,
+                to = %transition.to,
+                %error,
+                "recording a state change failed; the check keeps its old state and the next \
+                 result that confirms the change retries it"
+            );
+            None
         }
+    }
+}
+
+/// Whether alerting notifies about `transition`, given the outage it ends,
+/// so that every alert gets exactly one resolve:
+///
+/// - Leaving up, or a first state that is not up, alerts unless a
+///   maintenance window covers the check.
+/// - Moving between degraded and down alerts if the outage it ends alerted,
+///   so that alert is updated rather than left behind, or else unless a
+///   window covers the check.
+/// - Returning to up resolves exactly when the outage it ends alerted,
+///   whatever window is active now.
+/// - A first state of up alerts nothing.
+fn alerts(transition: &Transition, ending: Option<OpenOutage>, maintenance: bool) -> bool {
+    let ending_alerted = ending.is_some_and(|outage| outage.alerted);
+    match transition.to {
+        Health::Up => ending_alerted,
+        Health::Degraded | Health::Down => ending_alerted || !maintenance,
     }
 }
 
 /// The stored form of a result: assertion verdicts as the detail, the
 /// probe error's message as the error, and the HTTP status if there was
 /// one.
-fn new_result(
-    node_id: &str,
-    check_id: &str,
-    outcome: &ProbeOutcome,
-    started_at_ms: i64,
-    duration_ms: i64,
-) -> NewCheckResult {
+fn new_result(node_id: &str, check_id: &str, outcome: &ProbeOutcome) -> NewCheckResult {
     let detail = if outcome.assertions.is_empty() {
         None
     } else {
@@ -607,8 +747,8 @@ fn new_result(
     NewCheckResult {
         node_id: node_id.to_owned(),
         check_id: check_id.to_owned(),
-        started_at_ms,
-        duration_ms,
+        started_at_ms: outcome.started_at_ms,
+        duration_ms: i64::try_from(outcome.duration_ms).unwrap_or(i64::MAX),
         health: outcome.health,
         detail,
         error: outcome.error.as_ref().map(|error| error.message.clone()),

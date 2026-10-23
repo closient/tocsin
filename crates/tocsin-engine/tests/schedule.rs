@@ -222,7 +222,7 @@ async fn maintenance_records_changes_but_suppresses_alerts() {
     assert_eq!(
         changes,
         [
-            (None, Up, at(jitter), false, true),
+            (None, Up, at(jitter), false, false),
             (Some(Up), Down, at(first_down), true, false),
         ],
         "the change inside the window is emitted, marked as maintenance"
@@ -377,7 +377,7 @@ async fn no_more_than_max_concurrent_checks_run_at_once() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_probe_past_its_timeout_is_down() {
+async fn a_probe_that_never_returns_is_abandoned_as_down() {
     let runner = FakeRunner::new(Duration::ZERO, |_, index, _| {
         if index == 0 {
             Step::Hang
@@ -399,7 +399,10 @@ async fn a_probe_past_its_timeout_is_down() {
     let results = history.results.lock().unwrap();
     assert_eq!(results.len(), 2, "the hung run ends and the next one runs");
     assert_eq!(results[0].health, Down);
-    assert_eq!(results[0].duration_ms, 10_000);
+    assert_eq!(
+        results[0].duration_ms, 15_000,
+        "abandoned only well past the probe's own 10s timeout"
+    );
     let error = results[0].error.as_deref().unwrap_or_default();
     assert!(error.contains("timeout"), "{error}");
     assert_eq!(results[1].health, Up);
@@ -416,6 +419,7 @@ async fn an_open_outage_resumes_after_a_restart() {
         health: Down,
         started_at_ms: T0 - 60_000,
         ended_at_ms: None,
+        alerted: true,
     };
     history
         .outages
@@ -447,6 +451,281 @@ async fn an_open_outage_resumes_after_a_restart() {
         [
             ("api".to_owned(), Down, T0 - 60_000, Some(ended)),
             ("removed".to_owned(), Down, T0 - 60_000, None),
+        ]
+    );
+}
+
+/// A runner reporting `script[n]` on a check's `n`th run (the last entry
+/// after that), however many engines it serves.
+fn scripted(script: &'static [Health]) -> Arc<FakeRunner> {
+    FakeRunner::new(Duration::ZERO, move |_, index, _| {
+        Step::Report(script[index.min(script.len() - 1)])
+    })
+}
+
+/// A maintenance window on `api` from `starts` to `ends` after [`T0`].
+fn api_window(starts: Duration, ends: Duration) -> Arc<FakeNotices> {
+    FakeNotices::new(vec![Notice::Maintenance {
+        components: vec!["api".into()],
+        starts_at_ms: at(starts),
+        ends_at_ms: at(ends),
+    }])
+}
+
+/// `(from, to, maintenance, alerts)` for every check change.
+fn alerts(events: &common::Events) -> Vec<(Option<Health>, Health, bool, bool)> {
+    events
+        .checks()
+        .iter()
+        .map(|c| (c.from, c.to, c.maintenance, c.alerts()))
+        .collect()
+}
+
+/// Runs the `api` check (every minute, confirming at once) with `notices`
+/// for `minutes`.
+async fn run_api(
+    runner: &Arc<FakeRunner>,
+    history: &Arc<FakeHistory>,
+    notices: &Arc<FakeNotices>,
+    minutes: u32,
+) -> Arc<common::Events> {
+    let events = common::Events::new();
+    let toml = component("api", "worst") + &check("api", Some("api"), 60, 1);
+    let engine = Engine::start(plan(&toml), parts(runner, history, notices, &events))
+        .await
+        .expect("the engine starts");
+    tokio::time::sleep(MINUTE * minutes).await;
+    engine.shutdown().await;
+    events
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_alert_raised_before_a_window_resolves_inside_it() {
+    let jitter = jitter("api", MINUTE);
+    // Down at jitter + 1m, outside the window; up at jitter + 2m, inside.
+    let notices = api_window(jitter + MINUTE * 3 / 2, jitter + MINUTE * 10);
+    let history = FakeHistory::new();
+    let events = run_api(&scripted(&[Up, Down, Up]), &history, &notices, 3).await;
+
+    assert_eq!(
+        alerts(&events),
+        [
+            (None, Up, false, false),
+            (Some(Up), Down, false, true),
+            (Some(Down), Up, true, true),
+        ],
+        "the resolve pairs with the alert, though a window is active by then"
+    );
+    assert_eq!(history.alerted(), [("api".to_owned(), Down, true)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_outage_silenced_by_a_window_does_not_resolve_after_it() {
+    let jitter = jitter("api", MINUTE);
+    // Down at jitter + 1m, inside the window; up at jitter + 2m, after it.
+    let notices = api_window(jitter + MINUTE / 2, jitter + MINUTE * 3 / 2);
+    let history = FakeHistory::new();
+    let events = run_api(&scripted(&[Up, Down, Up]), &history, &notices, 3).await;
+
+    assert_eq!(
+        alerts(&events),
+        [
+            (None, Up, false, false),
+            (Some(Up), Down, true, false),
+            (Some(Down), Up, false, false),
+        ],
+        "no resolve for an alert never raised, though the window is over"
+    );
+    assert_eq!(history.alerted(), [("api".to_owned(), Down, false)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn moving_between_degraded_and_down_keeps_an_alert_paired() {
+    static SCRIPT: [Health; 9] = [Up, Down, Degraded, Up, Up, Down, Down, Degraded, Up];
+    let jitter = jitter("api", MINUTE);
+    // Down at +1m outside the window, degraded at +2m and up at +3m inside
+    // it; then down at +5m inside it, and degraded at +7m after it.
+    let notices = api_window(jitter + MINUTE * 3 / 2, jitter + MINUTE * 13 / 2);
+    let history = FakeHistory::new();
+    let events = run_api(&scripted(&SCRIPT), &history, &notices, 9).await;
+
+    assert_eq!(
+        alerts(&events),
+        [
+            (None, Up, false, false),
+            (Some(Up), Down, false, true),
+            (Some(Down), Degraded, true, true),
+            (Some(Degraded), Up, true, true),
+            (Some(Up), Down, true, false),
+            (Some(Down), Degraded, false, true),
+            (Some(Degraded), Up, false, true),
+        ],
+        "an alert raised outside a window is carried through it; one \
+         silenced by a window is raised when it ends unresolved"
+    );
+    assert_eq!(
+        history.alerted(),
+        [
+            ("api".to_owned(), Down, true),
+            ("api".to_owned(), Degraded, true),
+            ("api".to_owned(), Down, false),
+            ("api".to_owned(), Degraded, true),
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn whether_an_outage_alerted_survives_a_restart() {
+    let runner = scripted(&[Up, Down, Up]);
+    let history = FakeHistory::new();
+    // Down at jitter + 1m with no window; the engine stops at 2m.
+    let first = run_api(&runner, &history, &FakeNotices::new(Vec::new()), 2).await;
+    assert_eq!(
+        alerts(&first),
+        [(None, Up, false, false), (Some(Up), Down, false, true)]
+    );
+
+    // Restarted inside a window, the check recovers: the stored alert
+    // still gets its resolve.
+    let notices = api_window(MINUTE * 2, MINUTE * 10);
+    let second = run_api(&runner, &history, &notices, 2).await;
+    assert_eq!(alerts(&second), [(Some(Down), Up, true, true)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_change_leaves_the_state_and_the_next_result_retries_it() {
+    let jitter = jitter("api", MINUTE);
+    let runner = scripted(&[Up, Up, Down, Down, Down]);
+    let history = FakeHistory::new();
+    let events = common::Events::new();
+    let toml = component("api", "worst") + &check("api", Some("api"), 60, 2);
+    let engine = Engine::start(
+        plan(&toml),
+        parts(&runner, &history, &FakeNotices::new(Vec::new()), &events),
+    )
+    .await
+    .unwrap();
+
+    // Up confirms with the second result, at jitter + 1m.
+    tokio::time::sleep(jitter + MINUTE * 3 / 2).await;
+    assert_eq!(
+        engine.snapshot().checks[0].state.map(|s| s.health),
+        Some(Up)
+    );
+    history.fail_changes(1);
+    // The second down, at jitter + 3m, confirms down; recording it fails.
+    tokio::time::sleep(MINUTE * 2).await;
+    let state = engine.snapshot().checks[0].state.expect("a state");
+    assert_eq!(
+        state.health, Up,
+        "a change that was not recorded did not happen"
+    );
+    assert_eq!(history.outages(), []);
+    // The third down, one more agreeing result, records the change.
+    tokio::time::sleep(MINUTE).await;
+    engine.shutdown().await;
+
+    let changes: Vec<_> = events
+        .checks()
+        .iter()
+        .map(|c| (c.from, c.to, c.since_ms, c.confirmed_at_ms))
+        .collect();
+    let first_down = at(jitter + MINUTE * 2);
+    assert_eq!(
+        changes,
+        [
+            (None, Up, at(jitter), at(jitter + MINUTE)),
+            (Some(Up), Down, first_down, at(jitter + MINUTE * 4)),
+        ],
+        "one event, once the change is written, since the run's first result"
+    );
+    assert_eq!(
+        history.outages(),
+        [("api".to_owned(), Down, first_down, None)]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restart_resumes_up_checks_without_events() {
+    let jitter = jitter("api", MINUTE);
+    let runner = FakeRunner::always(Up);
+    let history = FakeHistory::new();
+    let first = run_api(&runner, &history, &FakeNotices::new(Vec::new()), 3).await;
+    assert_eq!(alerts(&first), [(None, Up, false, false)]);
+
+    let events = common::Events::new();
+    let toml = component("api", "worst") + &check("api", Some("api"), 60, 1);
+    let engine = Engine::start(
+        plan(&toml),
+        parts(&runner, &history, &FakeNotices::new(Vec::new()), &events),
+    )
+    .await
+    .unwrap();
+    let snapshot = engine.snapshot();
+    let state = snapshot.checks[0].state.expect("seeded");
+    assert_eq!((state.health, state.since_ms), (Up, at(jitter)));
+    assert_eq!(snapshot.components[0].status, ComponentStatus::Operational);
+    tokio::time::sleep(MINUTE * 3).await;
+    engine.shutdown().await;
+    assert_eq!(
+        events.0.lock().unwrap().len(),
+        0,
+        "seeding and agreeing results emit nothing"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restart_long_after_the_last_up_result_starts_unknown() {
+    let runner = FakeRunner::always(Up);
+    let history = FakeHistory::new();
+    run_api(&runner, &history, &FakeNotices::new(Vec::new()), 1).await;
+    // Longer than one more confirming result plus jitter would take.
+    tokio::time::sleep(MINUTE * 2).await;
+
+    let events = common::Events::new();
+    let toml = component("api", "worst") + &check("api", Some("api"), 60, 1);
+    let engine = Engine::start(
+        plan(&toml),
+        parts(&runner, &history, &FakeNotices::new(Vec::new()), &events),
+    )
+    .await
+    .unwrap();
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.checks[0].state, None);
+    assert_eq!(snapshot.components[0].status, ComponentStatus::Unknown);
+    engine.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_component_with_no_checks_is_unknown() {
+    let runner = FakeRunner::always(Up);
+    let toml = component("api", "worst")
+        + &component("empty", "worst")
+        + &check("api", Some("api"), 60, 1);
+    let engine = Engine::start(
+        plan(&toml),
+        parts(
+            &runner,
+            &FakeHistory::new(),
+            &FakeNotices::new(Vec::new()),
+            &common::Events::new(),
+        ),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(MINUTE).await;
+    let snapshot = engine.snapshot();
+    engine.shutdown().await;
+    let statuses: Vec<_> = snapshot
+        .components
+        .iter()
+        .map(|c| (c.id.as_str(), c.health, c.status))
+        .collect();
+    assert_eq!(
+        statuses,
+        [
+            ("api", Some(Up), ComponentStatus::Operational),
+            ("empty", None, ComponentStatus::Unknown),
         ]
     );
 }

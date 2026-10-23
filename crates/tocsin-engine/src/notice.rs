@@ -4,7 +4,8 @@
 //! components they name, and for maintenance, when.
 
 use tocsin_core::Health;
-use tocsin_core::incident::{Impact, Incident, IncidentKind};
+use tocsin_core::incident::{Impact, IncidentKind};
+use tocsin_store::OpenIncident;
 
 /// An open incident or a maintenance window that has not completed, as read
 /// through [`crate::ports::Notices`].
@@ -30,18 +31,15 @@ pub enum Notice {
 }
 
 impl Notice {
-    /// What `incident` means to the engine, or `None` once it is resolved
-    /// or completed.
+    /// What an open `incident` means to the engine. The store only returns
+    /// incidents not yet resolved and maintenance not yet completed.
     ///
     /// A maintenance window is its schedule: active from `scheduled_start`
     /// until `scheduled_end`, whatever its status says, except that marking
     /// it completed ends it at once. Maintenance without a schedule (the
     /// API refuses one) is ignored.
     #[must_use]
-    pub fn from_incident(incident: &Incident) -> Option<Notice> {
-        if incident.status.is_terminal() {
-            return None;
-        }
+    pub fn from_open(incident: &OpenIncident) -> Option<Notice> {
         let components = incident.components.clone();
         match incident.kind {
             IncidentKind::Incident => Some(Notice::Incident {
@@ -128,7 +126,7 @@ pub(crate) fn next_boundary(notices: &[Notice], now_ms: i64) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use tocsin_core::incident::{Actor, IncidentStatus, Timestamp};
+    use tocsin_core::incident::Timestamp;
 
     use super::*;
 
@@ -181,24 +179,16 @@ mod tests {
         assert_eq!(incident_impact(&notices, "db"), None);
     }
 
-    fn incident(kind: IncidentKind, impact: Impact, status: IncidentStatus) -> Incident {
+    fn incident(kind: IncidentKind, impact: Impact) -> OpenIncident {
         let at = Timestamp::from_millis;
         let maintenance = kind == IncidentKind::Maintenance;
-        Incident {
+        OpenIncident {
             id: 1,
             kind,
-            title: "Title".into(),
             impact,
-            status,
             components: vec!["api".into()],
             scheduled_start: maintenance.then(|| at(100)),
             scheduled_end: maintenance.then(|| at(200)),
-            resolved_at: status.is_terminal().then(|| at(150)),
-            created_at: at(0),
-            created_by: Actor::token("ci"),
-            updated_at: at(0),
-            updated_by: Actor::token("ci"),
-            updates: Vec::new(),
         }
     }
 
@@ -213,33 +203,24 @@ mod tests {
 
     #[test]
     fn open_incidents_and_maintenance_become_notices() {
-        let open = incident(
-            IncidentKind::Incident,
-            Impact::Minor,
-            IncidentStatus::Monitoring,
-        );
+        let open = incident(IncidentKind::Incident, Impact::Minor);
         assert_eq!(
-            Notice::from_incident(&open),
+            Notice::from_open(&open),
             Some(Notice::Incident {
                 components: vec!["api".into()],
                 impact: Health::Degraded,
             })
         );
-        // Started early by its status or not, a window is its schedule.
-        for status in [IncidentStatus::Scheduled, IncidentStatus::InProgress] {
-            let planned = incident(IncidentKind::Maintenance, Impact::None, status);
-            assert_eq!(Notice::from_incident(&planned), Some(window(100, 200)));
-        }
+        let planned = incident(IncidentKind::Maintenance, Impact::None);
+        assert_eq!(Notice::from_open(&planned), Some(window(100, 200)));
     }
 
     #[test]
-    fn resolved_and_completed_ones_do_not() {
-        for (kind, status) in [
-            (IncidentKind::Incident, IncidentStatus::Resolved),
-            (IncidentKind::Maintenance, IncidentStatus::Completed),
-        ] {
-            let over = incident(kind, Impact::Critical, status);
-            assert_eq!(Notice::from_incident(&over), None);
-        }
+    fn maintenance_without_a_schedule_is_ignored() {
+        let unscheduled = OpenIncident {
+            scheduled_end: None,
+            ..incident(IncidentKind::Maintenance, Impact::None)
+        };
+        assert_eq!(Notice::from_open(&unscheduled), None);
     }
 }

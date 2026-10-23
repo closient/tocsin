@@ -1306,7 +1306,7 @@
           "default": 64,
           "description": "The most checks that may run at once across the node. Checks due\nwhile the limit is reached wait for a free slot.",
           "format": "uint32",
-          "minimum": 0,
+          "minimum": 1,
           "type": "integer"
         },
         "node_id": {

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use tocsin_core::config::{CheckType, Config};
+use tocsin_core::config::Config;
 use tocsin_engine::ports::{ProbeRunner, SystemClock};
 use tocsin_engine::{Engine, Parts, Plan};
 use tocsin_probe::ProbeContext;
@@ -177,7 +177,7 @@ impl Monitor {
             )
         })?;
         let parts = Parts {
-            runner: Arc::new(ProbeRunner::new(probe_context(config)?)),
+            runner: Arc::new(ProbeRunner::new(probe_context(config))),
             history: Arc::clone(store) as _,
             notices: Arc::clone(store) as _,
             sink: Arc::new(events.clone()),
@@ -206,21 +206,30 @@ impl Monitor {
 }
 
 /// The root certificates HTTP and TLS checks verify against. Without a
-/// system root store only those checks are impossible, so the others still
-/// run.
-fn probe_context(config: &Config) -> Result<ProbeContext, Failure> {
-    match ProbeContext::system() {
-        Ok(context) => Ok(context),
-        Err(error)
-            if config
-                .checks
-                .iter()
-                .any(|check| matches!(check.check_type, CheckType::Http | CheckType::Tls)) =>
-        {
-            Err(Failure::new(Exit::Runtime, error.message))
-        }
-        Err(_) => Ok(ProbeContext::with_roots(rustls::RootCertStore::empty())),
+/// system root store those checks cannot run: serve keeps running, each of
+/// them is recorded down with a setup error, and this says so once, loudly,
+/// at startup.
+fn probe_context(config: &Config) -> ProbeContext {
+    let context = ProbeContext::system_or_without_roots();
+    let blocked: Vec<&str> = config
+        .checks
+        .iter()
+        .filter(|check| context.cannot_run(check).is_some())
+        .map(|check| check.id.as_str())
+        .collect();
+    if let Some(error) = config
+        .checks
+        .iter()
+        .find_map(|check| context.cannot_run(check))
+    {
+        tracing::error!(
+            checks = ?blocked,
+            "{}; these checks cannot run and will be recorded down until root \
+             certificates are installed and tocsin is restarted",
+            error.message
+        );
     }
+    context
 }
 
 /// Waits for `shutdown` or for the server to end on its own, then stops
@@ -535,9 +544,11 @@ mod tests {
         .await
         .expect("the write woke the engine");
         assert_eq!(change.component_id, "api");
+        // A component with no checks has no health of its own, so it starts
+        // unknown and the incident alone sets it.
         assert_eq!(
             (change.from, change.to),
-            (ComponentStatus::Operational, ComponentStatus::Down)
+            (ComponentStatus::Unknown, ComponentStatus::Down)
         );
 
         monitor.stop().await;

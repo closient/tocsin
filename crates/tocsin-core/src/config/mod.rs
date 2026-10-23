@@ -141,6 +141,7 @@ pub struct Server {
     /// The most checks that may run at once across the node. Checks due
     /// while the limit is reached wait for a free slot.
     #[serde(default = "default_max_concurrent_checks")]
+    #[schemars(range(min = 1))]
     pub max_concurrent_checks: u32,
     /// Sender settings for every email tocsin sends.
     #[serde(default, skip_serializing_if = "Option::is_none")]

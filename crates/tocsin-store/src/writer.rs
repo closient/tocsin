@@ -14,7 +14,7 @@ use rusqlite::{Connection, TransactionBehavior, params};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{Error, Result};
-use crate::{NewCheckResult, NewOutage};
+use crate::{NewCheckResult, OutageChange};
 
 /// Queued writes beyond this make callers wait (backpressure).
 const QUEUE_DEPTH: usize = 1024;
@@ -25,8 +25,7 @@ const MAX_BATCH: usize = 256;
 /// A small row write. Consecutive queued inserts share one transaction.
 pub(crate) enum Insert {
     CheckResult(NewCheckResult),
-    OpenOutage(NewOutage),
-    EndOutage { id: i64, ended_at_ms: i64 },
+    ChangeOutage(OutageChange),
 }
 
 /// Any other write; it runs alone and replies through its own channel.
@@ -51,8 +50,9 @@ impl Writer {
         Ok(Writer { sender, thread })
     }
 
-    /// Queues an insert; resolves with the new (or, for `EndOutage`, the
-    /// updated) row id once its transaction has committed.
+    /// Queues an insert; resolves with the new row id (for a
+    /// `ChangeOutage` that only ends one, the ended outage's) once its
+    /// transaction has committed.
     pub(crate) async fn insert(&self, insert: Insert) -> Result<i64> {
         let (reply, receive) = oneshot::channel();
         self.sender
@@ -210,28 +210,35 @@ fn apply(conn: &Connection, insert: &Insert) -> rusqlite::Result<i64> {
             ])?;
             Ok(conn.last_insert_rowid())
         }
-        Insert::OpenOutage(outage) => {
-            conn.prepare_cached(
-                "INSERT INTO outage (node_id, check_id, component_id, health, started_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-            )?
-            .execute(params![
-                outage.node_id,
-                outage.check_id,
-                outage.component_id,
-                outage.health.as_str(),
-                outage.started_at_ms,
-            ])?;
-            Ok(conn.last_insert_rowid())
-        }
-        Insert::EndOutage { id, ended_at_ms } => {
-            let changed = conn
-                .prepare_cached("UPDATE outage SET ended_at = ?2 WHERE id = ?1")?
-                .execute(params![id, ended_at_ms])?;
-            if changed == 0 {
-                return Err(rusqlite::Error::QueryReturnedNoRows);
+        // Both halves run under the insert's savepoint: either fails and
+        // neither is kept.
+        Insert::ChangeOutage(change) => {
+            let mut id = 0;
+            if let Some(end) = &change.end {
+                let changed = conn
+                    .prepare_cached("UPDATE outage SET ended_at = ?2 WHERE id = ?1")?
+                    .execute(params![end.id, end.ended_at_ms])?;
+                if changed == 0 {
+                    return Err(rusqlite::Error::QueryReturnedNoRows);
+                }
+                id = end.id;
             }
-            Ok(*id)
+            if let Some(outage) = &change.open {
+                conn.prepare_cached(
+                    "INSERT INTO outage (node_id, check_id, component_id, health, started_at, alerted)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                )?
+                .execute(params![
+                    outage.node_id,
+                    outage.check_id,
+                    outage.component_id,
+                    outage.health.as_str(),
+                    outage.started_at_ms,
+                    outage.alerted,
+                ])?;
+                id = conn.last_insert_rowid();
+            }
+            Ok(id)
         }
     }
 }

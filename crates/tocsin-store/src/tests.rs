@@ -1193,6 +1193,38 @@ fn retention_that_waits_out_its_cap_warns_and_carries_on() {
     assert!(warnings[0].contains("waited=5"), "{warnings:?}");
 }
 
+/// A wait that a pass ends before the cap logs nothing.
+#[test]
+fn retention_that_a_pass_lets_through_does_not_warn() {
+    let logs = Captured::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (waited, stats) = logs.run(|| {
+        runtime.block_on(async {
+            let (_dir, store) = open();
+            let day: Day = "2026-10-01".parse().unwrap();
+            let holder = CheckpointHolder::hold(store.path());
+            old_results_until(&store, day, soft_limit_frames() + 200).await;
+            let release = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                holder.join();
+            });
+            let started = Instant::now();
+            store.checkpointer.make_room().await;
+            let waited = started.elapsed();
+            release.join().unwrap();
+            (waited, store.checkpoint_stats())
+        })
+    });
+    assert!(waited >= Duration::from_millis(200), "{waited:?}");
+    assert!(waited < checkpoint::PACE_WAIT, "{waited:?}");
+    assert_eq!(stats.paced_writes, 1, "{stats:?}");
+    let warnings = logs.at(tracing::Level::WARN);
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
 /// Below the soft limit retention never waits for the checkpointer.
 #[tokio::test]
 async fn retention_below_the_soft_limit_does_not_wait() {

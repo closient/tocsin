@@ -23,6 +23,11 @@ publish-jobs = ["./publish-image"]
 # Records the release in tocsin's own release log (.github/workflows/record-release.yml).
 post-announce-jobs = ["./record-release"]
 
+# The image job reads the repository and pushes to GHCR; without this dist
+# grants only id-token and packages, and the called workflow cannot start.
+[dist.github-custom-job-permissions]
+"publish-image" = { contents = "read", packages = "write" }
+
 # Native arm64 runners: no cross toolchain, and the same runner the test
 # job uses.
 [dist.github-custom-runners]

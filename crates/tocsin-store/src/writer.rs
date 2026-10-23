@@ -47,7 +47,7 @@ impl Writer {
         let (sender, receiver) = mpsc::channel(QUEUE_DEPTH);
         let thread = std::thread::Builder::new()
             .name("tocsin-store-writer".into())
-            .spawn(move || run(conn, receiver, nudge))?;
+            .spawn(move || run(Session { conn, nudge }, receiver))?;
         Ok(Writer { sender, thread })
     }
 
@@ -82,6 +82,13 @@ impl Writer {
         receive.await.map_err(|_| Error::Closed)?
     }
 
+    /// Runs `job` on the writer thread with no guard, so a panic in it ends
+    /// the thread.
+    #[cfg(test)]
+    pub(crate) async fn run_unguarded(&self, job: impl FnOnce(&mut Connection) + Send + 'static) {
+        let _ = self.sender.send(Command::Run(Box::new(job))).await;
+    }
+
     /// Stops taking work, lets the queue drain and returns the thread, which
     /// finishes once the connection is closed.
     pub(crate) fn close(self) -> JoinHandle<()> {
@@ -90,14 +97,26 @@ impl Writer {
     }
 }
 
-fn run(mut conn: Connection, mut receiver: mpsc::Receiver<Command>, mut nudge: Nudge) {
+/// The writer thread's connection and its nudge. Only the last connection
+/// to close checkpoints and removes the log, and the checkpointer closes its
+/// own once the nudge is gone, so the connection must close first or the two
+/// can close together and both leave the log behind. Fields drop in
+/// declaration order, on return and on unwind alike.
+struct Session {
+    conn: Connection,
+    nudge: Nudge,
+}
+
+fn run(mut session: Session, mut receiver: mpsc::Receiver<Command>) {
+    // Kept whole, not destructured, so the field order decides the drops.
+    let Session { conn, nudge } = &mut session;
     let mut next = None;
     loop {
         let Some(command) = next.take().or_else(|| receiver.blocking_recv()) else {
             break;
         };
         match command {
-            Command::Run(job) => job(&mut conn),
+            Command::Run(job) => job(conn),
             Command::Insert(insert, reply) => {
                 let mut batch = vec![(insert, reply)];
                 while batch.len() < MAX_BATCH {
@@ -111,19 +130,14 @@ fn run(mut conn: Connection, mut receiver: mpsc::Receiver<Command>, mut nudge: N
                     }
                 }
                 let (inserts, replies): (Vec<_>, Vec<_>) = batch.into_iter().unzip();
-                let outcomes = commit_batch(&mut conn, &inserts);
+                let outcomes = commit_batch(conn, &inserts);
                 for (reply, outcome) in replies.into_iter().zip(outcomes) {
                     let _ = reply.send(outcome);
                 }
             }
         }
-        nudge.after_write(&conn);
+        nudge.after_write(conn);
     }
-    // Only the last connection to close checkpoints and removes the log, and
-    // the checkpointer closes its own once the nudge is gone: close this one
-    // first so the two never close together and both leave the log behind.
-    drop(conn);
-    drop(nudge);
 }
 
 /// Runs `write`, turning a panic into [`Error::WriterPanicked`] after

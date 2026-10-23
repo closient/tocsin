@@ -29,6 +29,12 @@ pub enum Error {
     /// A write panicked; its transaction was rolled back and the writer
     /// carried on.
     WriterPanicked,
+    /// The writer thread itself panicked, outside any one write, while the
+    /// store was closing.
+    WriterThreadPanicked,
+    /// The checkpointer thread panicked. Writes went on, checkpointing the
+    /// log themselves, but the panic is a bug.
+    CheckpointerPanicked,
     /// A check result starts more than [`crate::FUTURE_TOLERANCE`] after
     /// now, too far to be clock skew between nodes; storing it would give a
     /// day that has not happened a rollup.
@@ -61,6 +67,8 @@ impl fmt::Display for Error {
             Error::Closed => f.write_str("the store is closed"),
             Error::ReaderPanicked => f.write_str("a database read panicked"),
             Error::WriterPanicked => f.write_str("a database write panicked and was rolled back"),
+            Error::WriterThreadPanicked => f.write_str("the database writer thread panicked"),
+            Error::CheckpointerPanicked => f.write_str("the database checkpointer thread panicked"),
             Error::FutureResult {
                 started_at_ms,
                 now_ms,

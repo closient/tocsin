@@ -609,7 +609,8 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// The writer or checkpointer thread panicked.
+    /// The writer thread ([`Error::WriterThreadPanicked`]) or the
+    /// checkpointer thread ([`Error::CheckpointerPanicked`]) panicked.
     pub async fn close(self) -> Result<()> {
         let Store {
             writer,
@@ -621,11 +622,19 @@ impl Store {
         let thread = writer.close();
         // The writer thread's end stops the checkpointer, whose connection
         // closes last and so checkpoints and removes the log.
-        tokio::task::spawn_blocking(move || thread.join().and_then(|()| checkpointer.join()))
+        tokio::task::spawn_blocking(move || join(thread, checkpointer))
             .await
             .map_err(|_| Error::Closed)?
-            .map_err(|_| Error::Closed)
     }
+}
+
+/// Waits for the writer thread, then the checkpointer, and names the first
+/// that panicked.
+fn join(writer: std::thread::JoinHandle<()>, checkpointer: Checkpointer) -> Result<()> {
+    let writer = writer.join();
+    let checkpointer = checkpointer.join();
+    writer.map_err(|_| Error::WriterThreadPanicked)?;
+    checkpointer.map_err(|_| Error::CheckpointerPanicked)
 }
 
 /// The current time as unix milliseconds, UTC.

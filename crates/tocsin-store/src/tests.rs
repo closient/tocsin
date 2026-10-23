@@ -11,7 +11,7 @@ use tocsin_core::incident::{
     Actor, Impact, Incident, IncidentKind, IncidentStatus, NewIncident, NewUpdate, Timestamp,
 };
 
-use crate::checkpoint::Nudge;
+use crate::checkpoint::{self, Checkpointer, Nudge};
 use crate::writer::Writer;
 use crate::{DB_FILE, Day, Error, NewCheckResult, Retention, Store, now_ms, schema};
 
@@ -490,4 +490,175 @@ async fn without_a_checkpointer_writes_checkpoint_again() {
         "the log was not checkpointed by the write"
     );
     writer.close().join().unwrap();
+}
+
+fn log_bytes(path: &Path) -> u64 {
+    let mut log = path.as_os_str().to_owned();
+    log.push("-wal");
+    std::fs::metadata(log).map_or(0, |metadata| metadata.len())
+}
+
+/// Copies the whole log into the database file and empties it, from a
+/// connection of the test's own.
+fn empty_log(path: &Path) {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .unwrap();
+}
+
+/// Writes that never pause race every checkpoint the checkpointer runs, so
+/// none of them leaves the whole log copied and SQLite never rewinds it.
+/// Once the log reaches its limit the writer copies the rest itself, which
+/// keeps the log file under twice the limit however long the writes go on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_log_stays_bounded_under_writes_that_never_pause() {
+    let (dir, store) = open();
+    let path = dir.path().join(DB_FILE);
+    let bound = 2 * u64::try_from(checkpoint::LOG_LIMIT_BYTES).unwrap();
+    let limit_frames = u64::try_from(checkpoint::LOG_LIMIT_FRAMES).unwrap();
+    let mut largest = 0;
+    let mut appended = 0;
+    while appended < 4 * limit_frames {
+        appended = store
+            .writer
+            .run(|conn| {
+                conn.execute(
+                    "INSERT INTO check_result (node_id, check_id, started_at, duration_ms, health, error)
+                     VALUES ('node-a', 'steady', 1, 1, 'up', hex(randomblob(1500)))",
+                    [],
+                )?;
+                Ok(checkpoint::appended())
+            })
+            .await
+            .unwrap();
+        largest = largest.max(log_bytes(&path));
+    }
+    assert!(
+        largest < bound,
+        "the log file reached {largest} bytes, over {bound}"
+    );
+    store.close().await.unwrap();
+}
+
+/// A few small writes stay in the log: the checkpointer waits for a
+/// threshold's worth of frames (or a minute) rather than copying each one.
+#[tokio::test]
+async fn small_writes_wait_for_the_threshold() {
+    let (dir, store) = open();
+    let path = dir.path().join(DB_FILE);
+    empty_log(&path);
+    // Small writes change pages the file already has, so it is the contents
+    // a checkpoint changes, not the size.
+    let before = std::fs::read(&path).unwrap();
+    for _ in 0..20 {
+        store.append(result("small")).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        std::fs::read(&path).unwrap() == before,
+        "a few small writes were checkpointed"
+    );
+    assert!(log_bytes(&path) > 0);
+    store.close().await.unwrap();
+}
+
+/// A checkpoint a reader held back is tried again once the reader is done,
+/// without waiting for another write.
+#[tokio::test]
+async fn a_checkpoint_a_reader_held_back_is_retried_without_writes() {
+    let (dir, store) = open();
+    let path = dir.path().join(DB_FILE);
+    empty_log(&path);
+    let reader = rusqlite::Connection::open(&path).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT count(*) FROM check_result", [], |row| row.get(0))
+        .unwrap();
+    let before = database_bytes(&path);
+    fill_log(&store.writer).await;
+    // Long enough for the checkpointer to have tried while the read is open.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        database_bytes(&path),
+        before,
+        "the log was copied past an open read"
+    );
+    reader.execute_batch("COMMIT").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while database_bytes(&path) == before {
+        assert!(
+            Instant::now() < deadline,
+            "the held-back checkpoint was not retried within 5s"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    store.close().await.unwrap();
+}
+
+/// A panic that ends the writer thread still closes its connection before
+/// it lets go of the checkpointer, so the checkpointer's connection closes
+/// last and removes the log. With no checkpointer connection here, the
+/// writer's own close removes the log, so the log must be gone by the time
+/// the checkpointer's end of the channel sees the writer go.
+#[tokio::test]
+async fn a_writer_thread_panic_closes_its_connection_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join(format!("{DB_FILE}-wal"));
+    let (nudge, nudges) = Nudge::detached();
+    let writer = Writer::spawn(
+        schema::open_writer(&dir.path().join(DB_FILE)).unwrap(),
+        nudge,
+    )
+    .unwrap();
+    fill_log(&writer).await;
+    let watcher = {
+        let log = log.clone();
+        std::thread::spawn(move || {
+            while nudges.recv().is_ok() {}
+            log.exists()
+        })
+    };
+    writer
+        .run_unguarded(|_| panic!("a bug outside any one write"))
+        .await;
+    assert!(writer.close().join().is_err());
+    assert!(
+        !watcher.join().unwrap(),
+        "the writer let go of the checkpointer before closing its connection"
+    );
+}
+
+/// A checkpointer panic is a bug, so closing fails, naming the thread.
+#[test]
+fn a_checkpointer_panic_fails_close_by_name() {
+    let writer = std::thread::spawn(|| {});
+    assert!(matches!(
+        crate::join(writer, Checkpointer::panicked()),
+        Err(Error::CheckpointerPanicked)
+    ));
+}
+
+/// The checkpointer's connection checkpoints but cannot write.
+#[test]
+fn the_checkpointer_connection_refuses_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(DB_FILE);
+    drop(schema::open_writer(&path).unwrap());
+    let conn = schema::open_checkpointer(&path).unwrap();
+    let busy: bool = conn
+        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| row.get(0))
+        .unwrap();
+    assert!(!busy);
+    let error = conn
+        .execute(
+            "INSERT INTO check_result (node_id, check_id, started_at, duration_ms, health)
+             VALUES ('node-a', 'c', 1, 1, 'up')",
+            [],
+        )
+        .unwrap_err();
+    assert_eq!(
+        error.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::ReadOnly)
+    );
 }

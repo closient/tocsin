@@ -8,6 +8,7 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags};
 use rusqlite_migration::{M, Migrations};
 
+use crate::checkpoint;
 use crate::error::{Error, Result};
 
 /// Every migration, oldest first. Append only: a shipped migration is never
@@ -47,16 +48,20 @@ pub(crate) fn open_writer(path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     // Commits never checkpoint: the checkpointer thread does, on its own
     // connection, so a checkpoint's fsyncs never hold up a write.
+    // The pragma replaces any WAL hook, so it comes first.
     conn.pragma_update(None, "wal_autocheckpoint", 0)?;
+    checkpoint::watch(&conn);
+    conn.pragma_update(None, "journal_size_limit", checkpoint::LOG_LIMIT_BYTES)?;
     migrations().to_latest(&mut conn)?;
     Ok(conn)
 }
 
 /// Opens the checkpointer's connection. It only ever runs `PRAGMA
-/// wal_checkpoint`.
+/// wal_checkpoint`, which works with writes refused.
 pub(crate) fn open_checkpointer(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(BUSY_TIMEOUT)?;
+    conn.pragma_update(None, "query_only", "ON")?;
     Ok(conn)
 }
 

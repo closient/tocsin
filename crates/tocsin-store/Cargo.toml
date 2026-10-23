@@ -10,7 +10,8 @@ publish.workspace = true
 
 [dependencies]
 tocsin-core.workspace = true
-rusqlite = { version = "0.40", features = ["bundled"] }
+# hooks: the writer counts log frames with a WAL hook.
+rusqlite = { version = "0.40", features = ["bundled", "hooks"] }
 rusqlite_migration = "2.6"
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync", "rt", "time"] }

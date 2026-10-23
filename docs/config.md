@@ -98,7 +98,30 @@ Every email tocsin sends can be answered. An address whose local part contains `
 
 ### `[server.auth]`
 
-Reserved for the admin page. It accepts no settings yet.
+Turns on the admin page at `/admin/` by naming the proxy that signs people
+in. Without it, or with `mode = "none"`, `/admin/` does not exist. Setup and
+the threat model are in [admin.md](admin.md).
+
+| Key | Type | Default | |
+|-----|------|---------|-|
+| `mode` | `none`, `cloudflare_access`, `trusted_header` | `"none"` | How tocsin learns who is asking. |
+| `team_domain` | string | | `cloudflare_access`, required: the Zero Trust team, as `example` or `example.cloudflareaccess.com`. |
+| `audience` | string | | `cloudflare_access`, required: the Access application's AUD tag. |
+| `header` | header name | `"X-Forwarded-Email"` | `trusted_header`: the header holding the email address. |
+| `trusted_proxies` | list of CIDRs | | `trusted_header`, required: the networks the proxy connects from, such as `["10.0.0.5/32", "fd00::/64"]`. The header is believed only when the TCP peer is inside one; `X-Forwarded-For` is never read. |
+| `allowed_emails` | list of addresses | everyone | Addresses allowed in, ignoring case. |
+| `allowed_domains` | list of domains | everyone | Domains allowed in, matched exactly: `example.com` does not admit `team.example.com`. |
+
+With both allow-lists empty, everyone the proxy vouches for is allowed;
+otherwise an address must be on `allowed_emails` or at a domain on
+`allowed_domains`. A key that does not apply to the chosen `mode` is an
+error, so a forgotten `mode` line cannot leave the page silently off.
+
+`cloudflare_access` checks the token Access signs, never the
+`Cf-Access-Authenticated-User-Email` header: anything that reaches tocsin
+without passing through Access could send that header. Set
+`[server] public_url` when the proxy rewrites `Host`; forms are accepted
+only from that origin.
 
 ## `[page]`
 

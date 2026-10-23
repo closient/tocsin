@@ -149,8 +149,81 @@
     },
     "Auth": {
       "additionalProperties": false,
-      "description": "`[server.auth]`. Reserved for the admin page; it accepts no settings\nyet.",
+      "description": "`[server.auth]`: how the admin page at `/admin/` learns who is asking.\n\ntocsin never handles passwords. It sits behind an identity-aware proxy\nand believes only what that proxy can prove: a signed Cloudflare Access\ntoken, or a header from a peer address you trust. Without this table,\nor with `mode = \"none\"`, the admin page does not exist.",
+      "properties": {
+        "allowed_domains": {
+          "description": "Email domains allowed in, matched exactly (`example.com` does not\nadmit `team.example.com`).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "allowed_emails": {
+          "description": "Email addresses allowed in. With neither this nor\n`allowed_domains`, everyone the proxy lets through is allowed.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "audience": {
+          "description": "`cloudflare_access` only: the Access application's audience (AUD)\ntag.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "header": {
+          "description": "`trusted_header` only: the request header carrying the email\naddress. Defaults to `X-Forwarded-Email`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AuthMode"
+            }
+          ],
+          "default": "none",
+          "description": "How identities are proven. `none` turns the admin page off."
+        },
+        "team_domain": {
+          "description": "`cloudflare_access` only: the Zero Trust team, as `name` or\n`name.cloudflareaccess.com`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trusted_proxies": {
+          "description": "`trusted_header` only: the networks the proxy connects from. The\nheader is believed only when the TCP peer is inside one of them;\n`X-Forwarded-For` is never consulted.",
+          "items": {
+            "$ref": "#/definitions/Cidr"
+          },
+          "type": "array"
+        }
+      },
       "type": "object"
+    },
+    "AuthMode": {
+      "description": "How [`Auth`] proves who is asking.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "No admin page.",
+          "type": "string"
+        },
+        {
+          "const": "cloudflare_access",
+          "description": "Cloudflare Access: verify the signed `Cf-Access-Jwt-Assertion`\ntoken against the team's published keys.",
+          "type": "string"
+        },
+        {
+          "const": "trusted_header",
+          "description": "A proxy on a trusted network names the person in a header.",
+          "type": "string"
+        }
+      ]
     },
     "BasicAuth": {
       "additionalProperties": false,
@@ -341,6 +414,10 @@
           "type": "string"
         }
       ]
+    },
+    "Cidr": {
+      "description": "An IP network such as \"10.0.0.0/8\" or \"fd00::/8\", or a single address such as \"192.0.2.7\".",
+      "type": "string"
     },
     "Comparison": {
       "additionalProperties": false,

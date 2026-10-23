@@ -32,6 +32,7 @@ use tocsin_store::Store;
 
 use self::error::ApiError;
 use self::events::EventBus;
+use crate::web::{self, identity::AdminAuth};
 
 /// What every handler can reach.
 #[derive(Clone)]
@@ -42,6 +43,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// Where writes announce what changed.
     pub events: EventBus,
+    /// The admin pages' authentication; `None` leaves them off.
+    pub admin: Option<Arc<AdminAuth>>,
 }
 
 impl AppState {
@@ -60,9 +63,10 @@ pub const OPENAPI_PATH: &str = "/api/v1/openapi.json";
 /// The largest request body accepted; a larger one is 413.
 pub const BODY_LIMIT: usize = 2 * 1024 * 1024;
 
-/// The whole HTTP service.
+/// The whole HTTP service: the JSON API and the HTML pages.
 pub fn router(state: AppState) -> Router {
     let (router, spec) = openapi::api().split_for_parts();
+    let router = router.merge(web::router(&state));
     let spec: Arc<str> = spec
         .to_pretty_json()
         .expect("the OpenAPI document serializes")

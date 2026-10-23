@@ -3,6 +3,7 @@
 //! `tocsin serve`: run until told to stop.
 
 use std::io;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,6 +24,7 @@ use crate::http::events::{EventBus, wake_on_incident_changes};
 use crate::http::{self, AppState};
 use crate::lock;
 use crate::output::{Failure, Report};
+use crate::web::identity::AdminAuth;
 
 pub fn run(config: &Path, data: Option<&Path>) -> Result<Report, Failure> {
     let loaded = crate::config::load(config)?;
@@ -119,18 +121,32 @@ async fn serve(
         Arc::clone(&store),
         Retention::days(retention_days),
     ));
+    let admin = AdminAuth::from_config(config)
+        .map_err(|error| {
+            Failure::new(
+                Exit::Runtime,
+                format!("cannot start the admin page: {error}"),
+            )
+        })?
+        .map(Arc::new);
     let app = http::router(AppState {
         store: Arc::clone(&store),
         config: Arc::clone(config),
         events,
+        admin,
     });
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                let _ = stopped.await;
-            })
-            .await
+        // Peer addresses let `trusted_header` auth check where a request
+        // came from.
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async {
+            let _ = stopped.await;
+        })
+        .await
     });
     // Logged only once both handlers exist and the socket is bound, so a
     // signal sent after this line is always handled and a request sent

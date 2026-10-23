@@ -21,6 +21,7 @@ mod lock;
 mod output;
 mod probe;
 mod serve;
+mod web;
 
 use std::io::IsTerminal;
 use std::process::ExitCode;

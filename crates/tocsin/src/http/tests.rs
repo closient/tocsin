@@ -69,6 +69,7 @@ fn api() -> Api {
         store: Arc::new(store),
         config: Arc::new(config),
         events: EventBus::new(),
+        admin: None,
     };
     Api {
         _dir: dir,

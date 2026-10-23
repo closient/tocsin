@@ -22,7 +22,8 @@ use super::diagnostic::{Diagnostic, LineIndex};
 use super::notifier::NotifierType;
 use super::values::{Id, Secret, Text, email_address, is_unanswerable};
 use super::{
-    Check, Component, Config, Group, Heartbeat, Link, Notifier, Page, Project, Route, Server, Token,
+    Auth, AuthMode, Check, Component, Config, Group, Heartbeat, Link, Notifier, Page, Project,
+    Route, Server, Token,
 };
 
 /// One configuration file's name and contents.
@@ -619,6 +620,9 @@ impl<'a> Loader<'a> {
                 None,
             );
         }
+        if let Some(auth) = &value.auth {
+            self.validate_auth(&origin.key("auth"), auth);
+        }
         let Some(email) = &value.email else { return };
         for (key, address) in [("from", &email.from), ("reply_to", &email.reply_to)] {
             let Some(address) = address else { continue };
@@ -637,6 +641,145 @@ impl<'a> Loader<'a> {
                 ),
                 Ok(_) => {}
             }
+        }
+    }
+
+    /// `[server.auth]`: each mode has its required keys, and no key that
+    /// belongs to another mode, so a half-edited table never silently means
+    /// something else.
+    fn validate_auth(&mut self, origin: &Origin, auth: &Auth) {
+        let mode = match auth.mode {
+            AuthMode::None => "none",
+            AuthMode::CloudflareAccess => "cloudflare_access",
+            AuthMode::TrustedHeader => "trusted_header",
+        };
+        let cloudflare = auth.mode == AuthMode::CloudflareAccess;
+        let trusted = auth.mode == AuthMode::TrustedHeader;
+        let keys = [
+            ("team_domain", auth.team_domain.is_some(), cloudflare),
+            ("audience", auth.audience.is_some(), cloudflare),
+            ("header", auth.header.is_some(), trusted),
+            ("trusted_proxies", !auth.trusted_proxies.is_empty(), trusted),
+            (
+                "allowed_emails",
+                !auth.allowed_emails.is_empty(),
+                auth.mode != AuthMode::None,
+            ),
+            (
+                "allowed_domains",
+                !auth.allowed_domains.is_empty(),
+                auth.mode != AuthMode::None,
+            ),
+        ];
+        for (key, present, belongs) in keys {
+            if present && !belongs {
+                self.report(
+                    &origin.key(key),
+                    format!("`{key}` does not apply when `mode = \"{mode}\"`"),
+                    (auth.mode == AuthMode::None).then(|| {
+                        "set `mode` to \"cloudflare_access\" or \"trusted_header\" to turn the admin page on"
+                            .to_owned()
+                    }),
+                );
+            }
+        }
+        if cloudflare {
+            self.validate_access(origin, auth);
+        }
+        if trusted {
+            self.validate_trusted_header(origin, auth);
+        }
+        for (index, address) in auth.allowed_emails.iter().enumerate() {
+            match email_address(address) {
+                Ok(bare) if bare == address => {}
+                Ok(_) => self.report(
+                    &origin.key("allowed_emails").index(index),
+                    format!("`{address}` must be a bare address such as alice@example.com"),
+                    None,
+                ),
+                Err(message) => {
+                    self.report(&origin.key("allowed_emails").index(index), message, None);
+                }
+            }
+        }
+        for (index, domain) in auth.allowed_domains.iter().enumerate() {
+            if !is_domain(domain) {
+                self.report(
+                    &origin.key("allowed_domains").index(index),
+                    format!("`{domain}` is not a domain name such as example.com"),
+                    domain
+                        .strip_prefix('@')
+                        .map(|bare| format!("drop the `@`: \"{bare}\"")),
+                );
+            }
+        }
+    }
+
+    fn validate_access(&mut self, origin: &Origin, auth: &Auth) {
+        match &auth.team_domain {
+            None => self.report(
+                origin,
+                "`mode = \"cloudflare_access\"` needs `team_domain`",
+                Some(
+                    "add `team_domain = \"your-team\"`, the name in your-team.cloudflareaccess.com"
+                        .to_owned(),
+                ),
+            ),
+            Some(team) => {
+                let name = team.strip_suffix(".cloudflareaccess.com").unwrap_or(team);
+                if !is_label(name) {
+                    self.report(
+                        &origin.key("team_domain"),
+                        format!(
+                            "`{team}` is not a Cloudflare Access team: write `name` or `name.cloudflareaccess.com`"
+                        ),
+                        None,
+                    );
+                }
+            }
+        }
+        match &auth.audience {
+            None => self.report(
+                origin,
+                "`mode = \"cloudflare_access\"` needs `audience`",
+                Some(
+                    "copy the Application Audience (AUD) tag from the Access application"
+                        .to_owned(),
+                ),
+            ),
+            Some(audience) if audience.is_empty() || audience.contains(char::is_whitespace) => self
+                .report(
+                    &origin.key("audience"),
+                    "`audience` must be the AUD tag, non-empty with no whitespace",
+                    None,
+                ),
+            Some(_) => {}
+        }
+    }
+
+    fn validate_trusted_header(&mut self, origin: &Origin, auth: &Auth) {
+        if auth.trusted_proxies.is_empty() {
+            self.report(
+                origin,
+                "`mode = \"trusted_header\"` needs `trusted_proxies`, the networks your proxy connects from",
+                Some("add `trusted_proxies = [\"127.0.0.1/32\"]` for a proxy on the same host".to_owned()),
+            );
+        }
+        let Some(header) = &auth.header else { return };
+        let origin = origin.key("header");
+        if http::HeaderName::from_bytes(header.as_bytes()).is_err() {
+            self.report(&origin, format!("`{header}` is not a header name"), None);
+        } else if header.eq_ignore_ascii_case("cf-access-authenticated-user-email") {
+            // Anything that reaches the origin without passing through
+            // Access can send this header; only the signed token proves it.
+            self.report(
+                &origin,
+                "`Cf-Access-Authenticated-User-Email` proves nothing on its own",
+                Some(
+                    "use `mode = \"cloudflare_access\"`, which verifies the signed token"
+                        .to_owned(),
+                ),
+            );
         }
     }
 
@@ -1478,6 +1621,22 @@ fn target_example(check_type: CheckType) -> String {
         CheckType::Icmp => "an icmp check targets a host, such as \"192.0.2.1\" or \"example.com\"",
     }
     .to_owned()
+}
+
+/// One DNS label: letters, digits and inner hyphens.
+fn is_label(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 63
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        && !text.starts_with('-')
+        && !text.ends_with('-')
+}
+
+/// A domain name of at least two labels, such as `example.com`.
+fn is_domain(text: &str) -> bool {
+    text.len() <= 253 && text.contains('.') && text.split('.').all(is_label)
 }
 
 #[cfg(test)]

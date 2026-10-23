@@ -1,0 +1,67 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{% extends "base.html" %}
+{% block content %}
+<p><a href="/admin/">All incidents</a></p>
+<h1>{{ incident.title }}</h1>
+<div class="meta">
+  <span class="badge {{ incident.status }}">{{ incident.status }}</span>
+  <span class="badge {{ incident.impact }}">{{ incident.impact }}</span>
+  <span class="muted">#{{ incident.id }} · {{ incident.kind }} · opened {{ created_at }} by {{ incident.created_by }}</span>
+</div>
+{%- if !incident.components.is_empty() %}
+<p class="muted">Components: {{ incident.components.join(", ") }}</p>
+{%- endif %}
+
+{%- if !errors.is_empty() %}
+<div class="notice error" role="alert">
+  <p>The update was not posted:</p>
+  <ul>
+    {%- for error in errors %}
+    <li class="field-error">{{ error }}</li>
+    {%- endfor %}
+  </ul>
+</div>
+{%- endif %}
+
+<h2>Post an update</h2>
+<form class="stack" method="post" action="/admin/incidents/{{ incident.id }}/updates">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Status
+    <select name="status">
+      {%- for option in statuses %}
+      <option value="{{ option.value }}"{% if option.selected %} selected{% endif %}>{{ option.label }}</option>
+      {%- endfor %}
+    </select>
+  </label>
+  <label>Message <span class="hint">Markdown</span>
+    <textarea name="message" rows="4" required>{{ message }}</textarea>
+  </label>
+  <div class="actions"><button type="submit">Post update</button></div>
+</form>
+
+{%- if let Some(status) = resolve_as %}
+<h2>Resolve</h2>
+<form class="stack" method="post" action="/admin/incidents/{{ incident.id }}/updates">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="status" value="{{ status }}">
+  <label>Closing message <span class="hint">Markdown</span>
+    <textarea name="message" rows="3" required>This incident has been resolved.</textarea>
+  </label>
+  <div class="actions"><button type="submit" class="secondary">Mark {{ status }}</button></div>
+</form>
+{%- endif %}
+
+<h2>Timeline</h2>
+<ul class="items">
+  {%- for update in updates %}
+  <li>
+    <div class="meta">
+      <span class="badge {{ update.status }}">{{ update.status }}</span>
+      <span class="muted">{{ update.created_at }} · {{ update.created_by }}</span>
+    </div>
+    {#- Sanitized by web::markdown::render: the one value marked safe. #}
+    <div class="markdown">{{ update.message_html|safe }}</div>
+  </li>
+  {%- endfor %}
+</ul>
+{% endblock %}

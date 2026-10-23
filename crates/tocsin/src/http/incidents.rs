@@ -11,7 +11,7 @@ use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use serde::Deserialize;
 use tocsin_core::incident::{
-    FieldError, Incident, IncidentEdit, IncidentList, NewIncident, NewUpdate, Timestamp,
+    Actor, FieldError, Incident, IncidentEdit, IncidentList, NewIncident, NewUpdate, Timestamp,
 };
 use utoipa::IntoParams;
 use utoipa_axum::router::OpenApiRouter;
@@ -126,18 +126,8 @@ pub async fn create_incident(
     auth: Authorized<scope::Incident>,
     ApiJson(new): ApiJson<NewIncident>,
 ) -> Result<impl IntoResponse, ApiError> {
-    new.validate(&|id| state.knows_component(id))
-        .map_err(ApiError::invalid)?;
-    let incident = state
-        .store
-        .create_incident(new, auth.actor.clone(), now())
-        .await?;
-    tracing::info!(incident = incident.id, kind = %incident.kind, actor = %auth.actor, "incident opened");
+    let incident = open(&state, new, auth.actor).await?;
     let location = format!("/api/v1/incidents/{}", incident.id);
-    let incident = Arc::new(incident);
-    state.events.emit(Event::IncidentCreated {
-        incident: Arc::clone(&incident),
-    });
     Ok((
         StatusCode::CREATED,
         [(header::LOCATION, location)],
@@ -168,19 +158,63 @@ pub async fn add_update(
     ApiJson(update): ApiJson<NewUpdate>,
 ) -> Result<impl IntoResponse, ApiError> {
     let id = incident_id(id)?;
+    let incident = append(&state, id, update, auth.actor).await?;
+    Ok((StatusCode::CREATED, Json(incident)))
+}
+
+/// Opens an incident as `actor`: validates, stores, logs and emits
+/// [`Event::IncidentCreated`]. The JSON API and the admin page both write
+/// through here.
+///
+/// # Errors
+///
+/// 422 for invalid fields; 500 if the store fails.
+pub async fn open(
+    state: &AppState,
+    new: NewIncident,
+    actor: Actor,
+) -> Result<Arc<Incident>, ApiError> {
+    new.validate(&|id| state.knows_component(id))
+        .map_err(ApiError::invalid)?;
+    let incident = state
+        .store
+        .create_incident(new, actor.clone(), now())
+        .await?;
+    tracing::info!(incident = incident.id, kind = %incident.kind, %actor, "incident opened");
+    let incident = Arc::new(incident);
+    state.events.emit(Event::IncidentCreated {
+        incident: Arc::clone(&incident),
+    });
+    Ok(incident)
+}
+
+/// Appends an update to incident `id` as `actor`: validates, stores, logs
+/// and emits [`Event::IncidentUpdated`]. The JSON API and the admin page
+/// both write through here.
+///
+/// # Errors
+///
+/// 404 if there is no such incident; 422 for invalid fields; 500 if the
+/// store fails.
+pub async fn append(
+    state: &AppState,
+    id: i64,
+    update: NewUpdate,
+    actor: Actor,
+) -> Result<Arc<Incident>, ApiError> {
     update.validate().map_err(ApiError::invalid)?;
     let status = update.status;
     let incident = state
         .store
-        .add_incident_update(id, update, auth.actor.clone(), now())
+        .add_incident_update(id, update, actor.clone(), now())
         .await?
         .ok_or_else(|| missing(id))?;
-    tracing::info!(incident = id, %status, actor = %auth.actor, "incident updated");
+    tracing::info!(incident = id, %status, %actor, "incident updated");
     let incident = Arc::new(incident);
     state.events.emit(Event::IncidentUpdated {
         incident: Arc::clone(&incident),
     });
-    Ok((StatusCode::CREATED, Json(incident)))
+    Ok(incident)
 }
 
 /// Change the title, impact, components or schedule. Fields left out are

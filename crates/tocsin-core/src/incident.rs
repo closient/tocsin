@@ -188,6 +188,16 @@ impl Actor {
             id: id.into(),
         }
     }
+
+    /// A person, identified by the email address an identity-aware proxy
+    /// vouched for.
+    #[must_use]
+    pub fn person(email: impl Into<String>) -> Self {
+        Actor {
+            kind: ActorKind::Person,
+            id: email.into(),
+        }
+    }
 }
 
 impl fmt::Display for Actor {

@@ -1,0 +1,70 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Incidents</h1>
+
+{%- if incidents.is_empty() %}
+<p class="muted">Nothing yet.</p>
+{%- else %}
+<ul class="items">
+  {%- for incident in incidents %}
+  <li>
+    <a class="item-title" href="/admin/incidents/{{ incident.id }}">{{ incident.title }}</a>
+    <div class="meta">
+      <span class="badge {{ incident.status }}">{{ incident.status }}</span>
+      <span class="badge {{ incident.impact }}">{{ incident.impact }}</span>
+      {%- if incident.kind != "incident" %} <span class="badge">{{ incident.kind }}</span>{% endif %}
+      <span class="muted">#{{ incident.id }} · {{ incident.created_at }}{% if !incident.over %} · open{% endif %}</span>
+    </div>
+  </li>
+  {%- endfor %}
+</ul>
+{%- endif %}
+{%- if let Some(before) = next_before %}
+<p class="pager"><a href="/admin/?before={{ before }}">Older</a></p>
+{%- endif %}
+
+<h2 id="open">Open an incident</h2>
+{%- if !form.errors.is_empty() %}
+<div class="notice error" role="alert">
+  <p>The incident was not opened:</p>
+  <ul>
+    {%- for error in form.errors %}
+    <li class="field-error">{{ error }}</li>
+    {%- endfor %}
+  </ul>
+</div>
+{%- endif %}
+<form class="stack" method="post" action="/admin/incidents">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Title
+    <input type="text" name="title" value="{{ form.title }}" required maxlength="200" autocomplete="off">
+  </label>
+  <label>Impact
+    <select name="impact">
+      {%- for option in impacts %}
+      <option value="{{ option.value }}"{% if option.selected %} selected{% endif %}>{{ option.label }}</option>
+      {%- endfor %}
+    </select>
+  </label>
+  <label>Status
+    <select name="status">
+      {%- for option in statuses %}
+      <option value="{{ option.value }}"{% if option.selected %} selected{% endif %}>{{ option.label }}</option>
+      {%- endfor %}
+    </select>
+  </label>
+  {%- if !components.is_empty() %}
+  <fieldset>
+    <legend>Affected components</legend>
+    {%- for option in components %}
+    <label><input type="checkbox" name="components" value="{{ option.value }}"{% if option.selected %} checked{% endif %}> {{ option.label }}</label>
+    {%- endfor %}
+  </fieldset>
+  {%- endif %}
+  <label>Message <span class="hint">Markdown</span>
+    <textarea name="message" rows="5" required>{{ form.message }}</textarea>
+  </label>
+  <div class="actions"><button type="submit">Open incident</button></div>
+</form>
+{% endblock %}

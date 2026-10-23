@@ -23,6 +23,7 @@ fn variable(name: &str) -> Option<String> {
         "TOKEN_A" | "TOKEN_B" => Some("SHARED-TOKEN-SECRET".to_owned()),
         "TOKEN_C" => Some("another-token-secret".to_owned()),
         "HTTPS_URL" => Some("https://user:HTTPS-SECRET@mail.example.com".to_owned()),
+        "WEBHOOK_SECRET" => Some("SIGNING-SECRET".to_owned()),
         _ => None,
     }
 }
@@ -1042,4 +1043,89 @@ fn a_team_domain_is_kept_in_lowercase() {
         let domain = config.server.auth.unwrap().team_domain.unwrap();
         assert_eq!(domain, team.to_ascii_lowercase(), "{team}");
     }
+}
+
+#[test]
+fn pushover_priorities_run_from_minus_two_to_two() {
+    let pushover = |priorities: &str| {
+        format!(
+            "[[notifier]]\nid = \"phone\"\ntype = \"pushover\"\n[notifier.pushover]\nuser_key = \"${{ENV:TOKEN_A}}\"\napi_token = \"${{ENV:TOKEN_C}}\"\n{priorities}"
+        )
+    };
+    let config = run(&[("notify.toml", &pushover("down_priority = 2\n"))]).expect("valid");
+    let settings = config.notifiers[0].pushover.as_ref().expect("pushover");
+    assert_eq!(
+        (
+            settings.down_priority,
+            settings.degraded_priority,
+            settings.resolved_priority
+        ),
+        (2, 0, 0)
+    );
+    assert_eq!(
+        errors(&[(
+            "notify.toml",
+            &pushover("down_priority = 3\nresolved_priority = -3\n")
+        )]),
+        [
+            "notify.toml:7:17: a Pushover priority is -2, -1, 0, 1 or 2",
+            "notify.toml:8:21: a Pushover priority is -2, -1, 0, 1 or 2",
+        ]
+    );
+}
+
+#[test]
+fn routes_repeat_every_four_hours_and_resolve_by_default() {
+    let notifier = "[[notifier]]\nid = \"ops\"\ntype = \"slack\"\n[notifier.slack]\nwebhook_url = \"${ENV:SLACK_WEBHOOK_URL}\"\n\n";
+    let route =
+        |extra: &str| format!("{notifier}[[route]]\nid = \"all\"\nnotifiers = [\"ops\"]\n{extra}");
+    let config = run(&[("notify.toml", &route(""))]).expect("valid");
+    assert_eq!(
+        config.routes[0].repeat.get(),
+        std::time::Duration::from_hours(4)
+    );
+    assert!(config.routes[0].resolve);
+
+    let config =
+        run(&[("notify.toml", &route("repeat = \"0s\"\nresolve = false\n"))]).expect("valid");
+    assert!(config.routes[0].repeat.get().is_zero(), "0s never repeats");
+    assert!(!config.routes[0].resolve);
+
+    assert_eq!(
+        errors(&[("notify.toml", &route("repeat = \"30s\"\n"))]),
+        ["notify.toml:10:10: `repeat` must be at least 1m, or \"0s\" to never repeat"]
+    );
+}
+
+#[test]
+fn a_webhook_signing_secret_is_required_and_redacted() {
+    let webhook = |secret: &str| {
+        format!(
+            "[[notifier]]\nid = \"hook\"\ntype = \"webhook\"\n[notifier.webhook]\nurl = \"https://hooks.example.com/tocsin\"\n{secret}"
+        )
+    };
+    let config = run(&[(
+        "notify.toml",
+        &webhook("signing_secret = \"${ENV:WEBHOOK_SECRET}\"\n"),
+    )])
+    .expect("valid");
+    let settings = config.notifiers[0].webhook.as_ref().expect("webhook");
+    assert_eq!(settings.signing_secret.expose(), "SIGNING-SECRET");
+    let shown = format!(
+        "{} {config:?}",
+        serde_json::to_string(&config).expect("serializes")
+    );
+    assert!(!shown.contains("SIGNING-SECRET"), "{shown}");
+
+    let missing = only_error(&[("notify.toml", &webhook(""))]);
+    assert!(missing.message.contains("signing_secret"), "{missing}");
+    let pasted = only_error(&[(
+        "notify.toml",
+        &webhook("signing_secret = \"PASTED-SIGNING-SECRET\"\n"),
+    )]);
+    assert_eq!(pasted.location().as_deref(), Some("notify.toml:6:18"));
+    assert!(
+        !pasted.to_string().contains("PASTED-SIGNING-SECRET"),
+        "{pasted}"
+    );
 }

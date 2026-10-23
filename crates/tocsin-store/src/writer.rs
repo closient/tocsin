@@ -233,33 +233,41 @@ fn apply(conn: &Connection, insert: &Insert) -> rusqlite::Result<i64> {
         }
         // Both halves run under the insert's savepoint: either fails and
         // neither is kept.
-        Insert::ChangeOutage(change) => {
-            let mut id = 0;
-            if let Some(end) = &change.end {
-                let changed = conn
-                    .prepare_cached("UPDATE outage SET ended_at = ?2 WHERE id = ?1")?
-                    .execute(params![end.id, end.ended_at_ms])?;
-                if changed == 0 {
-                    return Err(rusqlite::Error::QueryReturnedNoRows);
-                }
-                id = end.id;
-            }
-            if let Some(outage) = &change.open {
-                conn.prepare_cached(
-                    "INSERT INTO outage (node_id, check_id, component_id, health, started_at, alerted)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                )?
-                .execute(params![
-                    outage.node_id,
-                    outage.check_id,
-                    outage.component_id,
-                    outage.health.as_str(),
-                    outage.started_at_ms,
-                    outage.alerted,
-                ])?;
-                id = conn.last_insert_rowid();
-            }
-            Ok(id)
-        }
+        Insert::ChangeOutage(change) => apply_outage_change(conn, change),
     }
+}
+
+/// Ends and opens outages as `change` says, inside whatever transaction or
+/// savepoint `conn` is in. Returns the opened outage's id, or with none the
+/// ended one's.
+pub(crate) fn apply_outage_change(
+    conn: &Connection,
+    change: &OutageChange,
+) -> rusqlite::Result<i64> {
+    let mut id = 0;
+    if let Some(end) = &change.end {
+        let changed = conn
+            .prepare_cached("UPDATE outage SET ended_at = ?2 WHERE id = ?1")?
+            .execute(params![end.id, end.ended_at_ms])?;
+        if changed == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        id = end.id;
+    }
+    if let Some(outage) = &change.open {
+        conn.prepare_cached(
+            "INSERT INTO outage (node_id, check_id, component_id, health, started_at, alerted)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?
+        .execute(params![
+            outage.node_id,
+            outage.check_id,
+            outage.component_id,
+            outage.health.as_str(),
+            outage.started_at_ms,
+            outage.alerted,
+        ])?;
+        id = conn.last_insert_rowid();
+    }
+    Ok(id)
 }

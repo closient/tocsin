@@ -584,6 +584,14 @@ impl<'a> Loader<'a> {
                     None,
                 );
             }
+            let repeat = route.value.repeat.get();
+            if !repeat.is_zero() && repeat < std::time::Duration::from_mins(1) {
+                self.report(
+                    &route.origin.key("repeat"),
+                    "`repeat` must be at least 1m, or \"0s\" to never repeat",
+                    None,
+                );
+            }
         }
         for token in &items.tokens {
             if token.value.scopes.is_empty() {
@@ -1136,6 +1144,22 @@ impl<'a> Loader<'a> {
         for (table, url) in urls {
             if let Some(url) = url {
                 self.url(&origin.keys(&[table, "url"]), url);
+            }
+        }
+        if let Some(pushover) = &value.pushover {
+            let priorities = [
+                ("down_priority", pushover.down_priority),
+                ("degraded_priority", pushover.degraded_priority),
+                ("resolved_priority", pushover.resolved_priority),
+            ];
+            for (key, priority) in priorities {
+                if !(-2..=2).contains(&priority) {
+                    self.report(
+                        &origin.keys(&["pushover", key]),
+                        "a Pushover priority is -2, -1, 0, 1 or 2",
+                        None,
+                    );
+                }
             }
         }
         if let Some(telegram) = &value.telegram

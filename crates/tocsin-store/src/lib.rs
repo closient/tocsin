@@ -12,6 +12,7 @@
 //! milliseconds, UTC; see [`day`]. The schema is documented in
 //! `docs/storage.md`.
 
+pub mod alert;
 mod checkpoint;
 pub mod day;
 mod error;
@@ -34,6 +35,10 @@ use tocsin_core::Health;
 use tocsin_core::incident::{Actor, Incident, IncidentEdit, NewIncident, NewUpdate, Timestamp};
 use tocsin_core::release::{DeployStamp, NewRelease, Release, Timeline};
 
+pub use crate::alert::{
+    AlertRouting, AlertTarget, DeliveryKind, DeliveryOutcome, DeliveryRetention, FailedDelivery,
+    OutageAlerts, Outbox, PendingDelivery, StoredAlert, SubjectKind,
+};
 use crate::checkpoint::Checkpointer;
 pub use crate::day::Day;
 pub use crate::error::{Error, Result};
@@ -55,7 +60,7 @@ const READERS: usize = 4;
 pub const FUTURE_TOLERANCE: Duration = Duration::from_hours(1);
 
 /// The tables `tocsin db info` counts, in schema order.
-pub const TABLES: [&str; 10] = [
+pub const TABLES: [&str; 12] = [
     "check_result",
     "outage",
     "daily_rollup",
@@ -66,6 +71,8 @@ pub const TABLES: [&str; 10] = [
     "incident_edit",
     "release",
     "retention",
+    "alert",
+    "alert_delivery",
 ];
 
 /// One probe run, as handed to [`Store::append`].
@@ -302,6 +309,99 @@ impl Store {
         let opens = change.open.is_some();
         let id = self.writer.insert(Insert::ChangeOutage(change)).await?;
         Ok(opens.then_some(id))
+    }
+
+    /// Changes an outage as [`Store::change_outage`] does and, in the same
+    /// transaction, queues the alerting deliveries the change causes: a fire
+    /// for every alert already firing for the identity and for every target
+    /// in `routing` (given when the engine decided the change alerts), or on
+    /// a recovery, a resolve for every firing alert whose route asks for one.
+    ///
+    /// # Errors
+    ///
+    /// The change fails as [`Store::change_outage`] would, or the write
+    /// fails; nothing is written then.
+    pub async fn change_outage_alerting(
+        &self,
+        change: OutageChange,
+        routing: Option<AlertRouting>,
+        now_ms: i64,
+    ) -> Result<OutageAlerts> {
+        self.writer
+            .run(move |conn| alert::change_outage(conn, &change, routing.as_ref(), now_ms))
+            .await
+    }
+
+    /// The head of every alert's pending deliveries, and the next repeat
+    /// due.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn outbox(&self) -> Result<Outbox> {
+        self.read(alert::outbox).await
+    }
+
+    /// Queues a repeat for every firing alert that is due one and has
+    /// nothing pending. Resolves with how many it queued.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn queue_repeats(&self, now_ms: i64) -> Result<usize> {
+        self.writer
+            .run(move |conn| alert::queue_repeats(conn, now_ms))
+            .await
+    }
+
+    /// Records how an attempt to send a delivery ended.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn finish_delivery(
+        &self,
+        delivery_id: i64,
+        outcome: DeliveryOutcome,
+        now_ms: i64,
+    ) -> Result<()> {
+        self.writer
+            .run(move |conn| alert::finish(conn, delivery_id, &outcome, now_ms))
+            .await
+    }
+
+    /// Deletes finished deliveries older than `retention` allows, and ended
+    /// alerts left with none. Resolves with how many deliveries it deleted.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn prune_deliveries(
+        &self,
+        retention: DeliveryRetention,
+        now_ms: i64,
+    ) -> Result<usize> {
+        self.writer
+            .run(move |conn| alert::prune(conn, retention, now_ms))
+            .await
+    }
+
+    /// Deliveries that failed for good, newest first.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn failed_deliveries(&self, limit: u32) -> Result<Vec<FailedDelivery>> {
+        self.read(move |conn| alert::failed(conn, limit)).await
+    }
+
+    /// Every stored alert, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn alerts(&self) -> Result<Vec<StoredAlert>> {
+        self.read(alert::alerts).await
     }
 
     /// Opens an incident (or announces maintenance) with its first update,

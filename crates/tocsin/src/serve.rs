@@ -17,7 +17,9 @@ pub fn run(config: &Path, data: &Path) -> Result<Report, Failure> {
             format!("config folder {} is not a directory", config.display()),
         ));
     }
-    if data.exists() && !data.is_dir() {
+    // `symlink_metadata` also catches a dangling symlink, which `exists()`
+    // reports as absent and `create_dir_all` then fails on.
+    if data.symlink_metadata().is_ok() && !data.is_dir() {
         return Err(Failure::new(
             Exit::InvalidInput,
             format!("data folder {} is not a directory", data.display()),

@@ -14,7 +14,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo deny check            # licences must stay AGPL-compatible (deny.toml)
 ```
 
-CI (`.github/workflows/ci.yml`) runs exactly these on linux x86_64 and aarch64. Warnings fail the build.
+CI (`.github/workflows/ci.yml`) runs exactly these on linux x86_64 and aarch64, plus a DCO check that every commit in a pull request is signed off. Warnings fail the build. tocsin targets Unix-like systems (Linux, macOS) only; a non-Unix build stops with a `compile_error!`.
 
 ## Crate map
 
@@ -37,7 +37,8 @@ CI (`.github/workflows/ci.yml`) runs exactly these on linux x86_64 and aarch64. 
 ## CLI output contract
 
 - With `--json`, exactly one JSON document goes to stdout. Logs always go to stderr (`TOCSIN_LOG` sets the filter, default `info`).
-- Errors under `--json` are `{"error": {"kind": "...", "message": "..."}}`.
+- Errors under `--json` are `{"error": {"kind": "...", "message": "..."}}`; `--json --help` is `{"help": "..."}`.
+- A reader that closes the pipe early never changes the exit code: output writes never panic.
 - Exit codes are a public contract and never change meaning:
 
 | Code | Kind | Meaning |

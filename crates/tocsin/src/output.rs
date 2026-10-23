@@ -3,6 +3,7 @@
 //! Rendering command results as text or as a single JSON document.
 
 use std::ffi::OsString;
+use std::io::Write;
 use std::process::ExitCode;
 
 use serde_json::{Value, json};
@@ -60,17 +61,17 @@ pub fn emit(result: Result<Report, Failure>, json: bool) -> ExitCode {
     match result {
         Ok(report) => {
             if json {
-                println!("{}", report.json);
+                write_stdout(&format!("{}\n", report.json));
             } else {
-                println!("{}", report.text);
+                write_stdout(&format!("{}\n", report.text));
             }
             Exit::Ok.into()
         }
         Err(failure) => {
             if json {
-                println!("{}", failure.json());
+                write_stdout(&format!("{}\n", failure.json()));
             } else {
-                eprintln!("error: {}", failure.message);
+                write_stderr(&format!("error: {}\n", failure.message));
             }
             failure.exit.into()
         }
@@ -80,17 +81,36 @@ pub fn emit(result: Result<Report, Failure>, json: bool) -> ExitCode {
 /// `--help` prints help and exits 0; every other parse error exits 2.
 pub fn emit_parse_error(error: &clap::Error, json: bool) -> ExitCode {
     use clap::error::ErrorKind;
+    let rendered = error.render().to_string();
     if matches!(error.kind(), ErrorKind::DisplayHelp) {
-        print!("{error}");
+        if json {
+            write_stdout(&format!("{}\n", json!({ "help": rendered })));
+        } else {
+            write_stdout(&rendered);
+        }
         return Exit::Ok.into();
     }
-    let failure = Failure::new(Exit::InvalidInput, error.render().to_string().trim());
+    let failure = Failure::new(Exit::InvalidInput, rendered.trim());
     if json {
-        println!("{}", failure.json());
+        write_stdout(&format!("{}\n", failure.json()));
     } else {
-        eprint!("{error}");
+        write_stderr(&rendered);
     }
     failure.exit.into()
+}
+
+// `print!` and friends panic when the reader has gone away, which would turn
+// a closed pipe into exit 101. The exit code is the contract; a reader that
+// left early has already given up on the output, so a failed write is dropped.
+fn write_stdout(text: &str) {
+    let mut stdout = std::io::stdout().lock();
+    let _ = stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush());
+}
+
+fn write_stderr(text: &str) {
+    let _ = std::io::stderr().lock().write_all(text.as_bytes());
 }
 
 #[cfg(test)]

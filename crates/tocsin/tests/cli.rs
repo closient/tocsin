@@ -2,10 +2,9 @@
 
 //! End-to-end tests of the CLI output contract, run against the built binary.
 
-use std::io::{BufRead, BufReader};
-use std::process::{Child, Command, Output, Stdio};
-use std::sync::mpsc;
-use std::thread::JoinHandle;
+use std::io::{BufRead, BufReader, Read};
+use std::path::Path;
+use std::process::{Child, ChildStderr, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -71,69 +70,89 @@ fn serve_rejects_missing_config_folder() {
     assert_eq!(json_stdout(&output)["error"]["kind"], "invalid_input");
 }
 
-/// Starts `tocsin serve` and returns once it is ready for signals.
-///
-/// Stderr is drained on a thread for the life of the process, so the
-/// server never writes into a closed pipe; the thread returns all of it.
-fn spawn_serve(config: &str, data: &str) -> (Child, JoinHandle<String>) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tocsin"))
-        .args(["--json", "serve", "--config", config, "--data", data])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("tocsin serve starts");
-    let stderr = child.stderr.take().unwrap();
-    let (ready_tx, ready_rx) = mpsc::channel();
-    let drain = std::thread::spawn(move || {
-        let mut log = String::new();
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            if line.contains("waiting for SIGINT or SIGTERM") {
-                let _ = ready_tx.send(());
-            }
-            log.push_str(&line);
-            log.push('\n');
+/// A running `tocsin serve` that is killed if a test panics before it stops,
+/// so a failed test never leaves a server behind.
+struct Server(Child);
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(None)) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
         }
-        log
-    });
-    if ready_rx.recv_timeout(Duration::from_secs(10)).is_err() {
-        let _ = child.kill();
-        panic!(
-            "serve never became ready; stderr:\n{}",
-            drain.join().unwrap()
-        );
     }
-    (child, drain)
 }
 
-fn wait_with_deadline(child: &mut Child) -> std::process::ExitStatus {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            return status;
-        }
-        assert!(Instant::now() < deadline, "serve did not stop within 10s");
-        std::thread::sleep(Duration::from_millis(20));
+impl Server {
+    fn start(config: &Path, data: &Path) -> Self {
+        let child = Command::new(env!("CARGO_BIN_EXE_tocsin"))
+            .args(["--json", "serve", "--config"])
+            .arg(config)
+            .arg("--data")
+            .arg(data)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("tocsin serve starts");
+        Server(child)
     }
+
+    fn signal(&self, signal: &str) {
+        let sent = Command::new("kill")
+            .args([signal, &self.0.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(sent.success());
+    }
+
+    fn wait_with_deadline(&mut self) -> std::process::ExitStatus {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = self.0.try_wait().unwrap() {
+                return status;
+            }
+            assert!(Instant::now() < deadline, "serve did not stop within 10s");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+const READY: &str = "waiting for SIGINT or SIGTERM";
+
+/// Reads stderr until the ready line, then returns the reader still open.
+fn wait_ready(server: &mut Server) -> std::io::Lines<BufReader<ChildStderr>> {
+    let mut lines = BufReader::new(server.0.stderr.take().unwrap()).lines();
+    let ready = lines
+        .by_ref()
+        .map_while(Result::ok)
+        .any(|line| line.contains(READY));
+    assert!(ready, "serve exited before becoming ready");
+    lines
 }
 
 fn stops_cleanly_on(signal: &str, name: &str) {
     let config = tempfile::tempdir().unwrap();
     let parent = tempfile::tempdir().unwrap();
     let data = parent.path().join("data");
-    let (mut child, drain) = spawn_serve(config.path().to_str().unwrap(), data.to_str().unwrap());
+    let mut server = Server::start(config.path(), &data);
+    // Keep draining stderr so the server never writes into a closed pipe.
+    let lines = wait_ready(&mut server);
+    let drain = std::thread::spawn(move || lines.map_while(Result::ok).collect::<Vec<_>>());
 
-    let sent = Command::new("kill")
-        .args([signal, &child.id().to_string()])
-        .status()
+    server.signal(signal);
+    let status = server.wait_with_deadline();
+    let mut stdout = Vec::new();
+    server
+        .0
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_end(&mut stdout)
         .unwrap();
-    assert!(sent.success());
-
-    let status = wait_with_deadline(&mut child);
-    let output = child.wait_with_output().unwrap();
-    let log = drain.join().unwrap();
+    let log = drain.join().unwrap().join("\n");
     assert_eq!(status.code(), Some(0), "stderr:\n{log}");
     assert_eq!(
-        json_stdout(&output),
+        serde_json::from_slice::<Value>(&stdout).expect("stdout is a single JSON document"),
         serde_json::json!({ "status": "stopped", "signal": name })
     );
     assert!(data.is_dir(), "serve creates the data folder");
@@ -154,26 +173,63 @@ fn serve_stops_cleanly_on_sigint() {
 fn serve_survives_a_closed_log_pipe() {
     let config = tempfile::tempdir().unwrap();
     let data = tempfile::tempdir().unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tocsin"))
-        .args(["--json", "serve", "--config"])
-        .arg(config.path())
-        .arg("--data")
-        .arg(data.path())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("tocsin serve starts");
-    let ready = BufReader::new(child.stderr.take().unwrap())
-        .lines()
-        .map_while(Result::ok)
-        .any(|line| line.contains("waiting for SIGINT or SIGTERM"));
-    // The reader is dropped here, so the next log line hits a broken pipe.
-    assert!(ready, "serve exited before becoming ready");
+    let mut server = Server::start(config.path(), data.path());
+    drop(wait_ready(&mut server));
+    server.signal("-TERM");
+    assert_eq!(server.wait_with_deadline().code(), Some(0));
+}
 
-    let sent = Command::new("kill")
-        .args(["-TERM", &child.id().to_string()])
-        .status()
-        .unwrap();
-    assert!(sent.success());
-    assert_eq!(wait_with_deadline(&mut child).code(), Some(0));
+/// Nor because whatever reads its result went away: the exit code still holds.
+#[test]
+fn serve_survives_a_closed_result_pipe() {
+    let config = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let mut server = Server::start(config.path(), data.path());
+    let lines = wait_ready(&mut server);
+    let drain = std::thread::spawn(move || lines.map_while(Result::ok).count());
+    drop(server.0.stdout.take());
+    server.signal("-TERM");
+    assert_eq!(server.wait_with_deadline().code(), Some(0));
+    drain.join().unwrap();
+}
+
+#[test]
+fn serve_rejects_a_dangling_symlink_as_data_folder() {
+    let config = tempfile::tempdir().unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let link = parent.path().join("data");
+    std::os::unix::fs::symlink(parent.path().join("missing"), &link).unwrap();
+    let output = tocsin(&[
+        "--json",
+        "serve",
+        "--config",
+        config.path().to_str().unwrap(),
+        "--data",
+        link.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(json_stdout(&output)["error"]["kind"], "invalid_input");
+}
+
+#[test]
+fn help_under_json_is_one_document() {
+    let output = tocsin(&["--json", "--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    let help = json_stdout(&output);
+    assert!(help["help"].as_str().unwrap().contains("Usage: tocsin"));
+}
+
+#[test]
+fn version_with_a_command_is_invalid_input() {
+    let output = tocsin(&[
+        "--json",
+        "--version",
+        "serve",
+        "--config",
+        ".",
+        "--data",
+        ".",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(json_stdout(&output)["error"]["kind"], "invalid_input");
 }

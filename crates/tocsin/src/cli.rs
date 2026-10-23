@@ -13,7 +13,7 @@ pub struct Cli {
     /// Print the version and exit.
     ///
     /// Declared by hand rather than through clap so that `--json` applies.
-    #[arg(short = 'V', long, action = ArgAction::SetTrue)]
+    #[arg(short = 'V', long, global = true, action = ArgAction::SetTrue)]
     pub version: bool,
 
     /// Write exactly one JSON document to stdout instead of text.

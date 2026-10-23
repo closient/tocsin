@@ -10,7 +10,7 @@ tocsin uses the [Developer Certificate of Origin](https://developercertificate.o
 Signed-off-by: Jane Doe <jane@example.com>
 ```
 
-`git commit -s` adds it for you. Pull requests with unsigned commits are not merged.
+`git commit -s` adds it for you. CI checks every commit in a pull request and fails if one is not signed off; pull requests with unsigned commits are not merged.
 
 ## What that means for the license
 

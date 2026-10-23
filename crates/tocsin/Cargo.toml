@@ -9,10 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-tocsin-core.workspace = true
-tocsin-store.workspace = true
 clap.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -22,5 +19,4 @@ tracing-subscriber.workspace = true
 workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 tempfile = "3"

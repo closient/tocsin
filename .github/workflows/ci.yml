@@ -43,6 +43,30 @@ jobs:
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked
 
+  # CONTRIBUTING.md promises unsigned commits are not merged; this keeps
+  # that promise. Every commit the pull request adds needs a Signed-off-by.
+  dco:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Every commit is signed off
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          missing=0
+          for commit in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            if ! git show -s --format='%(trailers:key=Signed-off-by,valueonly)' "$commit" | grep -q .; then
+              echo "::error::commit $commit has no Signed-off-by line (use git commit -s)"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
   deny:
     runs-on: ubuntu-24.04
     steps:

@@ -6,6 +6,9 @@
 //! document goes to stdout and logs go to stderr. Exit codes are defined
 //! in [`exit::Exit`].
 
+#[cfg(not(unix))]
+compile_error!("tocsin supports Unix-like systems (Linux, macOS) only");
+
 mod cli;
 mod exit;
 mod output;
@@ -21,18 +24,28 @@ use crate::exit::Exit;
 use crate::output::{Failure, Report};
 
 fn main() -> ExitCode {
-    let json = output::json_requested(std::env::args_os());
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
-        Err(error) => return output::emit_parse_error(&error, json),
+        Err(error) => {
+            // The arguments did not parse, so the raw scan is the only
+            // way to know whether the caller asked for JSON.
+            let json = output::json_requested(std::env::args_os());
+            return output::emit_parse_error(&error, json);
+        }
     };
     init_tracing();
-    let result = run(cli);
-    output::emit(result, json)
+    let json = cli.json;
+    output::emit(run(cli), json)
 }
 
 fn run(cli: Cli) -> Result<Report, Failure> {
     if cli.version {
+        if cli.command.is_some() {
+            return Err(Failure::new(
+                Exit::InvalidInput,
+                "--version cannot be combined with a command",
+            ));
+        }
         return Ok(Report::version());
     }
     match cli.command {
@@ -45,11 +58,17 @@ fn run(cli: Cli) -> Result<Report, Failure> {
 }
 
 fn init_tracing() {
+    use tracing_subscriber::EnvFilter;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let filter = tracing_subscriber::EnvFilter::try_from_env("TOCSIN_LOG")
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let (filter, rejected) = match std::env::var("TOCSIN_LOG") {
+        Ok(directives) => match EnvFilter::try_new(&directives) {
+            Ok(filter) => (filter, None),
+            Err(error) => (EnvFilter::new("info"), Some((directives, error))),
+        },
+        Err(_) => (EnvFilter::new("info"), None),
+    };
     let logs = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
@@ -60,4 +79,7 @@ fn init_tracing() {
         .with(filter)
         .with(logs)
         .init();
+    if let Some((directives, error)) = rejected {
+        tracing::warn!(%directives, %error, "ignoring invalid TOCSIN_LOG; logging at info");
+    }
 }

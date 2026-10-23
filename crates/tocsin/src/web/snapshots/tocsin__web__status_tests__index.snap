@@ -31,13 +31,15 @@ expression: normalize(&page)
 </header>
 <main id="main">
 
+<div class="intro">
 <h1>Example status</h1>
-<p class="muted">Live status of Example&#39;s services.</p>
+<p class="lede">Live status of Example&#39;s services.</p>
+</div>
 <div class="live" hx-ext="sse" sse-connect="/api/v1/events">
-<div id="banner" role="status" hx-get="/fragments/banner" hx-trigger="sse:component_changed, sse:incident_created, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML"><p class="banner down"><span class="glyph" aria-hidden="true">✕</span> Some systems are down</p>
+<div id="banner" role="status" hx-get="/fragments/banner" hx-trigger="sse:component_changed, sse:incident_created, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML"><p class="hero down"><span class="hero-mark" aria-hidden="true">✕</span> <span class="hero-text">Some systems are down</span></p>
 </div>
 <section id="incidents" aria-labelledby="incidents-heading" hx-get="/fragments/incidents" hx-trigger="sse:incident_created, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML"><h2 id="incidents-heading">Active incidents and maintenance</h2>
-<ul class="items"><li>
+<ul class="items surface"><li class="card">
   <a class="item-title" href="/incidents/2">Database upgrade</a>
   <div class="meta">
     <span class="badge scheduled">scheduled</span>
@@ -46,7 +48,7 @@ expression: normalize(&page)
   </div>
   <div class="markdown"><p>Looking into <strong>Database upgrade</strong>.</p>
 </div>
-</li><li>
+</li><li class="card">
   <a class="item-title" href="/incidents/1">Elevated API errors</a>
   <div class="meta">
     <span class="badge investigating">investigating</span>
@@ -59,46 +61,52 @@ expression: normalize(&page)
 </ul>
 </section>
 <section id="components" aria-labelledby="components-heading" hx-get="/fragments/components" hx-trigger="sse:component_changed, sse:incident_created, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML"><h2 id="components-heading">Components</h2>
-<ul class="components">
-  <li>
-    <div class="component-line">
-      <a href="/components/docs">Docs</a>
-      <span class="status unknown"><span class="glyph" aria-hidden="true">?</span> Unknown</span>
-    </div>
-  </li>
-</ul>
-<h3>Edge</h3>
-<ul class="components">
-  <li>
-    <div class="component-line">
-      <a href="/components/web">Web</a>
-      <span class="status degraded"><span class="glyph" aria-hidden="true">▲</span> Degraded</span>
-    </div>
-  </li>
-</ul>
-<h3>Core</h3>
-<p class="muted">What everything else runs on</p>
-<ul class="components">
-  <li>
-    <div class="component-line">
-      <a href="/components/jobs">Jobs</a>
-      <span class="status operational"><span class="glyph" aria-hidden="true">✓</span> Operational</span>
-    </div>
-  </li>
-  <li>
-    <div class="component-line">
-      <a href="/components/api">API</a>
-      <span class="status down"><span class="glyph" aria-hidden="true">✕</span> Down</span>
-    </div>
-    <div class="muted">The public API</div>
-  </li>
-</ul>
+<div class="surface group">
+  <ul class="components"><li class="component">
+  <div class="component-line">
+    <a class="name" href="/components/docs">Docs</a>
+    <span class="status unknown"><span class="glyph" aria-hidden="true">?</span> Unknown</span>
+  </div>
+</li>
+  </ul>
+</div>
+<div class="surface group">
+  <div class="group-head">
+    <h3>Edge</h3>
+  </div>
+  <ul class="components"><li class="component">
+  <div class="component-line">
+    <a class="name" href="/components/web">Web</a>
+    <span class="status degraded"><span class="glyph" aria-hidden="true">▲</span> Degraded</span>
+  </div>
+</li>
+  </ul>
+</div>
+<div class="surface group">
+  <div class="group-head">
+    <h3>Core</h3>
+    <p class="muted">What everything else runs on</p>
+  </div>
+  <ul class="components"><li class="component">
+  <div class="component-line">
+    <a class="name" href="/components/jobs">Jobs</a>
+    <span class="status operational"><span class="glyph" aria-hidden="true">✓</span> Operational</span>
+  </div>
+</li><li class="component">
+  <div class="component-line">
+    <a class="name" href="/components/api">API</a>
+    <span class="status down"><span class="glyph" aria-hidden="true">✕</span> Down</span>
+  </div>
+  <p class="component-description">The public API</p>
+</li>
+  </ul>
+</div>
 </section>
 <section id="uptime" aria-labelledby="uptime-heading" hx-get="/fragments/uptime" hx-trigger="sse:resync, every 600s" hx-swap="innerHTML"><h2 id="uptime-heading">Uptime, last 90 days</h2>
-<p class="muted">One mark per UTC day, today last; hover a day for its figure. Recomputed hourly.</p>
-<ul class="uptime">
+<p class="muted section-note">One mark per UTC day, today last; hover a day for its figure. Recomputed hourly.</p>
+<ul class="surface uptime">
   <li>
-    <a class="uptime-name" href="/components/docs">Docs</a><ol class="bar">
+    <a class="name" href="/components/docs">Docs</a><ol class="bar">
   <li class="day none"><span class="tip"><day>: no data</span></li>
   <li class="day none"><span class="tip"><day>: no data</span></li>
   <li class="day none"><span class="tip"><day>: no data</span></li>
@@ -188,12 +196,13 @@ expression: normalize(&page)
   <li class="day none"><span class="tip"><day>: no data</span></li>
   <li class="day none"><span class="tip"><day>: no data</span></li>
   <li class="day none"><span class="tip"><day>: no data</span></li>
-  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none today"><span class="tip"><day>, today: no data yet, the first figure comes within the hour</span></li>
 </ol>
+<div class="bar-axis" aria-hidden="true"><span class="long">90 days ago</span><span class="short">30 days ago</span><span>Today</span></div>
 <p class="bar-summary">No data in the last 90 days</p>
   </li>
   <li>
-    <a class="uptime-name" href="/components/web">Web</a><ol class="bar">
+    <a class="name" href="/components/web">Web</a><ol class="bar">
   <li class="day none"><span class="tip"><day>: no data</span></li>
   <li class="day none"><span class="tip"><day>: no data</span></li>
   <li class="day none"><span class="tip"><day>: no data</span></li>
@@ -283,12 +292,13 @@ expression: normalize(&page)
   <li class="day none"><span class="tip"><day>: no data</span></li>
   <li class="day none"><span class="tip"><day>: no data</span></li>
   <li class="day none"><span class="tip"><day>: no data</span></li>
-  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none today"><span class="tip"><day>, today: no data yet, the first figure comes within the hour</span></li>
 </ol>
+<div class="bar-axis" aria-hidden="true"><span class="long">90 days ago</span><span class="short">30 days ago</span><span>Today</span></div>
 <p class="bar-summary">No data in the last 90 days</p>
   </li>
   <li>
-    <a class="uptime-name" href="/components/jobs">Jobs</a><ol class="bar">
+    <a class="name" href="/components/jobs">Jobs</a><ol class="bar">
   <li class="day none"><span class="tip"><day>: no data</span></li>
   <li class="day none"><span class="tip"><day>: no data</span></li>
   <li class="day none"><span class="tip"><day>: no data</span></li>
@@ -378,12 +388,13 @@ expression: normalize(&page)
   <li class="day none"><span class="tip"><day>: no data</span></li>
   <li class="day none"><span class="tip"><day>: no data</span></li>
   <li class="day none"><span class="tip"><day>: no data</span></li>
-  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none today"><span class="tip"><day>, today: no data yet, the first figure comes within the hour</span></li>
 </ol>
+<div class="bar-axis" aria-hidden="true"><span class="long">90 days ago</span><span class="short">30 days ago</span><span>Today</span></div>
 <p class="bar-summary">No data in the last 90 days</p>
   </li>
   <li>
-    <a class="uptime-name" href="/components/api">API</a><ol class="bar">
+    <a class="name" href="/components/api">API</a><ol class="bar">
   <li class="day none"><span class="tip"><day>: no data</span></li>
   <li class="day none"><span class="tip"><day>: no data</span></li>
   <li class="day none"><span class="tip"><day>: no data</span></li>
@@ -473,14 +484,15 @@ expression: normalize(&page)
   <li class="day none"><span class="tip"><day>: no data</span></li>
   <li class="day none"><span class="tip"><day>: no data</span></li>
   <li class="day none"><span class="tip"><day>: no data</span></li>
-  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none today"><span class="tip"><day>, today: no data yet, the first figure comes within the hour</span></li>
 </ol>
+<div class="bar-axis" aria-hidden="true"><span class="long">90 days ago</span><span class="short">30 days ago</span><span>Today</span></div>
 <p class="bar-summary">No data in the last 90 days</p>
   </li>
 </ul>
 </section>
 <section id="resolved" aria-labelledby="resolved-heading" hx-get="/fragments/resolved" hx-trigger="sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML"><h2 id="resolved-heading">Recently resolved</h2>
-<ul class="items"><li>
+<ul class="items surface"><li class="card">
   <a class="item-title" href="/incidents/3">Slow page loads</a>
   <div class="meta">
     <span class="badge resolved">resolved</span>
@@ -494,7 +506,7 @@ expression: normalize(&page)
 <p class="pager"><a href="/history">Incident history</a></p>
 </section>
 <section id="releases" aria-labelledby="releases-heading" hx-get="/fragments/releases" hx-trigger="sse:release_published, sse:release_deployed, sse:resync, every 60s" hx-swap="innerHTML"><h2 id="releases-heading">Latest releases</h2>
-<ul class="items">
+<ul class="items surface">
   <li>
     <a class="item-title" href="/releases/app/1.2.0">Example app 1.2.0</a>
     <div class="meta">Faster search · <time datetime="<instant>"><when> IST</time></div>
@@ -515,7 +527,7 @@ expression: normalize(&page)
       <li><a href="/api/v1/status.json">Status API</a></li>
     </ul>
   </nav>
-  <p>Powered by <a href="https://github.com/closient/tocsin">tocsin</a>.</p>
+  <p class="powered">Powered by <a href="https://github.com/closient/tocsin">tocsin</a>.</p>
 </footer>
 </body>
 </html>

@@ -1,0 +1,13 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{#- One component in a group's list; the including template binds
+    `component` (a ComponentRow, web/status.rs). -#}
+<li class="component">
+  <div class="component-line">
+    <a class="name" href="{{ component.href }}">{{ component.name }}</a>
+    {% let label = component.status -%}
+    {%- include "status/label.html" %}
+  </div>
+  {%- if let Some(description) = component.description %}
+  <p class="component-description">{{ description }}</p>
+  {%- endif %}
+</li>

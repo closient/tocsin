@@ -3,7 +3,7 @@
 {%- if releases.is_empty() %}
 <p class="muted">No releases yet.</p>
 {%- else %}
-<ul class="items">
+<ul class="items surface">
   {%- for release in releases %}
   <li>
     <a class="item-title" href="{{ release.href }}">{{ release.project }} {{ release.version }}</a>

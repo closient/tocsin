@@ -115,7 +115,7 @@ pub fn for_component(config: &Config, id: &str, name: &str) -> Vec<FeedLink> {
 /// [`site`], after project `id`'s release feed.
 pub fn for_project(state: &AppState, id: &str) -> Vec<FeedLink> {
     let mut feeds = vec![FeedLink {
-        title: format!("{} releases", project_name(state, id)),
+        title: format!("{} releases", project_name(&state.config, id)),
         href: project_href(id),
     }];
     feeds.extend(site(&state.config));
@@ -271,7 +271,7 @@ impl<'a> Site<'a> {
             id: format!("urn:tocsin:release:{}:{}", release.project, release.version),
             title: format!(
                 "{} {}: {}",
-                project_name(state, &release.project),
+                project_name(&state.config, &release.project),
                 release.version,
                 release.display_title()
             ),
@@ -447,7 +447,7 @@ async fn releases(
             id: format!("urn:tocsin:releases:{id}"),
             title: format!(
                 "{} releases · {}",
-                project_name(state, id),
+                project_name(&state.config, id),
                 state.config.page.title
             ),
             path: project_href(id),

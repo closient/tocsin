@@ -8,8 +8,10 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use tocsin_core::incident::Timestamp;
 
-use super::assets;
+use tocsin_core::config::Page;
+
 use super::identity::Admin;
+use super::{assets, theme};
 
 /// The fields `templates/base.html` reads. Every page template extends
 /// `base.html` and has a `layout: Layout` field.
@@ -18,6 +20,9 @@ pub struct Layout {
     pub title: String,
     /// The stylesheet's URL, with its content hash.
     pub stylesheet: &'static str,
+    /// The `[page] accent` stylesheet's URL, loaded after the stylesheet;
+    /// see [`Layout::themed`].
+    pub theme: Option<String>,
     /// The signed-in person, shown in the header.
     pub signed_in: Option<String>,
     /// The Atom feeds the page advertises to feed readers, most specific
@@ -37,6 +42,7 @@ impl Layout {
         Layout {
             title: title.into(),
             stylesheet: assets::url("tocsin.css"),
+            theme: None,
             signed_in: None,
             feeds: Vec::new(),
         }
@@ -55,9 +61,18 @@ impl Layout {
         Layout {
             title: title.into(),
             stylesheet: assets::url("tocsin.css"),
+            theme: None,
             signed_in: Some(admin.email.clone()),
             feeds: Vec::new(),
         }
+    }
+
+    /// The same, in `page`'s accent colour. The public pages use it; the
+    /// admin pages and error pages keep the default.
+    #[must_use]
+    pub fn themed(mut self, page: &Page) -> Self {
+        self.theme = theme::url(page);
+        self
     }
 }
 

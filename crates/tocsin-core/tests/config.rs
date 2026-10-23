@@ -4,7 +4,7 @@
 //! column.
 
 use tocsin_core::config::{
-    AuthMode, CheckType, Config, Diagnostic, Environment, Id, NotifierType, Secret, Source,
+    AuthMode, CheckType, Config, DARK, Diagnostic, Environment, Id, NotifierType, Secret, Source,
     TokenScope, load,
 };
 
@@ -1255,6 +1255,61 @@ url = "https://acme.example/support"
     assert_eq!(config.page.timezone, "Europe/Berlin");
     // Unset, the page shows UTC.
     assert_eq!(run(&[]).unwrap().page.timezone, "UTC");
+}
+
+#[test]
+fn an_accent_sets_both_schemes() {
+    // Set alone, the dark scheme's is derived and still reads.
+    let config = run(&[("page.toml", "[page]\naccent = \"#7A1FA2\"\n")]).expect("valid");
+    let (light, dark) = config.page.accents();
+    assert_eq!(
+        light.map(|colour| colour.to_string()).as_deref(),
+        Some("#7a1fa2")
+    );
+    let dark = dark.expect("derived");
+    assert_ne!(dark, light.unwrap());
+    assert!(DARK.passes(dark), "{dark}");
+    // Given, the dark one is used as written.
+    let config = run(&[(
+        "page.toml",
+        "[page]\naccent = \"#06c\"\naccent_dark = \"#58a6ff\"\n",
+    )])
+    .expect("valid");
+    let shown = config.page.accents();
+    assert_eq!(
+        (shown.0.unwrap().to_string(), shown.1.unwrap().to_string()),
+        ("#0066cc".to_owned(), "#58a6ff".to_owned())
+    );
+    // Unset, the stylesheet keeps its own.
+    assert_eq!(run(&[]).unwrap().page.accents(), (None, None));
+}
+
+#[test]
+fn an_accent_that_is_not_a_hex_colour_is_located_at_its_value() {
+    let diagnostic = only_error(&[("page.toml", "[page]\naccent = \"rebeccapurple\"\n")]);
+    assert_eq!(
+        diagnostic.to_string(),
+        "page.toml:2:10: invalid colour `rebeccapurple`: write it in hex, such as \"#0b5cad\" or \"#06c\" (page.accent)"
+    );
+}
+
+#[test]
+fn an_accent_too_light_for_the_light_scheme_is_refused() {
+    let diagnostic = only_error(&[("page.toml", "[page]\naccent = \"#ffcc00\"\n")]);
+    assert_eq!(
+        diagnostic.to_string(),
+        "page.toml:2:10: `#ffcc00` has 1.42:1 contrast with the light scheme's background #f6f8fa; text needs at least 4.5:1 (WCAG AA) (page.accent)\n  hint: choose a darker colour"
+    );
+}
+
+#[test]
+fn a_dark_accent_too_dark_for_the_dark_scheme_is_refused() {
+    let page = "[page]\naccent = \"#0b5cad\"\naccent_dark = \"#1f6feb\"\n";
+    let diagnostic = only_error(&[("page.toml", page)]);
+    assert_eq!(
+        diagnostic.to_string(),
+        "page.toml:3:15: `#1f6feb` has 3.73:1 contrast with the dark scheme's surface #161b22; text needs at least 4.5:1 (WCAG AA) (page.accent_dark)\n  hint: choose a lighter colour, or leave `accent_dark` out to derive it from `accent`"
+    );
 }
 
 #[test]

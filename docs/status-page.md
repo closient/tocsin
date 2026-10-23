@@ -9,7 +9,7 @@ same incidents, and releases of public projects only. Its look is set by
 
 | Page | |
 |---|---|
-| `/` | The overall status banner; each group and its components with their status; a 90-day uptime bar per component; incidents and maintenance in progress; the five most recently resolved; the five latest releases, when a project is public. |
+| `/` | The overall status; each group and its components with their status; a 90-day uptime bar per component; incidents and maintenance in progress; the five most recently resolved; the five latest releases, when a project is public. |
 | `/incidents/<id>` | One incident or maintenance window: its components, every update newest first, and when it started and ended. |
 | `/history` | Every incident and maintenance window, newest first, 25 to a page, with a link to older ones. |
 | `/components/<id>` | One component: its status, its uptime bar, what is open against it, and its outages, incidents and deploys of the last 30 days. |
@@ -31,7 +31,18 @@ shows the worst health any of them saw: up, degraded, down, or no data,
 each with its own fill pattern so none rests on colour alone. Hovering a
 cell shows its day and figure, which a screen reader reads as text, and a
 line under each bar sums it up. Percentages are floored, so a day with one
-failure never reads 100%.
+failure never reads 100%. Today, the last cell, covers the day so far and
+says so; before its first rollup it is a short cell in the muted colour
+that says a figure comes within the hour, rather than one that reads as
+missing data. A phone shows the newest 30 days.
+
+## Look
+
+The system's own sans-serif, no web font; colours are tokens at the top of
+[`tocsin.css`](../crates/tocsin/static/tocsin.css), each set once for the
+light and once for the dark scheme, and every pairing of text and
+background in them reaches WCAG AA (a test checks). `[page] accent` and
+`accent_dark` change the accent token; see [`[page]`](config.md#page).
 
 ## Live updates
 

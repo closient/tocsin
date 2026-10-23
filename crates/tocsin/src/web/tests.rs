@@ -1598,7 +1598,7 @@ async fn the_admin_timeline_shows_private_deploys_to_an_admin_only() {
         assert_eq!(status, StatusCode::OK, "{uri}");
         let page = text(response).await;
         assert!(
-            page.contains("internal v9.9.9 to production"),
+            page.contains("Internal v9.9.9 to production"),
             "{uri}: {page}"
         );
         assert!(page.contains("deployed before it was published"), "{uri}");
@@ -1694,12 +1694,12 @@ async fn the_admin_timeline_shows_the_newest_page_and_says_so() {
     assert_eq!(status, StatusCode::OK);
     let page = text(response).await;
     assert!(page.contains("these are the newest 500."), "{page}");
-    let newest = page.find("api r509 to production").unwrap();
-    let oldest_shown = page.find("api r10 to production").unwrap();
+    let newest = page.find("API r509 to production").unwrap();
+    let oldest_shown = page.find("API r10 to production").unwrap();
     assert!(newest < oldest_shown, "newest first");
     for hidden in 0..10 {
         assert!(
-            !page.contains(&format!("api r{hidden} to production")),
+            !page.contains(&format!("API r{hidden} to production")),
             "r{hidden}"
         );
     }

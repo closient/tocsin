@@ -11,6 +11,7 @@
 //! - **Assets**: [`assets`] compiles `crates/tocsin/static/` into the binary
 //!   and serves each file under its content hash, cached as immutable.
 //!   htmx is vendored there; no page loads anything from another origin.
+//!   `[page] accent` is a second, generated stylesheet ([`theme`]).
 //! - **Identity**: a page that needs a signed-in person takes
 //!   [`identity::Admin`]; a write takes [`identity::AdminForm`], which adds
 //!   the CSRF checks in [`csrf`].
@@ -29,6 +30,7 @@ pub mod markdown;
 pub mod page;
 pub mod releases;
 pub mod status;
+pub mod theme;
 pub mod timeline;
 pub mod uptime;
 
@@ -52,6 +54,10 @@ pub fn router(state: &AppState) -> Router<AppState> {
         .route(
             &format!("{}/{{hash}}/{{name}}", assets::PREFIX),
             get(assets::serve),
+        )
+        .route(
+            &format!("{}/{{hash}}/accent.css", theme::PREFIX),
+            get(theme::serve),
         )
         .merge(status::router())
         .merge(releases::router())

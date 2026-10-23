@@ -1,7 +1,8 @@
 {#- SPDX-License-Identifier: AGPL-3.0-only -#}
 {% extends "status/layout.html" %}
 {% block content %}
-<p><a href="/history">Incident history</a></p>
+<p class="back"><a href="/history">Incident history</a></p>
+<div class="intro">
 <h1>{{ card.title }}</h1>
 <div class="meta">
   <span class="badge {{ card.status }}">{{ card.status_text }}</span>
@@ -17,14 +18,15 @@
   </span>
 </div>
 {%- if !card.components.is_empty() %}
-<p class="muted">Affects {{ card.components }}</p>
+<p class="lede">Affects {{ card.components }}</p>
 {%- endif %}
+</div>
 
 <h2>Updates</h2>
 {%- if updates.is_empty() %}
 <p class="muted">No updates yet.</p>
 {%- else %}
-<ol class="items">
+<ol class="items surface updates">
   {%- for update in updates %}
   <li>
     <div class="meta">

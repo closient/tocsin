@@ -1,29 +1,47 @@
 /* SPDX-License-Identifier: AGPL-3.0-only */
-/* Shared by every tocsin page. No framework: system fonts, one column on a
-   phone, a readable measure on a desktop, light and dark from the OS. */
+/* Shared by every tocsin page. No framework and no web font: the system's
+   own sans-serif, one column on a phone, a readable measure on a desktop,
+   light and dark from the OS.
+
+   Colours are tokens, set once per scheme; every other rule reads them.
+   `[page] accent` replaces --accent from a second stylesheet (web/theme.rs).
+   --bg and --panel are the backgrounds an accent is checked against
+   (tocsin-core config/colour.rs); a test keeps the two in step. */
 
 :root {
   color-scheme: light dark;
-  --bg: #ffffff;
-  --fg: #1b1f24;
+  --bg: #f6f8fa;
+  --panel: #ffffff;
+  --fg: #1f2328;
   --muted: #59636e;
   --line: #d1d9e0;
-  --panel: #f6f8fa;
   --accent: #0b5cad;
   --accent-fg: #ffffff;
   --ok: #1a7f37;
   --warn: #9a6700;
   --bad: #cf222e;
+
+  --font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  /* Type scale: a 1.125 ratio around 1rem. */
+  --step--1: 0.8125rem;
+  --step-0: 1rem;
+  --step-1: 1.125rem;
+  --step-2: 1.375rem;
+  --step-3: 1.75rem;
+  --space: 1rem;
+  --measure: 52rem;
   --radius: 6px;
+  --radius-lg: 10px;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #0d1117;
+    --panel: #161b22;
     --fg: #e6edf3;
     --muted: #9198a1;
     --line: #3d444d;
-    --panel: #151b23;
     --accent: #4493f8;
     --accent-fg: #0d1117;
     --ok: #3fb950;
@@ -38,73 +56,103 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--fg);
-  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font: var(--step-0)/1.5 var(--font);
   -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 header.site, main, footer.site {
-  max-width: 48rem;
+  max-width: var(--measure);
   margin: 0 auto;
-  padding: 0 1rem;
+  padding: 0 var(--space);
 }
 
 header.site {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem 1rem;
-  align-items: baseline;
+  gap: 0.5rem 1.5rem;
+  align-items: center;
   justify-content: space-between;
-  padding-top: 1rem;
-  padding-bottom: 0.75rem;
-  border-bottom: 1px solid var(--line);
+  padding-top: 1.25rem;
+  padding-bottom: 1.25rem;
 }
 
 header.site a.home { color: var(--fg); font-weight: 700; text-decoration: none; }
-header.site .who { color: var(--muted); font-size: 0.875rem; overflow-wrap: anywhere; }
+header.site .who { color: var(--muted); font-size: var(--step--1); overflow-wrap: anywhere; }
 
-main { padding-top: 1rem; padding-bottom: 2rem; }
-footer.site { color: var(--muted); font-size: 0.875rem; padding-bottom: 2rem; }
+main { padding-top: 0.5rem; padding-bottom: 3rem; }
+footer.site { color: var(--muted); font-size: var(--step--1); padding-bottom: 2.5rem; }
 
-h1 { font-size: 1.5rem; line-height: 1.25; margin: 0.5rem 0 1rem; overflow-wrap: anywhere; }
-h2 { font-size: 1.125rem; margin: 2rem 0 0.75rem; }
-h3 { font-size: 1rem; margin: 1.25rem 0 0.5rem; }
-a { color: var(--accent); }
+h1, h2, h3 { line-height: 1.25; overflow-wrap: anywhere; }
+h1 { font-size: var(--step-3); font-weight: 700; letter-spacing: -0.01em; margin: 0.5rem 0 1rem; }
+h2 { font-size: var(--step-1); font-weight: 650; margin: 2.5rem 0 0.75rem; }
+h3 { font-size: var(--step-0); font-weight: 650; margin: 0; }
 p, ul, ol { margin: 0 0 0.75rem; }
+code, pre { font-family: var(--mono); font-size: 0.875em; }
+
+/* Links by role. In running text a link is underlined, since colour alone
+   does not set it apart from the words around it; where a link stands on
+   its own (navigation, names, titles, back and pager links) its place says
+   what it is, and it is underlined on hover and focus only. */
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 0.2em; }
+a:hover { text-decoration-thickness: 2px; }
+a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+ul.links a, a.name, a.item-title, .back a, .pager a { text-decoration: none; }
+ul.links a:hover, a.name:hover, a.item-title:hover, .back a:hover, .pager a:hover,
+ul.links a:focus-visible, a.name:focus-visible, a.item-title:focus-visible { text-decoration: underline; }
+a.name, a.item-title { color: var(--fg); }
 
 .muted { color: var(--muted); }
 .notice { padding: 0.75rem 1rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
 .notice.error { border-color: var(--bad); }
 
-/* Lists of incidents and timelines */
-.items { list-style: none; padding: 0; margin: 0; }
+/* A surface: the quiet card groups, lists and bars sit on. */
+.surface {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+}
+
+/* Lists of incidents, releases and timelines */
+.items { list-style: none; padding: 0; margin: 0 0 0.75rem; }
 .items > li { padding: 0.75rem 0; border-bottom: 1px solid var(--line); }
 .items > li:last-child { border-bottom: 0; }
-.item-title { font-weight: 600; overflow-wrap: anywhere; }
-.meta { color: var(--muted); font-size: 0.875rem; }
+.items.surface > li { padding: 1rem 1.25rem; }
+.item-title { display: inline-block; font-weight: 600; overflow-wrap: anywhere; }
+.meta { display: flex; flex-wrap: wrap; gap: 0.375rem 0.5rem; align-items: center; margin-top: 0.25rem; color: var(--muted); font-size: var(--step--1); }
+.items .markdown { margin-top: 0.5rem; }
 
+/* A badge is a word in a neutral pill; the dot before it repeats the word
+   in colour. */
 .badge {
-  display: inline-block;
-  padding: 0 0.5rem;
-  border: 1px solid currentColor;
+  display: inline-flex;
+  gap: 0.375rem;
+  align-items: center;
+  padding: 0 0.625rem;
+  border: 1px solid var(--line);
   border-radius: 999px;
+  background: var(--bg);
+  color: var(--fg);
   font-size: 0.75rem;
   font-weight: 600;
-  line-height: 1.5rem;
+  line-height: 1.375rem;
   white-space: nowrap;
 }
-.badge.none, .badge.resolved, .badge.completed { color: var(--ok); }
-.badge.minor, .badge.monitoring, .badge.identified { color: var(--warn); }
-.badge.major, .badge.critical, .badge.investigating { color: var(--bad); }
+.badge::before { content: ""; width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--muted); }
+.badge.none::before, .badge.resolved::before, .badge.completed::before { background: var(--ok); }
+.badge.minor::before, .badge.monitoring::before, .badge.identified::before, .badge.degraded::before { background: var(--warn); }
+.badge.major::before, .badge.critical::before, .badge.investigating::before, .badge.down::before { background: var(--bad); }
+.badge.maintenance::before, .badge.scheduled::before, .badge.in_progress::before { background: var(--accent); }
 
 .markdown :first-child { margin-top: 0; }
 .markdown :last-child { margin-bottom: 0; }
-.markdown pre { overflow-x: auto; padding: 0.5rem; background: var(--panel); border-radius: var(--radius); }
+.markdown pre { overflow-x: auto; padding: 0.5rem; background: var(--bg); border-radius: var(--radius); }
 
 /* Forms: full width on a phone, large touch targets */
-form.stack { display: grid; gap: 0.75rem; padding: 1rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+form.stack { display: grid; gap: 0.75rem; padding: 1rem; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--panel); }
 form.inline { display: inline; }
 label { display: grid; gap: 0.25rem; font-weight: 600; }
-label .hint { font-weight: 400; color: var(--muted); font-size: 0.875rem; }
+label .hint { font-weight: 400; color: var(--muted); font-size: var(--step--1); }
 fieldset { border: 0; padding: 0; margin: 0; display: grid; gap: 0.25rem; }
 legend { font-weight: 600; padding: 0; margin-bottom: 0.25rem; }
 fieldset label { display: flex; gap: 0.5rem; align-items: center; font-weight: 400; }
@@ -115,7 +163,7 @@ input[type="text"], select, textarea {
   padding: 0.5rem 0.75rem;
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  background: var(--bg);
+  background: var(--panel);
   color: var(--fg);
   font: inherit;
 }
@@ -136,62 +184,115 @@ button {
 button.secondary { background: transparent; color: var(--accent); }
 button:disabled, .htmx-request button { opacity: 0.6; cursor: progress; }
 
-.field-error { color: var(--bad); font-size: 0.875rem; font-weight: 400; }
+.field-error { color: var(--bad); font-size: var(--step--1); font-weight: 400; }
 .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
-.pager { margin-top: 1rem; }
+.pager { margin-top: 0.75rem; font-size: var(--step--1); font-weight: 600; }
 
 /* The public status page (templates/status/). A status is always a word
    with a glyph beside it; colour only repeats what they say. */
-.skip { position: absolute; left: -100vw; top: 0.5rem; padding: 0.5rem 1rem; background: var(--bg); color: var(--accent); border: 1px solid var(--accent); border-radius: var(--radius); }
+.skip { position: absolute; left: -100vw; top: 0.5rem; padding: 0.5rem 1rem; background: var(--panel); color: var(--accent); border: 1px solid var(--accent); border-radius: var(--radius); }
 .skip:focus { left: 0.5rem; z-index: 2; }
-header.site.status a.home { display: inline-flex; gap: 0.5rem; align-items: center; font-size: 1.125rem; }
+header.site.status a.home { display: inline-flex; gap: 0.625rem; align-items: center; font-size: var(--step-1); }
 header.site.status .logo { height: 2rem; width: auto; }
-ul.links { list-style: none; display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; padding: 0; margin: 0; }
-footer.site.status { padding-top: 1rem; border-top: 1px solid var(--line); }
-footer.site.status ul.links { margin-bottom: 0.5rem; }
+ul.links { list-style: none; display: flex; flex-wrap: wrap; gap: 0 1.25rem; padding: 0; margin: 0; font-size: 0.9375rem; font-weight: 500; }
+/* At least 24px tall, so wrapped rows of links stay separate targets. */
+ul.links a { display: inline-block; padding: 0.25rem 0; }
+header.site.status ul.links a { color: var(--muted); }
+header.site.status ul.links a:hover { color: var(--fg); }
+footer.site.status { padding-top: 1.5rem; border-top: 1px solid var(--line); }
+footer.site.status ul.links { margin-bottom: 0.75rem; font-size: inherit; }
+footer.site.status ul.links a { color: var(--muted); }
+footer.site.status ul.links a:hover { color: var(--fg); }
+.powered { margin: 0; }
+.powered a { color: inherit; }
 
-.banner {
-  margin: 0 0 1rem;
-  padding: 0.75rem 1rem;
-  border: 1px solid currentColor;
-  border-left-width: 0.5rem;
-  border-radius: var(--radius);
+.intro { margin-bottom: 1.5rem; }
+.intro h1 { margin-top: 0; }
+.lede { color: var(--muted); font-size: var(--step-1); margin: -0.25rem 0 0.75rem; }
+.intro .meta { font-size: var(--step--1); margin: 0 0 0.75rem; }
+.facts { margin: 0 0 0.5rem; }
+.back { margin: 0 0 0.75rem; font-size: var(--step--1); font-weight: 600; }
+.back a::before { content: "\2190\00a0"; }
+.section-note { margin-top: -0.375rem; font-size: var(--step--1); }
+
+/* The overall status: the first thing the page says. */
+.hero {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  margin: 0;
+  padding: 1.25rem 1.5rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
   background: var(--panel);
-  font-size: 1.125rem;
+}
+.hero-mark {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: 50%;
+  background: var(--muted);
+  color: var(--panel);
+  font-size: var(--step-1);
   font-weight: 700;
 }
+.hero-text { font-size: var(--step-2); font-weight: 650; line-height: 1.25; overflow-wrap: anywhere; }
+.hero.operational { border-top: 4px solid var(--ok); }
+.hero.degraded { border-top: 4px solid var(--warn); }
+.hero.down { border-top: 4px solid var(--bad); }
+.hero.maintenance { border-top: 4px solid var(--accent); }
+.hero.unknown { border-top: 4px solid var(--muted); }
+.hero.operational .hero-mark { background: var(--ok); }
+.hero.degraded .hero-mark { background: var(--warn); }
+.hero.down .hero-mark { background: var(--bad); }
+.hero.maintenance .hero-mark { background: var(--accent); color: var(--accent-fg); }
+
 .status { font-weight: 600; white-space: nowrap; }
-.banner.operational, .status.operational { color: var(--ok); }
-.banner.degraded, .status.degraded { color: var(--warn); }
-.banner.down, .status.down { color: var(--bad); }
-.banner.maintenance, .status.maintenance { color: var(--accent); }
-.banner.unknown, .status.unknown { color: var(--muted); }
-.badge.maintenance, .badge.scheduled, .badge.in_progress { color: var(--accent); }
+.status.operational { color: var(--ok); }
+.status.degraded { color: var(--warn); }
+.status.down { color: var(--bad); }
+.status.maintenance { color: var(--accent); }
+.status.unknown { color: var(--muted); }
+.glyph { display: inline-block; min-width: 1em; text-align: center; }
 
-ul.components { list-style: none; padding: 0; margin: 0 0 1rem; }
-ul.components > li { padding: 0.5rem 0; border-bottom: 1px solid var(--line); }
+/* Component groups: a surface each, a quiet heading, a row per component. */
+.group { margin-bottom: 1rem; overflow: hidden; }
+.group-head { padding: 0.875rem 1.25rem; border-bottom: 1px solid var(--line); }
+.group-head .muted { margin: 0.125rem 0 0; font-size: var(--step--1); }
+ul.components { list-style: none; padding: 0; margin: 0; }
+ul.components > li { padding: 0.875rem 1.25rem; border-bottom: 1px solid var(--line); }
 ul.components > li:last-child { border-bottom: 0; }
-.component-line { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; justify-content: space-between; }
+.component-line { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; align-items: baseline; justify-content: space-between; }
+.component-line .name { font-weight: 500; }
+.component-description { margin: 0.125rem 0 0; color: var(--muted); font-size: var(--step--1); }
 
-/* Uptime bars: one cell per day. Up is solid, degraded striped, down
-   cross-hatched, no data an empty outline; each cell's text shows on
-   hover and is read by screen readers. */
+/* Uptime bars: one rounded cell per day with a gap between. Up is solid;
+   degraded is striped; down is solid with a notch cut from its top; no
+   data is a low stub, and today without a figure yet is a stub in the
+   muted colour. Each cell's text shows on hover and is read by screen
+   readers. A phone shows the newest 30 days. */
 ul.uptime { list-style: none; padding: 0; margin: 0; }
-ul.uptime > li { padding: 0.5rem 0; }
-.uptime-name { font-weight: 600; }
-ol.bar { list-style: none; display: flex; gap: 1px; height: 2rem; padding: 0; margin: 0.25rem 0; }
-ol.bar .day { position: relative; flex: 1 1 0; min-width: 0; border-radius: 1px; }
+ul.uptime > li { padding: 1rem 1.25rem; border-bottom: 1px solid var(--line); }
+ul.uptime > li:last-child { border-bottom: 0; }
+div.uptime { padding: 1rem 1.25rem; }
+.uptime .name { font-weight: 500; }
+ol.bar { list-style: none; display: flex; gap: 2px; align-items: flex-end; height: 2.25rem; padding: 0; margin: 0.5rem 0 0.25rem; }
+ol.bar .day { position: relative; flex: 1 1 0; min-width: 0; height: 100%; border-radius: 2px; }
 .day.up { background: var(--ok); }
-.day.degraded { background: repeating-linear-gradient(135deg, var(--warn) 0 3px, transparent 3px 5px); }
+.day.degraded { background: repeating-linear-gradient(135deg, var(--warn) 0 3px, transparent 3px 5px); box-shadow: inset 0 0 0 1px var(--warn); }
 .day.down {
   background:
     repeating-linear-gradient(45deg, var(--bad) 0 2px, transparent 2px 4px),
     repeating-linear-gradient(135deg, var(--bad) 0 2px, transparent 2px 4px);
+  box-shadow: inset 0 0 0 1px var(--bad);
 }
-.day.none { border: 1px solid var(--muted); }
+.day.none { height: 30%; background: var(--line); }
+.day.today.none { height: 30%; background: var(--muted); }
 .day .tip { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .day:hover .tip {
-  bottom: calc(100% + 0.25rem);
+  bottom: calc(100% + 0.375rem);
   left: 50%;
   z-index: 1;
   width: auto;
@@ -205,6 +306,25 @@ ol.bar .day { position: relative; flex: 1 1 0; min-width: 0; border-radius: 1px;
   color: var(--bg);
   font-size: 0.75rem;
 }
+.day.none:hover .tip { bottom: calc(100% / 0.3 + 0.375rem); }
 .day:nth-child(-n+20):hover .tip { left: 0; transform: none; }
 .day:nth-last-child(-n+20):hover .tip { left: auto; right: 0; transform: none; }
-.bar-summary { margin: 0; color: var(--muted); font-size: 0.875rem; }
+.bar-axis { display: flex; justify-content: space-between; color: var(--muted); font-size: 0.75rem; }
+.bar-axis .short { display: none; }
+.bar-summary { margin: 0.25rem 0 0; color: var(--muted); font-size: var(--step--1); font-variant-numeric: tabular-nums; }
+
+/* Updates on an incident's page */
+.updates .markdown { margin-top: 0.375rem; }
+
+@media (max-width: 40rem) {
+  :root { --space: 1rem; }
+  h1 { font-size: var(--step-2); }
+  .hero { padding: 1rem; gap: 0.75rem; }
+  .hero-mark { width: 2.25rem; height: 2.25rem; }
+  .hero-text { font-size: var(--step-1); }
+  .group-head, ul.components > li, ul.uptime > li, div.uptime, .items.surface > li { padding-left: 1rem; padding-right: 1rem; }
+  ol.bar .day:nth-child(-n+60) { display: none; }
+  .day:nth-child(-n+70):hover .tip { left: 0; right: auto; transform: none; }
+  .bar-axis .long { display: none; }
+  .bar-axis .short { display: inline; }
+}

@@ -419,6 +419,11 @@
       "description": "An IP network such as \"10.0.0.0/8\" or \"fd00::/8\", or a single address such as \"192.0.2.7\".",
       "type": "string"
     },
+    "Colour": {
+      "description": "A colour in hex: \"#0b5cad\" or \"#06c\".",
+      "pattern": "^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$",
+      "type": "string"
+    },
     "Comparison": {
       "additionalProperties": false,
       "description": "Numeric bounds; every bound given must hold.",
@@ -1133,6 +1138,28 @@
       "additionalProperties": false,
       "description": "`[page]`: how the public status page looks, its title, logo, links,\nthe order of its groups and components, and the time zone it shows\ntimes in.",
       "properties": {
+        "accent": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Colour"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The colour of links, buttons and the maintenance status, in hex\nsuch as `\"#0b5cad\"`. It must reach WCAG AA contrast (4.5:1) on the\nlight scheme's page background and surfaces. Unless `accent_dark`\nis set, the dark scheme uses it mixed toward white until it reaches\n4.5:1 on the dark backgrounds. Unset, the page uses its own blue."
+        },
+        "accent_dark": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Colour"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The accent in the dark colour scheme, in hex. It must reach 4.5:1\non the dark scheme's page background and surfaces. Unset, it is\nderived from `accent`."
+        },
         "components": {
           "description": "The order components are shown in within their group, by id.\nComponents not listed follow in the order they are defined.",
           "items": {

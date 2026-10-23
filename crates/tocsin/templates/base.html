@@ -10,6 +10,9 @@
 <meta name="referrer" content="same-origin">
 <title>{% block title %}{{ layout.title }} · tocsin{% endblock %}</title>
 <link rel="stylesheet" href="{{ layout.stylesheet }}">
+{%- if let Some(theme) = layout.theme %}
+<link rel="stylesheet" href="{{ theme }}">
+{%- endif %}
 {%- for feed in layout.feeds %}
 <link rel="alternate" type="application/atom+xml" title="{{ feed.title }}" href="{{ feed.href }}">
 {%- endfor %}

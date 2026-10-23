@@ -2,7 +2,9 @@
 
 //! The status page's uptime bars: one cell per UTC day for the last
 //! [`DAYS`] days, read from the daily rollups the server recomputes every
-//! hour, so today's cell trails the live status by up to an hour.
+//! hour, so today's cell trails the live status by up to an hour. Today is
+//! marked as such and says it covers the day so far; until its first
+//! rollup it says the first figure is coming within the hour.
 //!
 //! A day's uptime for one check is the share of its results (or, for a
 //! heartbeat, its milliseconds) that were not down, every node summed; a
@@ -22,9 +24,9 @@ pub const DAYS: i64 = 90;
 /// Parts per million in a whole.
 const WHOLE: i64 = 1_000_000;
 
-/// What a day cell shows. Each tone has its own fill pattern in the
-/// stylesheet, and every cell carries its text, so no tone rests on
-/// colour alone.
+/// What a day cell shows. Each tone has its own fill in the stylesheet,
+/// told apart by shape as well as colour, and every cell carries its text,
+/// so no tone rests on colour alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
     /// Every result up.
@@ -65,6 +67,9 @@ pub struct DayCell {
     /// What it says on hover, and to a screen reader:
     /// `2026-10-22: 99.95% up, worst degraded`.
     pub text: String,
+    /// Whether this is today, which is still going: its figure covers the
+    /// day so far, and it has none until the first hourly rollup.
+    pub today: bool,
 }
 
 /// One component's bar, oldest day first.
@@ -142,21 +147,37 @@ pub fn bar(tallies: &Tallies, checks: &[String], today: Day) -> Bar {
     let mut counted = 0;
     let mut day = first_day(today);
     while day <= today {
+        let is_today = day == today;
+        let label = if is_today {
+            format!("{day}, today so far")
+        } else {
+            day.to_string()
+        };
         days.push(match tallies.day(checks, day) {
             Some((up, worst)) => {
                 sum += up;
                 counted += 1;
                 let tone = Tone::of(worst);
                 let text = if tone == Tone::Up {
-                    format!("{day}: {} up", percent(up))
+                    format!("{label}: {} up", percent(up))
                 } else {
-                    format!("{day}: {} up, worst {worst}", percent(up))
+                    format!("{label}: {} up, worst {worst}", percent(up))
                 };
-                DayCell { tone, text }
+                DayCell {
+                    tone,
+                    text,
+                    today: is_today,
+                }
             }
+            None if is_today => DayCell {
+                tone: Tone::NoData,
+                text: format!("{day}, today: no data yet, the first figure comes within the hour"),
+                today: true,
+            },
             None => DayCell {
                 tone: Tone::NoData,
                 text: format!("{day}: no data"),
+                today: false,
             },
         });
         day = day.plus(1);
@@ -240,7 +261,12 @@ mod tests {
         assert_eq!(bar.days.len(), 90);
         let last = &bar.days[89];
         assert_eq!(last.tone, Tone::Down);
-        assert_eq!(last.text, format!("{today}: 87.50% up, worst down"));
+        assert_eq!(
+            last.text,
+            format!("{today}, today so far: 87.50% up, worst down")
+        );
+        assert!(last.today);
+        assert!(bar.days[..89].iter().all(|day| !day.today));
         let before = &bar.days[88];
         assert_eq!(before.tone, Tone::Degraded);
         assert_eq!(
@@ -261,5 +287,11 @@ mod tests {
         let bar = bar(&Tallies::default(), &["web".to_owned()], today);
         assert!(bar.days.iter().all(|day| day.tone == Tone::NoData));
         assert_eq!(bar.summary, "No data in the last 90 days");
+        // Today is still going: a figure is on its way, not missing.
+        assert_eq!(
+            bar.days[89].text,
+            format!("{today}, today: no data yet, the first figure comes within the hour")
+        );
+        assert_eq!(bar.days[88].text, format!("{}: no data", today.plus(-1)));
     }
 }

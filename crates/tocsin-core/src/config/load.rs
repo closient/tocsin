@@ -18,6 +18,7 @@ use toml::de::{DeTable, DeValue, ValueDeserializer};
 
 use super::assertion::{Condition, TextAssertion};
 use super::check::CheckType;
+use super::colour::{AA_TEXT, DARK, LIGHT};
 use super::diagnostic::{Diagnostic, LineIndex};
 use super::notifier::NotifierType;
 use super::values::{Id, Secret, Text, email_address, is_unanswerable};
@@ -1299,6 +1300,31 @@ impl<'a> Loader<'a> {
                 format!("unknown time zone `{}`", value.timezone),
                 Some("use an IANA name such as \"Europe/Berlin\", or \"UTC\"".to_owned()),
             );
+        }
+        for (key, colour, scheme, hint) in [
+            ("accent", value.accent, LIGHT, "choose a darker colour"),
+            (
+                "accent_dark",
+                value.accent_dark,
+                DARK,
+                "choose a lighter colour, or leave `accent_dark` out to derive it from `accent`",
+            ),
+        ] {
+            let Some(colour) = colour else { continue };
+            let (ratio, against, background) = scheme.weakest(colour);
+            if ratio < AA_TEXT {
+                // Floored, so a near miss never reads as a pass.
+                let hundredths = (ratio * 100.0).floor() / 100.0;
+                self.report(
+                    &origin.key(key),
+                    format!(
+                        "`{colour}` has {hundredths:.2}:1 contrast with the {} scheme's {against} \
+                         {background}; text needs at least {AA_TEXT}:1 (WCAG AA)",
+                        scheme.name
+                    ),
+                    Some(hint.to_owned()),
+                );
+            }
         }
     }
 

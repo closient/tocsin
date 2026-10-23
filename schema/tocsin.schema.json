@@ -1,0 +1,1486 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AlertmanagerSettings": {
+      "additionalProperties": false,
+      "description": "`[notifier.alertmanager]`.",
+      "properties": {
+        "bearer_token": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Sent as `Authorization: Bearer ...`. Secret."
+        },
+        "url": {
+          "description": "The Alertmanager base URL, such as `http://alertmanager:9093`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    },
+    "Assertion": {
+      "additionalProperties": false,
+      "description": "One condition a probe result must meet, and the state a failure maps to.",
+      "properties": {
+        "body": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TextAssertion"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The response body text."
+        },
+        "certificate_days_remaining": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Comparison"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Days until the server certificate expires."
+        },
+        "header": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HeaderAssertion"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A response header."
+        },
+        "json": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/JsonAssertion"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A value in the JSON response body."
+        },
+        "latency_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Comparison"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The probe's latency, in milliseconds."
+        },
+        "on_fail": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/FailureState"
+            }
+          ],
+          "default": "down",
+          "description": "The state the check takes when this condition fails."
+        },
+        "records": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RecordsAssertion"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The records a DNS lookup returns."
+        },
+        "status": {
+          "description": "The HTTP status is one of these.",
+          "items": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Auth": {
+      "additionalProperties": false,
+      "description": "`[server.auth]`. Reserved for the admin page; it accepts no settings\nyet.",
+      "type": "object"
+    },
+    "Check": {
+      "additionalProperties": false,
+      "description": "A probe run on an interval, whose result sets a component's health.",
+      "properties": {
+        "assert": {
+          "description": "Conditions a result must meet, each `[[check.assert]]` table holding\none. With none, a probe that completes counts as up (for `http`, a\n2xx or 3xx status).",
+          "items": {
+            "$ref": "#/definitions/Assertion"
+          },
+          "type": "array"
+        },
+        "component": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Id"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The `[[component]]` whose health this check sets."
+        },
+        "confirm": {
+          "default": 1,
+          "description": "Consecutive results that disagree with the current state before the\nstate changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "dns": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DnsSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Settings for `dns` checks."
+        },
+        "http": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HttpSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Settings for `http` checks."
+        },
+        "id": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Id"
+            }
+          ],
+          "description": "Unique among checks in every file."
+        },
+        "interval": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Duration"
+            }
+          ],
+          "default": "1m",
+          "description": "How often the probe runs."
+        },
+        "link": {
+          "description": "Links shown with the check, such as its dashboard or runbook, each a\n`[[check.link]]` table.",
+          "items": {
+            "$ref": "#/definitions/Link"
+          },
+          "type": "array"
+        },
+        "name": {
+          "description": "Display name; the id is shown when it is absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "description": "What is probed. Its form depends on the type: a URL for `http`,\n`host:port` for `tcp`, `host` or `host:port` for `tls`, a domain\nname for `dns` and a host for `icmp`.",
+          "type": "string"
+        },
+        "timeout": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Duration"
+            }
+          ],
+          "default": "10s",
+          "description": "How long one probe may take before it counts as failed. Must be\nshorter than the interval."
+        },
+        "tls": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TlsSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Settings for `tls` checks."
+        },
+        "type": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CheckType"
+            }
+          ],
+          "description": "Which probe runs."
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "target"
+      ],
+      "type": "object"
+    },
+    "CheckType": {
+      "description": "The probe a check runs.",
+      "oneOf": [
+        {
+          "const": "http",
+          "description": "An HTTP or HTTPS request.",
+          "type": "string"
+        },
+        {
+          "const": "tcp",
+          "description": "A TCP connection.",
+          "type": "string"
+        },
+        {
+          "const": "dns",
+          "description": "A DNS lookup.",
+          "type": "string"
+        },
+        {
+          "const": "icmp",
+          "description": "An ICMP echo (ping).",
+          "type": "string"
+        },
+        {
+          "const": "tls",
+          "description": "A TLS handshake, inspecting the certificate.",
+          "type": "string"
+        }
+      ]
+    },
+    "Comparison": {
+      "additionalProperties": false,
+      "description": "Numeric bounds; every bound given must hold.",
+      "properties": {
+        "eq": {
+          "description": "Equal to.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "gt": {
+          "description": "Greater than.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "gte": {
+          "description": "Greater than or equal to.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "lt": {
+          "description": "Less than.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "lte": {
+          "description": "Less than or equal to.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Component": {
+      "additionalProperties": false,
+      "description": "`[[component]]`: something the status page shows with a health state.",
+      "properties": {
+        "description": {
+          "description": "A line shown with the component.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "group": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Id"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The `[[group]]` the component is shown under."
+        },
+        "id": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Id"
+            }
+          ],
+          "description": "Unique among components in every file."
+        },
+        "name": {
+          "description": "Display name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "DiscordSettings": {
+      "additionalProperties": false,
+      "description": "`[notifier.discord]`.",
+      "properties": {
+        "webhook_url": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            }
+          ],
+          "description": "The channel webhook URL. Secret."
+        }
+      },
+      "required": [
+        "webhook_url"
+      ],
+      "type": "object"
+    },
+    "DnsSettings": {
+      "additionalProperties": false,
+      "description": "`[check.dns]`.",
+      "properties": {
+        "record_type": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/RecordType"
+            }
+          ],
+          "default": "A",
+          "description": "The record type queried."
+        },
+        "resolver": {
+          "description": "The resolver queried, as `ip` or `ip:port`; the system resolver when\nabsent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Duration": {
+      "description": "A duration such as \"500ms\", \"30s\", \"5m\", \"1h30m\" or \"1d\".",
+      "pattern": "^([0-9]+(ms|s|m|h|d))+$",
+      "type": "string"
+    },
+    "EmailSettings": {
+      "additionalProperties": false,
+      "description": "`[notifier.email]`.",
+      "properties": {
+        "to": {
+          "description": "Recipient addresses.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "to"
+      ],
+      "type": "object"
+    },
+    "FailureState": {
+      "description": "The state a failed assertion puts its check in.",
+      "oneOf": [
+        {
+          "const": "degraded",
+          "description": "Working, but worse than it should be.",
+          "type": "string"
+        },
+        {
+          "const": "down",
+          "description": "Not working.",
+          "type": "string"
+        }
+      ]
+    },
+    "Group": {
+      "additionalProperties": false,
+      "description": "`[[group]]`: a heading collecting components on the status page.",
+      "properties": {
+        "description": {
+          "description": "A line shown under the heading.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Id"
+            }
+          ],
+          "description": "Unique among groups in every file."
+        },
+        "name": {
+          "description": "Display name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "HeaderAssertion": {
+      "additionalProperties": false,
+      "description": "A condition on one response header.",
+      "properties": {
+        "contains": {
+          "description": "The header value contains this.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "eq": {
+          "description": "The header value equals this.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exists": {
+          "description": "Whether the header is present.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The header name, matched without regard to case.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "Heartbeat": {
+      "additionalProperties": false,
+      "description": "`[[heartbeat]]`: a ping tocsin expects to receive, such as a cron job\nreporting in. Pings are sent to the write API with a token that has the\n`heartbeat` scope.",
+      "properties": {
+        "component": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Id"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The `[[component]]` whose health this heartbeat sets."
+        },
+        "grace": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Duration"
+            }
+          ],
+          "default": "1m",
+          "description": "How late a ping may be before the heartbeat is down."
+        },
+        "id": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Id"
+            }
+          ],
+          "description": "Unique among heartbeats in every file."
+        },
+        "interval": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Duration"
+            }
+          ],
+          "description": "How often a ping is expected."
+        },
+        "link": {
+          "description": "Links shown with the heartbeat, such as the job's logs or runbook,\neach a `[[heartbeat.link]]` table.",
+          "items": {
+            "$ref": "#/definitions/Link"
+          },
+          "type": "array"
+        },
+        "name": {
+          "description": "Display name; the id is shown when it is absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "interval"
+      ],
+      "type": "object"
+    },
+    "HttpMethod": {
+      "description": "An HTTP request method.",
+      "oneOf": [
+        {
+          "const": "GET",
+          "description": "`GET`.",
+          "type": "string"
+        },
+        {
+          "const": "HEAD",
+          "description": "`HEAD`.",
+          "type": "string"
+        },
+        {
+          "const": "POST",
+          "description": "`POST`.",
+          "type": "string"
+        },
+        {
+          "const": "PUT",
+          "description": "`PUT`.",
+          "type": "string"
+        },
+        {
+          "const": "PATCH",
+          "description": "`PATCH`.",
+          "type": "string"
+        },
+        {
+          "const": "DELETE",
+          "description": "`DELETE`.",
+          "type": "string"
+        },
+        {
+          "const": "OPTIONS",
+          "description": "`OPTIONS`.",
+          "type": "string"
+        }
+      ]
+    },
+    "HttpSettings": {
+      "additionalProperties": false,
+      "description": "`[check.http]`.",
+      "properties": {
+        "body": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Text"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Request body. It may be a secret, `${ENV:NAME}`."
+        },
+        "follow_redirects": {
+          "default": false,
+          "description": "Whether redirects are followed; when not, a 3xx is the result.",
+          "type": "boolean"
+        },
+        "headers": {
+          "additionalProperties": {
+            "$ref": "#/definitions/Text"
+          },
+          "description": "Request headers. A value may be a secret, `${ENV:NAME}`.",
+          "type": "object"
+        },
+        "method": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HttpMethod"
+            }
+          ],
+          "default": "GET",
+          "description": "Request method."
+        },
+        "verify_certificate": {
+          "default": true,
+          "description": "Whether the server's certificate must verify. Defaults to true.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "Id": {
+      "description": "A slug: lowercase letters, digits and hyphens, starting with a letter or digit.",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "type": "string"
+    },
+    "JsonAssertion": {
+      "additionalProperties": false,
+      "description": "A value at a path in a JSON response body.",
+      "properties": {
+        "contains": {
+          "description": "The value is a string containing this.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "eq": {
+          "description": "The value equals this."
+        },
+        "exists": {
+          "description": "Whether a value exists at the path.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "ne": {
+          "description": "The value does not equal this."
+        },
+        "path": {
+          "description": "Where the value is: `$`, then `.key`, `[index]` or `[\"key\"]` steps,\nsuch as `$.checks[0].status`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "Link": {
+      "additionalProperties": false,
+      "description": "A `[[check.link]]` or `[[heartbeat.link]]`: a named link to somewhere an\noperator looks next, such as a dashboard, logs or a runbook.",
+      "properties": {
+        "name": {
+          "description": "The link text.",
+          "type": "string"
+        },
+        "url": {
+          "description": "Where it goes: an absolute `http://` or `https://` URL.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "url"
+      ],
+      "type": "object"
+    },
+    "Notifier": {
+      "additionalProperties": false,
+      "description": "A destination for operator alerts. Every alert it sends is followed by\na resolve with the same identity.",
+      "properties": {
+        "alertmanager": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AlertmanagerSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[notifier.alertmanager]`."
+        },
+        "discord": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DiscordSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[notifier.discord]`."
+        },
+        "email": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EmailSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[notifier.email]`. Sender addresses come from `[server.email]`."
+        },
+        "id": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Id"
+            }
+          ],
+          "description": "Unique among notifiers in every file."
+        },
+        "name": {
+          "description": "Display name; the id is used when it is absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ntfy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NtfySettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[notifier.ntfy]`."
+        },
+        "pushover": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PushoverSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[notifier.pushover]`."
+        },
+        "slack": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SlackSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[notifier.slack]`."
+        },
+        "telegram": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TelegramSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[notifier.telegram]`."
+        },
+        "type": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/NotifierType"
+            }
+          ],
+          "description": "Which service the notifier posts to; its settings go in the table of\nthe same name."
+        },
+        "webhook": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WebhookSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[notifier.webhook]`."
+        }
+      },
+      "required": [
+        "id",
+        "type"
+      ],
+      "type": "object"
+    },
+    "NotifierType": {
+      "description": "The service a notifier posts to.",
+      "oneOf": [
+        {
+          "const": "slack",
+          "description": "A Slack incoming webhook.",
+          "type": "string"
+        },
+        {
+          "const": "pushover",
+          "description": "Pushover.",
+          "type": "string"
+        },
+        {
+          "const": "email",
+          "description": "Email over SMTP.",
+          "type": "string"
+        },
+        {
+          "const": "ntfy",
+          "description": "An ntfy topic.",
+          "type": "string"
+        },
+        {
+          "const": "discord",
+          "description": "A Discord webhook.",
+          "type": "string"
+        },
+        {
+          "const": "telegram",
+          "description": "A Telegram bot.",
+          "type": "string"
+        },
+        {
+          "const": "webhook",
+          "description": "A generic JSON webhook.",
+          "type": "string"
+        },
+        {
+          "const": "alertmanager",
+          "description": "The Alertmanager v2 alerts API.",
+          "type": "string"
+        }
+      ]
+    },
+    "NtfySettings": {
+      "additionalProperties": false,
+      "description": "`[notifier.ntfy]`.",
+      "properties": {
+        "token": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "An access token, for a protected topic. Secret."
+        },
+        "url": {
+          "description": "The topic URL, such as `https://ntfy.sh/my-alerts`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    },
+    "Page": {
+      "additionalProperties": false,
+      "description": "`[page]`.",
+      "properties": {
+        "description": {
+          "description": "A line shown under the title.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "homepage_url": {
+          "description": "Where the page's logo and title link to.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "default": "Status",
+          "description": "The page title.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "Project": {
+      "additionalProperties": false,
+      "description": "`[[project]]`: something whose releases and deploys the release log\nrecords. CI pushes them; tocsin never polls.",
+      "properties": {
+        "component": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Id"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The `[[component]]` whose timeline shows this project's deploys."
+        },
+        "description": {
+          "description": "A line shown with the project.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Id"
+            }
+          ],
+          "description": "Unique among projects in every file."
+        },
+        "name": {
+          "description": "Display name.",
+          "type": "string"
+        },
+        "url": {
+          "description": "The project's homepage or repository.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "PushoverSettings": {
+      "additionalProperties": false,
+      "description": "`[notifier.pushover]`.",
+      "properties": {
+        "api_token": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            }
+          ],
+          "description": "The application's API token. Secret."
+        },
+        "user_key": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            }
+          ],
+          "description": "The user or group key alerts go to. Secret."
+        }
+      },
+      "required": [
+        "user_key",
+        "api_token"
+      ],
+      "type": "object"
+    },
+    "RecordType": {
+      "description": "A DNS record type.",
+      "oneOf": [
+        {
+          "const": "A",
+          "description": "IPv4 address.",
+          "type": "string"
+        },
+        {
+          "const": "AAAA",
+          "description": "IPv6 address.",
+          "type": "string"
+        },
+        {
+          "const": "CNAME",
+          "description": "Canonical name.",
+          "type": "string"
+        },
+        {
+          "const": "MX",
+          "description": "Mail exchanger.",
+          "type": "string"
+        },
+        {
+          "const": "NS",
+          "description": "Name server.",
+          "type": "string"
+        },
+        {
+          "const": "TXT",
+          "description": "Text.",
+          "type": "string"
+        },
+        {
+          "const": "SRV",
+          "description": "Service locator.",
+          "type": "string"
+        },
+        {
+          "const": "CAA",
+          "description": "Certification authority authorization.",
+          "type": "string"
+        }
+      ]
+    },
+    "RecordsAssertion": {
+      "additionalProperties": false,
+      "description": "A condition on the records a DNS lookup returns.",
+      "properties": {
+        "contains": {
+          "description": "One of the records equals this.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contains"
+      ],
+      "type": "object"
+    },
+    "Route": {
+      "additionalProperties": false,
+      "description": "`[[route]]`: sends alerts matching its filters to its notifiers. Empty\nfilters match everything.",
+      "properties": {
+        "checks": {
+          "description": "Only alerts for these checks.",
+          "items": {
+            "$ref": "#/definitions/Id"
+          },
+          "type": "array"
+        },
+        "components": {
+          "description": "Only alerts for these components.",
+          "items": {
+            "$ref": "#/definitions/Id"
+          },
+          "type": "array"
+        },
+        "groups": {
+          "description": "Only alerts for components in these groups.",
+          "items": {
+            "$ref": "#/definitions/Id"
+          },
+          "type": "array"
+        },
+        "heartbeats": {
+          "description": "Only alerts for these heartbeats.",
+          "items": {
+            "$ref": "#/definitions/Id"
+          },
+          "type": "array"
+        },
+        "id": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Id"
+            }
+          ],
+          "description": "Unique among routes in every file."
+        },
+        "notifiers": {
+          "description": "The `[[notifier]]`s that receive matching alerts.",
+          "items": {
+            "$ref": "#/definitions/Id"
+          },
+          "type": "array"
+        },
+        "notify_on": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/FailureState"
+            }
+          ],
+          "default": "down",
+          "description": "The least severe state that alerts: `degraded` alerts on degraded and\ndown, `down` on down only."
+        }
+      },
+      "required": [
+        "id",
+        "notifiers"
+      ],
+      "type": "object"
+    },
+    "Secret": {
+      "description": "A secret, read from an environment variable: \"${ENV:NAME}\".",
+      "pattern": "^\\$\\{ENV:[A-Za-z_][A-Za-z0-9_]*\\}$",
+      "type": "string"
+    },
+    "Server": {
+      "additionalProperties": false,
+      "description": "`[server]`.",
+      "properties": {
+        "auth": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Auth"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How the admin page authenticates people."
+        },
+        "data_dir": {
+          "description": "The folder holding the SQLite database. `tocsin serve --data`\noverrides it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "email": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ServerEmail"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Sender settings for every email tocsin sends."
+        },
+        "listen": {
+          "default": "127.0.0.1:8080",
+          "description": "The address the web server listens on, as `ip:port`: `127.0.0.1:8080`,\n`0.0.0.0:8080` or `[::]:8080`. Hostnames are not accepted.",
+          "type": "string"
+        },
+        "node_id": {
+          "description": "This node's name in every result it records. Defaults to the\nhostname.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "public_url": {
+          "description": "The URL people reach the status page at, used in links and emails.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retention_days": {
+          "default": 90,
+          "description": "Days of check results kept.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "ServerEmail": {
+      "additionalProperties": false,
+      "description": "`[server.email]`. Required, with `from`, `reply_to` and `smtp_url`,\nwhenever an email notifier exists.\n\nEvery email tocsin sends can be answered: neither address may be a\n`noreply`, `no-reply` or `donotreply` address.",
+      "properties": {
+        "from": {
+          "description": "The From address, as `address` or `Name <address>`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reply_to": {
+          "description": "The Reply-To address: a mailbox a person reads.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "smtp_url": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The SMTP server, as `smtp://user:password@host:587` or\n`smtps://...`. Secret."
+        }
+      },
+      "type": "object"
+    },
+    "SlackSettings": {
+      "additionalProperties": false,
+      "description": "`[notifier.slack]`.",
+      "properties": {
+        "webhook_url": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            }
+          ],
+          "description": "The incoming webhook URL. Secret."
+        }
+      },
+      "required": [
+        "webhook_url"
+      ],
+      "type": "object"
+    },
+    "TelegramSettings": {
+      "additionalProperties": false,
+      "description": "`[notifier.telegram]`.",
+      "properties": {
+        "bot_token": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            }
+          ],
+          "description": "The bot's token. Secret."
+        },
+        "chat_id": {
+          "description": "The chat alerts are sent to.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bot_token",
+        "chat_id"
+      ],
+      "type": "object"
+    },
+    "Text": {
+      "description": "A string, or a secret read from an environment variable: \"${ENV:NAME}\".",
+      "type": "string"
+    },
+    "TextAssertion": {
+      "additionalProperties": false,
+      "description": "A condition on text.",
+      "properties": {
+        "contains": {
+          "description": "The text contains this.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "not_contains": {
+          "description": "The text does not contain this.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "TlsSettings": {
+      "additionalProperties": false,
+      "description": "`[check.tls]`.",
+      "properties": {
+        "server_name": {
+          "description": "The server name sent in the handshake (SNI); the target's host when\nabsent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Token": {
+      "additionalProperties": false,
+      "description": "`[[token]]`: a bearer token for the write API.",
+      "properties": {
+        "description": {
+          "description": "Who or what uses the token.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Id"
+            }
+          ],
+          "description": "Unique among tokens in every file; logged with each write."
+        },
+        "scopes": {
+          "description": "What the token may write.",
+          "items": {
+            "$ref": "#/definitions/TokenScope"
+          },
+          "type": "array"
+        },
+        "secret": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            }
+          ],
+          "description": "The token's value. Secret."
+        }
+      },
+      "required": [
+        "id",
+        "secret",
+        "scopes"
+      ],
+      "type": "object"
+    },
+    "TokenScope": {
+      "description": "What a token may write.",
+      "oneOf": [
+        {
+          "const": "heartbeat",
+          "description": "Heartbeat pings.",
+          "type": "string"
+        },
+        {
+          "const": "incident",
+          "description": "Incidents and maintenance.",
+          "type": "string"
+        },
+        {
+          "const": "release",
+          "description": "Releases and deploys.",
+          "type": "string"
+        }
+      ]
+    },
+    "WebhookSettings": {
+      "additionalProperties": false,
+      "description": "`[notifier.webhook]`.",
+      "properties": {
+        "bearer_token": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Sent as `Authorization: Bearer ...`. Secret."
+        },
+        "url": {
+          "description": "The URL alerts are posted to as JSON.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "One configuration file. Every key is optional in a single file; rules\nthat span files (unique ids, references, required settings) are checked\nafter merging.\n\nThis is the type the JSON Schema describes.",
+  "properties": {
+    "check": {
+      "description": "Probes run on an interval.",
+      "items": {
+        "$ref": "#/definitions/Check"
+      },
+      "type": "array"
+    },
+    "component": {
+      "description": "What the status page shows, each with a health state.",
+      "items": {
+        "$ref": "#/definitions/Component"
+      },
+      "type": "array"
+    },
+    "group": {
+      "description": "Headings that collect components on the status page.",
+      "items": {
+        "$ref": "#/definitions/Group"
+      },
+      "type": "array"
+    },
+    "heartbeat": {
+      "description": "Pings tocsin expects to receive on an interval.",
+      "items": {
+        "$ref": "#/definitions/Heartbeat"
+      },
+      "type": "array"
+    },
+    "notifier": {
+      "description": "Destinations for operator alerts.",
+      "items": {
+        "$ref": "#/definitions/Notifier"
+      },
+      "type": "array"
+    },
+    "page": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Page"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The public status page. At most one file may hold `[page]`."
+    },
+    "project": {
+      "description": "Projects whose releases and deploys the release log records.",
+      "items": {
+        "$ref": "#/definitions/Project"
+      },
+      "type": "array"
+    },
+    "route": {
+      "description": "Which alerts go to which notifiers.",
+      "items": {
+        "$ref": "#/definitions/Route"
+      },
+      "type": "array"
+    },
+    "server": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Server"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Server settings. At most one file may hold `[server]`."
+    },
+    "token": {
+      "description": "Bearer tokens for the write API.",
+      "items": {
+        "$ref": "#/definitions/Token"
+      },
+      "type": "array"
+    }
+  },
+  "title": "tocsin configuration file",
+  "type": "object"
+}

@@ -43,6 +43,38 @@ jobs:
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked
 
+  # The JSON Schema editors use must accept every example, both as
+  # committed and through each file's own `#:schema` directive, the way an
+  # editor reads it. That the committed schema matches the code is the test
+  # `the_committed_schema_is_current`.
+  schema:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install taplo 0.10.0
+        env:
+          TAPLO_URL: https://github.com/tamasfe/taplo/releases/download/0.10.0/taplo-linux-x86_64.gz
+          TAPLO_SHA256: 8fe196b894ccf9072f98d4e1013a180306e17d244830b03986ee5e8eabeb6156
+        run: |
+          curl --fail --location --silent --show-error --output "$RUNNER_TEMP/taplo.gz" "$TAPLO_URL"
+          echo "$TAPLO_SHA256  $RUNNER_TEMP/taplo.gz" | sha256sum --check --strict
+          gunzip "$RUNNER_TEMP/taplo.gz"
+          chmod +x "$RUNNER_TEMP/taplo"
+      - name: The schema validates examples/config
+        run: |
+          mapfile -t files < <(find examples/config -name '*.toml' | sort)
+          test "${#files[@]}" -gt 0
+          missing=0
+          for file in "${files[@]}"; do
+            if ! head -n 1 "$file" | grep -q '^#:schema '; then
+              echo "::error file=$file::the first line must be a #:schema directive"
+              missing=1
+            fi
+          done
+          test "$missing" -eq 0
+          "$RUNNER_TEMP/taplo" check --no-auto-config --schema "file://$GITHUB_WORKSPACE/schema/tocsin.schema.json" "${files[@]}"
+          "$RUNNER_TEMP/taplo" check --no-auto-config "${files[@]}"
+
   # CONTRIBUTING.md promises unsigned commits are not merged; this keeps
   # that promise. Every commit the pull request adds needs a Signed-off-by.
   dco:

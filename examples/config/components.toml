@@ -1,0 +1,31 @@
+#:schema ../../schema/tocsin.schema.json
+# What the status page shows. Checks and heartbeats set a component's state.
+
+[[group]]
+id = "customer-facing"
+name = "Customer-facing"
+
+[[group]]
+id = "internal"
+name = "Internal"
+
+[[component]]
+id = "website"
+name = "Website"
+group = "customer-facing"
+
+[[component]]
+id = "api"
+name = "API"
+description = "The public REST API."
+group = "customer-facing"
+
+[[component]]
+id = "database"
+name = "Database"
+group = "internal"
+
+[[component]]
+id = "nightly-backup"
+name = "Nightly backup"
+group = "internal"

@@ -1,0 +1,57 @@
+#:schema ../../../schema/tocsin.schema.json
+# HTTP checks. Assertions are structured TOML; a failed assertion marks the
+# check down unless it says `on_fail = "degraded"`.
+
+[[check]]
+id = "website-home"
+component = "website"
+type = "http"
+target = "https://www.example.com/"
+interval = "1m"
+timeout = "10s"
+
+[check.http]
+follow_redirects = true
+
+[[check.assert]]
+status = [200]
+
+[[check.assert]]
+body = { contains = "Example" }
+
+[[check]]
+id = "api-health"
+component = "api"
+type = "http"
+target = "https://api.example.com/health"
+interval = "30s"
+timeout = "5s"
+# Two failures in a row before the state changes.
+confirm = 2
+
+[check.http]
+method = "GET"
+headers = { Accept = "application/json" }
+
+[[check.assert]]
+status = [200]
+
+[[check.assert]]
+latency_ms = { lt = 800 }
+on_fail = "degraded"
+
+[[check.assert]]
+json = { path = "$.status", eq = "ok" }
+
+[[check.assert]]
+certificate_days_remaining = { gt = 14 }
+on_fail = "degraded"
+
+# Links shown with the check on the internal board.
+[[check.link]]
+name = "Dashboard"
+url = "https://grafana.example.com/d/api"
+
+[[check.link]]
+name = "Runbook"
+url = "https://wiki.example.com/runbooks/api"

@@ -2,7 +2,12 @@
 
 //! The single writer: one thread owns the only write connection and takes
 //! work from a channel, so no two writes ever contend for SQLite's lock.
+//!
+//! A panic in a write is caught, the open transaction (if any) is rolled
+//! back, the waiting callers get [`Error::WriterPanicked`] and the thread
+//! carries on: a bug in one write must not silently stop every later one.
 
+use std::panic::{self, AssertUnwindSafe};
 use std::thread::JoinHandle;
 
 use rusqlite::{Connection, TransactionBehavior, params};
@@ -65,8 +70,9 @@ impl Writer {
     {
         let (reply, receive) = oneshot::channel();
         let job: Job = Box::new(move |conn| {
+            let outcome = guarded(conn, |conn| job(conn));
             // The caller may have stopped waiting; the write still happened.
-            let _ = reply.send(job(conn));
+            let _ = reply.send(outcome);
         });
         self.sender
             .send(Command::Run(job))
@@ -103,41 +109,84 @@ fn run(mut conn: Connection, mut receiver: mpsc::Receiver<Command>) {
                         Err(_) => break,
                     }
                 }
-                commit_batch(&mut conn, batch);
+                let (inserts, replies): (Vec<_>, Vec<_>) = batch.into_iter().unzip();
+                let outcomes = commit_batch(&mut conn, &inserts);
+                for (reply, outcome) in replies.into_iter().zip(outcomes) {
+                    let _ = reply.send(outcome);
+                }
             }
         }
     }
 }
 
+/// Runs `write`, turning a panic into [`Error::WriterPanicked`] after
+/// rolling back whatever transaction it left open.
+fn guarded<T>(
+    conn: &mut Connection,
+    write: impl FnOnce(&mut Connection) -> Result<T>,
+) -> Result<T> {
+    let Ok(outcome) = panic::catch_unwind(AssertUnwindSafe(|| write(conn))) else {
+        let rolled_back = conn.is_autocommit() || conn.execute_batch("ROLLBACK").is_ok();
+        tracing::error!(
+            rolled_back,
+            "a database write panicked; its callers get an error and the writer carries on"
+        );
+        return Err(Error::WriterPanicked);
+    };
+    outcome
+}
+
 /// Applies each insert under its own savepoint, so one rejected row does not
-/// sink the others, then commits once and replies to every caller.
-fn commit_batch(conn: &mut Connection, batch: Vec<(Insert, oneshot::Sender<Result<i64>>)>) {
-    let mut outcomes = Vec::with_capacity(batch.len());
-    let committed = (|| -> rusqlite::Result<()> {
-        let mut transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        for (insert, _) in &batch {
-            let savepoint = transaction.savepoint()?;
-            let outcome = apply(&savepoint, insert);
-            if outcome.is_ok() {
-                savepoint.commit()?;
-            }
-            outcomes.push(outcome);
-        }
-        transaction.commit()
-    })();
+/// sink the others, then commits once. Returns one outcome per insert, each
+/// true of what is in the database afterwards.
+fn commit_batch(conn: &mut Connection, inserts: &[Insert]) -> Vec<Result<i64>> {
+    let committed = guarded(conn, |conn| Ok(commit_inserts(conn, inserts)?));
     match committed {
-        Ok(()) => {
-            for ((_, reply), outcome) in batch.into_iter().zip(outcomes) {
-                let _ = reply.send(outcome.map_err(Error::from));
-            }
-        }
+        Ok(outcomes) => outcomes
+            .into_iter()
+            .map(|outcome| outcome.map_err(Error::from))
+            .collect(),
+        Err(Error::WriterPanicked) => inserts.iter().map(|_| Err(Error::WriterPanicked)).collect(),
         Err(error) => {
             let message = error.to_string();
-            for (_, reply) in batch {
-                let _ = reply.send(Err(Error::Batch(message.clone())));
-            }
+            inserts
+                .iter()
+                .map(|_| Err(Error::Batch(message.clone())))
+                .collect()
         }
     }
+}
+
+fn commit_inserts(
+    conn: &mut Connection,
+    inserts: &[Insert],
+) -> rusqlite::Result<Vec<rusqlite::Result<i64>>> {
+    let mut transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut outcomes = Vec::with_capacity(inserts.len());
+    for insert in inserts {
+        let savepoint = transaction.savepoint()?;
+        let outcome = apply(&savepoint, insert);
+        match &outcome {
+            Ok(_) => savepoint.commit()?,
+            // Rolls back to the savepoint, undoing only this insert.
+            Err(_) => drop(savepoint),
+        }
+        // Some failures (SQLITE_FULL, IOERR, NOMEM, a RAISE(ROLLBACK))
+        // roll back the whole transaction, not just the savepoint. Carrying
+        // on would open a fresh implicit transaction and report outcomes
+        // that do not match what committed, so the whole batch fails.
+        if transaction.is_autocommit() {
+            return Err(outcome.err().unwrap_or_else(|| {
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ABORT),
+                    Some("the batch's transaction was rolled back".into()),
+                )
+            }));
+        }
+        outcomes.push(outcome);
+    }
+    transaction.commit()?;
+    Ok(outcomes)
 }
 
 fn apply(conn: &Connection, insert: &Insert) -> rusqlite::Result<i64> {

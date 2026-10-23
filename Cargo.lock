@@ -718,6 +718,7 @@ dependencies = [
  "tempfile",
  "tocsin-core",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

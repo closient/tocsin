@@ -20,8 +20,11 @@ pub enum Error {
     NotWal(String),
     /// The writer has stopped, so the store is closed.
     Closed,
-    /// A read panicked; its connection was discarded.
+    /// A read panicked; its connection was replaced.
     ReaderPanicked,
+    /// A write panicked; its transaction was rolled back and the writer
+    /// carried on.
+    WriterPanicked,
 }
 
 /// The result of a store operation.
@@ -40,6 +43,7 @@ impl fmt::Display for Error {
             ),
             Error::Closed => f.write_str("the store is closed"),
             Error::ReaderPanicked => f.write_str("a database read panicked"),
+            Error::WriterPanicked => f.write_str("a database write panicked and was rolled back"),
         }
     }
 }

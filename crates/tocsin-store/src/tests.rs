@@ -6,7 +6,108 @@ use std::time::Duration;
 
 use rusqlite::{TransactionBehavior, params};
 
-use crate::{DB_FILE, Store};
+use crate::{DB_FILE, Error, NewCheckResult, Store, now_ms};
+
+fn open() -> (tempfile::TempDir, Store) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join(DB_FILE)).unwrap();
+    (dir, store)
+}
+
+fn result(check: &str) -> NewCheckResult {
+    NewCheckResult {
+        node_id: "node-a".into(),
+        check_id: check.into(),
+        started_at_ms: now_ms(),
+        duration_ms: 3,
+        health: tocsin_core::Health::Up,
+        detail: None,
+        error: None,
+        status_code: None,
+    }
+}
+
+async fn stored(store: &Store, check: &'static str) -> i64 {
+    store
+        .read(move |conn| {
+            Ok(conn.query_row(
+                "SELECT count(*) FROM check_result WHERE check_id = ?1",
+                [check],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap()
+}
+
+/// A write that panics, here halfway through a transaction it opened by
+/// hand, reaches its caller as an error; the transaction is rolled back and
+/// the writer thread keeps serving.
+#[tokio::test]
+async fn a_panicking_write_is_an_error_and_the_writer_carries_on() {
+    let (_dir, store) = open();
+    let panicked = store
+        .writer
+        .run::<(), _>(|conn| {
+            conn.execute_batch(
+                "BEGIN IMMEDIATE;
+                 INSERT INTO check_result (node_id, check_id, started_at, duration_ms, health)
+                 VALUES ('node-a', 'half-done', 1, 1, 'up');",
+            )?;
+            panic!("a write bug (expected in this test)");
+        })
+        .await;
+    assert!(
+        matches!(panicked, Err(Error::WriterPanicked)),
+        "{panicked:?}"
+    );
+    store.append(result("after")).await.unwrap();
+    assert_eq!(stored(&store, "half-done").await, 0);
+    assert_eq!(stored(&store, "after").await, 1);
+}
+
+/// Some failures (SQLITE_FULL, IOERR, NOMEM, a trigger's RAISE(ROLLBACK))
+/// end the whole batch transaction, not just the failing insert's savepoint.
+/// Every reply must then match what is in the table: an `Ok` row is stored
+/// and an `Err` row is not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failure_that_ends_the_transaction_fails_the_whole_batch() {
+    let (_dir, store) = open();
+    store
+        .writer
+        .run(|conn| {
+            conn.execute_batch(
+                "CREATE TEMP TRIGGER poison BEFORE INSERT ON check_result
+                 WHEN NEW.check_id = 'poison'
+                 BEGIN SELECT RAISE(ROLLBACK, 'poisoned row'); END",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    // Hold the writer so the three inserts queue up and share one batch.
+    let park = store.writer.run(|_| {
+        std::thread::sleep(Duration::from_millis(200));
+        Ok(())
+    });
+    let (parked, first, poison, last) = tokio::join!(
+        park,
+        store.append(result("first")),
+        store.append(result("poison")),
+        store.append(result("last")),
+    );
+    parked.unwrap();
+    for (check, outcome) in [("first", first), ("poison", poison), ("last", last)] {
+        let rows = stored(&store, check).await;
+        assert_eq!(
+            rows == 1,
+            outcome.is_ok(),
+            "{check}: replied {outcome:?} but {rows} rows are stored"
+        );
+    }
+    store.append(result("later")).await.unwrap();
+    assert_eq!(stored(&store, "later").await, 1);
+}
 
 /// WAL is what keeps readers unblocked: a reader runs to completion, and sees
 /// the last committed state, while the writer holds an uncommitted delete
@@ -15,8 +116,7 @@ use crate::{DB_FILE, Store};
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn readers_are_not_blocked_by_an_uncommitted_delete() {
     const ROWS: i64 = 20_000;
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join(DB_FILE)).unwrap();
+    let (_dir, store) = open();
     store
         .writer
         .run(|conn| {

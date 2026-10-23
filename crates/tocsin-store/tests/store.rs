@@ -504,3 +504,56 @@ async fn a_database_from_a_newer_build_is_refused() {
     raw(&path).pragma_update(None, "user_version", 99).unwrap();
     assert!(Store::open(&path).is_err());
 }
+
+/// A read whose caller stops waiting (a timeout here; a `select!` or an
+/// abort is the same) still returns its connection when the query ends.
+/// More abandoned reads than the pool has connections, then a normal read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abandoned_reads_return_their_connections() {
+    let fixture = open();
+    for _ in 0..10 {
+        let slow = fixture.store.read(|_| {
+            std::thread::sleep(Duration::from_millis(50));
+            Ok(())
+        });
+        if let Ok(finished) = tokio::time::timeout(Duration::from_millis(1), slow).await {
+            finished.expect("a read failed after earlier reads were abandoned");
+        }
+    }
+    let after = tokio::time::timeout(
+        Duration::from_secs(5),
+        fixture
+            .store
+            .read(|conn| Ok(conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?)),
+    )
+    .await
+    .expect("a read waited on connections lost to abandoned reads");
+    assert_eq!(after.unwrap(), 1);
+}
+
+/// A panicking query is reported as an error and its connection replaced, so
+/// panics, however many, never starve the pool and `read` never hangs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn panicking_reads_are_errors_and_do_not_shrink_the_pool() {
+    let fixture = open();
+    for _ in 0..10 {
+        let panicked = tokio::time::timeout(
+            Duration::from_secs(5),
+            fixture
+                .store
+                .read::<(), _>(|_| panic!("a query bug (expected in this test)")),
+        )
+        .await
+        .expect("a read hung after earlier reads panicked");
+        assert!(matches!(panicked, Err(tocsin_store::Error::ReaderPanicked)));
+    }
+    let after = tokio::time::timeout(
+        Duration::from_secs(5),
+        fixture
+            .store
+            .read(|conn| Ok(conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?)),
+    )
+    .await
+    .expect("a read hung after earlier reads panicked");
+    assert_eq!(after.unwrap(), 1);
+}

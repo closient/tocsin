@@ -1,0 +1,23 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+<p class="hero {{ summary.class }}"><span class="hero-mark" aria-hidden="true">{{ summary.glyph }}</span> <span class="hero-text">{{ summary.text }}</span></p>
+{%- if sections.is_empty() %}
+<p class="muted">No checks or heartbeats are configured.</p>
+{%- endif %}
+{%- let linked = true %}
+{%- for section in sections %}
+<section class="surface group" aria-labelledby="group-{{ loop.index }}">
+  <div class="group-head">
+    <h2 id="group-{{ loop.index }}">{{ section.name }}</h2>
+    {%- if let Some(description) = section.description %}
+    <p class="muted">{{ description }}</p>
+    {%- endif %}
+  </div>
+  <ul class="components checks">
+    {%- for card in section.cards %}
+    <li>
+    {%- include "internal/card.html" %}
+    </li>
+    {%- endfor %}
+  </ul>
+</section>
+{%- endfor %}

@@ -24,7 +24,7 @@ This file is the decision record from the 2026-10-22 plan review, and it is cano
 * **Checks:** HTTP, TLS certificates, TCP and other standard network protocols, plus push heartbeats (for example, webhooks arriving).
 * **Status page:** components, incidents, a 90-day uptime bar and live updates.
 * **Notifications:** email, Slack, Pushover and more.
-* **Admin UI:** only for incidents and, from v0.2, subscribers. Configuration has no UI.
+* **UI:** no UI for configuration. Beside the public status page there is a read-only internal board and the incident admin page (subscribers join it in v0.2), both behind the proxy auth below. The internal board shows every check and heartbeat, including those on no public component, such as machines, certificates and vendor status pages; it replaces the Gatus dashboard. It reads, never writes: a check is still changed only in its file. (Christian, 2026-10-23; this replaced "admin UI only for incidents and subscribers".)
 * **Auth:** delegated to the proxy in front of tocsin (Cloudflare Access with Google login at Closient). tocsin does not run its own login system.
 * **License:** AGPL-3.0. It stays truly open source, and anyone running a modified version as a service must publish their changes.
 * **v0.1 scope:**
@@ -32,6 +32,7 @@ This file is the decision record from the 2026-10-22 plan review, and it is cano
   * every probe type, plus heartbeats
   * SQLite history
   * public status page
+  * internal board of every check, behind proxy auth
   * incidents (CLI, API and admin page)
   * release log
   * operator alerts with resolve

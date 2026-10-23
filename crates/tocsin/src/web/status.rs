@@ -37,6 +37,7 @@ use axum::routing::get;
 use jiff::tz::TimeZone;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tocsin_core::Health;
 use tocsin_core::config::{Component, Config, Group};
 use tocsin_core::incident::{Incident, IncidentKind, IncidentStatus, Timestamp};
 use tocsin_core::state::ComponentStatus;
@@ -86,34 +87,37 @@ pub fn router() -> Router<AppState> {
         .route("/fragments/{name}", get(fragment))
 }
 
-/// What every status page shows around its content.
-struct Chrome {
+/// What every status page shows around its content. The internal board
+/// (web/internal.rs) wears the same.
+pub(super) struct Chrome {
     /// `[page] title`.
-    site: String,
+    pub(super) site: String,
     /// `[page] description`.
-    description: Option<String>,
+    pub(super) description: Option<String>,
     /// Where the logo and title link: `[page] homepage_url`, or `/`.
-    home: String,
-    logo: Option<Logo>,
-    links: Vec<Link>,
-    /// The page's JSON-LD, escaped for a `<script>` element.
-    json_ld: String,
-    /// The scripts the page loads, in order; only `/` loads any.
-    scripts: Vec<&'static str>,
+    pub(super) home: String,
+    pub(super) logo: Option<Logo>,
+    pub(super) links: Vec<Link>,
+    /// The page's JSON-LD, escaped for a `<script>` element; empty for
+    /// none.
+    pub(super) json_ld: String,
+    /// The scripts the page loads, in order; only `/` and the internal
+    /// board load any.
+    pub(super) scripts: Vec<&'static str>,
 }
 
-struct Logo {
-    url: String,
-    alt: String,
+pub(super) struct Logo {
+    pub(super) url: String,
+    pub(super) alt: String,
 }
 
-struct Link {
-    name: String,
-    url: String,
+pub(super) struct Link {
+    pub(super) name: String,
+    pub(super) url: String,
 }
 
 impl Chrome {
-    fn new(config: &Config, json_ld: &Value) -> Self {
+    pub(super) fn new(config: &Config, json_ld: &Value) -> Self {
         let page = &config.page;
         Chrome {
             site: page.title.clone(),
@@ -136,8 +140,16 @@ impl Chrome {
         }
     }
 
+    /// The chrome of a page that describes itself to nobody: no JSON-LD.
+    pub(super) fn private(config: &Config) -> Self {
+        Chrome {
+            json_ld: String::new(),
+            ..Chrome::new(config, &Value::Null)
+        }
+    }
+
     /// The same, loading htmx and its SSE extension.
-    fn live(mut self) -> Self {
+    pub(super) fn live(mut self) -> Self {
         self.scripts = vec![
             assets::url("htmx.min.js"),
             assets::url("htmx-ext-sse.min.js"),
@@ -157,17 +169,17 @@ fn script_json(value: &Value) -> String {
 }
 
 /// A status in words, with a glyph beside it so it never rests on colour.
-struct StatusLabel {
+pub(super) struct StatusLabel {
     /// The CSS class: [`ComponentStatus::as_str`].
-    class: &'static str,
+    pub(super) class: &'static str,
     /// Hidden from screen readers; the text says the same.
-    glyph: &'static str,
-    text: &'static str,
+    pub(super) glyph: &'static str,
+    pub(super) text: &'static str,
 }
 
 impl StatusLabel {
     /// A component's status.
-    const fn component(status: ComponentStatus) -> Self {
+    pub(super) const fn component(status: ComponentStatus) -> Self {
         let (glyph, text) = match status {
             ComponentStatus::Operational => ("✓", "Operational"),
             ComponentStatus::Degraded => ("▲", "Degraded"),
@@ -182,8 +194,23 @@ impl StatusLabel {
         }
     }
 
+    /// A check's or heartbeat's health, in the colours of the component
+    /// status it gives: unknown until confirmed.
+    pub(super) const fn check(health: Option<Health>) -> Self {
+        let (status, text) = match health {
+            Some(Health::Up) => (ComponentStatus::Operational, "Up"),
+            Some(Health::Degraded) => (ComponentStatus::Degraded, "Degraded"),
+            Some(Health::Down) => (ComponentStatus::Down, "Down"),
+            None => (ComponentStatus::Unknown, "Unknown"),
+        };
+        StatusLabel {
+            text,
+            ..StatusLabel::component(status)
+        }
+    }
+
     /// The whole page's status, for the banner.
-    const fn overall(status: ComponentStatus) -> Self {
+    pub(super) const fn overall(status: ComponentStatus) -> Self {
         let text = match status {
             ComponentStatus::Operational => "All systems operational",
             ComponentStatus::Degraded => "Some systems are degraded",
@@ -436,7 +463,7 @@ pub(super) fn cached(
 /// Groups and their components in display order: components in no group
 /// first, then groups in `[page] groups` order and the rest as defined;
 /// within each, `[page] components` order and the rest as defined.
-fn ordered(config: &Config) -> Vec<(Option<&Group>, Vec<&Component>)> {
+pub(super) fn ordered(config: &Config) -> Vec<(Option<&Group>, Vec<&Component>)> {
     fn rank(order: &[tocsin_core::config::Id], id: &tocsin_core::config::Id) -> usize {
         order
             .iter()
@@ -492,12 +519,12 @@ fn sections(config: &Config, states: &[ComponentState]) -> Vec<Section> {
 }
 
 /// Today, by UTC day.
-fn today() -> Day {
+pub(super) fn today() -> Day {
     Day::containing(now().as_millis())
 }
 
 /// The daily rollups a bar ending `today` reads.
-async fn tallies(state: &AppState, today: Day) -> Result<Tallies, HtmlError> {
+pub(super) async fn tallies(state: &AppState, today: Day) -> Result<Tallies, HtmlError> {
     let rollups = state
         .store
         .daily_rollups(uptime::first_day(today))

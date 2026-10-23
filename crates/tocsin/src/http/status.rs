@@ -173,7 +173,7 @@ fn component_state(component: &Component, snapshot: &Snapshot) -> ComponentState
 
 /// Every check, then every heartbeat, in configuration order, with what
 /// the snapshot knows of each. Only a [`Viewer::Trusted`] sees targets.
-fn checks(config: &Config, snapshot: &Snapshot, viewer: Viewer) -> Vec<CheckState> {
+pub(crate) fn checks(config: &Config, snapshot: &Snapshot, viewer: Viewer) -> Vec<CheckState> {
     let trusted = viewer == Viewer::Trusted;
     let probed = config.checks.iter().map(|check| Member {
         id: &check.id,

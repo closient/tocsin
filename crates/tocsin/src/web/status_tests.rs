@@ -684,7 +684,7 @@ fn elements(html: &str) -> Vec<Element> {
 }
 
 /// What a structural accessibility audit finds wrong with `html`.
-fn audit(html: &str) -> Vec<String> {
+pub(super) fn audit(html: &str) -> Vec<String> {
     let elements = elements(html);
     let mut problems = Vec::new();
     audit_landmarks(&elements, &mut problems);

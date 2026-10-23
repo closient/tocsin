@@ -45,7 +45,7 @@ pub use crate::alert::{
 use crate::checkpoint::Checkpointer;
 pub use crate::day::Day;
 pub use crate::error::{Error, Result};
-pub use crate::history::HistoryPage;
+pub use crate::history::{HistoryPage, Newest, ResultFilter, ResultSlice};
 pub use crate::incident::OpenIncident;
 pub use crate::outage::{LastUp, LatestResult, Outage};
 use crate::readers::Readers;
@@ -829,6 +829,32 @@ impl Store {
     ) -> Result<Vec<CheckResult>> {
         let check_id = check_id.to_owned();
         self.read(move |conn| history::results(conn, &check_id, page))
+            .await
+    }
+
+    /// For each of `queries`, in order, the newest result it asks for.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn newest_results(&self, queries: Vec<Newest>) -> Result<Vec<Option<CheckResult>>> {
+        self.read(move |conn| history::newest(conn, &queries)).await
+    }
+
+    /// The results since `since` of the check or heartbeat `check`, or of
+    /// every one when `None`, in slices `width_ms` wide, ordered by check
+    /// and slice.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn result_slices(
+        &self,
+        since: Timestamp,
+        width_ms: i64,
+        check: Option<String>,
+    ) -> Result<Vec<ResultSlice>> {
+        self.read(move |conn| history::slices(conn, since, width_ms, check.as_deref()))
             .await
     }
 

@@ -32,14 +32,15 @@ use super::identity::AdminAuth;
 use crate::http::events::{Event, EventBus};
 use crate::http::{self, AppState, incidents};
 
-const SIGNING_KEY: &[u8] = include_bytes!("testdata/signing.pk8");
-const OTHER_KEY: &[u8] = include_bytes!("testdata/other.pk8");
-const TEAM: &str = "acme";
-const AUDIENCE: &str = "4714c1358e65fe4b408ad6d432a5f878f08194bdb4752441fd56faefa9b2b6f2";
-const HOST: &str = "status.example.com";
+pub(super) const SIGNING_KEY: &[u8] = include_bytes!("testdata/signing.pk8");
+pub(super) const OTHER_KEY: &[u8] = include_bytes!("testdata/other.pk8");
+pub(super) const TEAM: &str = "acme";
+pub(super) const AUDIENCE: &str =
+    "4714c1358e65fe4b408ad6d432a5f878f08194bdb4752441fd56faefa9b2b6f2";
+pub(super) const HOST: &str = "status.example.com";
 /// `[server] public_url`'s origin: the site as people open it.
 const ORIGIN: &str = "https://status.example.com";
-const ALICE: &str = "alice@example.com";
+pub(super) const ALICE: &str = "alice@example.com";
 
 fn config(auth: &str) -> Config {
     config_with(auth, "")
@@ -102,11 +103,11 @@ fn header_site(extra: &str) -> Site {
     site(config, admin)
 }
 
-const PROXY: &str = "10.1.2.3:41000";
-const OUTSIDER: &str = "203.0.113.9:41000";
+pub(super) const PROXY: &str = "10.1.2.3:41000";
+pub(super) const OUTSIDER: &str = "203.0.113.9:41000";
 
 /// A request arriving from socket `peer`.
-fn from(peer: &str, method: Method, uri: &str) -> axum::http::request::Builder {
+pub(super) fn from(peer: &str, method: Method, uri: &str) -> axum::http::request::Builder {
     let mut request = Request::builder()
         .method(method)
         .uri(uri)
@@ -118,12 +119,12 @@ fn from(peer: &str, method: Method, uri: &str) -> axum::http::request::Builder {
     request
 }
 
-async fn send(router: &Router, request: Request<Body>) -> (StatusCode, Response) {
+pub(super) async fn send(router: &Router, request: Request<Body>) -> (StatusCode, Response) {
     let response = router.clone().oneshot(request).await.unwrap();
     (response.status(), response)
 }
 
-async fn text(response: Response) -> String {
+pub(super) async fn text(response: Response) -> String {
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -177,7 +178,7 @@ fn pair(pkcs8: &[u8]) -> RsaKeyPair {
     RsaKeyPair::from_pkcs8(pkcs8).unwrap()
 }
 
-fn jwk(kid: &str, pkcs8: &[u8]) -> Value {
+pub(super) fn jwk(kid: &str, pkcs8: &[u8]) -> Value {
     let public = RsaPublicKeyComponents::<Vec<u8>>::from(pair(pkcs8).public());
     json!({
         "kid": kid,
@@ -194,7 +195,7 @@ fn encode(value: &Value) -> String {
 }
 
 /// A token with `header` and `claims`, RS256-signed by `pkcs8`.
-fn sign(pkcs8: &[u8], header: &Value, claims: &Value) -> String {
+pub(super) fn sign(pkcs8: &[u8], header: &Value, claims: &Value) -> String {
     let signed = format!("{}.{}", encode(header), encode(claims));
     let key = pair(pkcs8);
     let mut signature = vec![0; key.public().modulus_len()];
@@ -208,7 +209,7 @@ fn sign(pkcs8: &[u8], header: &Value, claims: &Value) -> String {
     format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature))
 }
 
-fn epoch() -> u64 {
+pub(super) fn epoch() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -216,7 +217,7 @@ fn epoch() -> u64 {
 }
 
 /// Claims Access would issue for `email`, valid for five minutes.
-fn claims(email: &str) -> Value {
+pub(super) fn claims(email: &str) -> Value {
     let now = epoch();
     json!({
         "iss": format!("https://{TEAM}.cloudflareaccess.com"),
@@ -230,18 +231,18 @@ fn claims(email: &str) -> Value {
     })
 }
 
-fn rs256(kid: &str) -> Value {
+pub(super) fn rs256(kid: &str) -> Value {
     json!({"alg": "RS256", "kid": kid, "typ": "JWT"})
 }
 
 /// A local stand-in for `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`.
-struct KeyServer {
+pub(super) struct KeyServer {
     url: String,
     hits: Arc<AtomicUsize>,
 }
 
 impl KeyServer {
-    async fn start(keys: Vec<Value>) -> Self {
+    pub(super) async fn start(keys: Vec<Value>) -> Self {
         let keys = Arc::new(Mutex::new(keys));
         let hits = Arc::new(AtomicUsize::new(0));
         let app = {
@@ -268,7 +269,7 @@ impl KeyServer {
         self.hits.load(Ordering::SeqCst)
     }
 
-    fn verifier(&self) -> Verifier {
+    pub(super) fn verifier(&self) -> Verifier {
         Verifier::new(TEAM, AUDIENCE)
             .unwrap()
             .with_certs_url(&self.url)

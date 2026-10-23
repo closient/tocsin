@@ -45,6 +45,11 @@ pub const PROBE_BACKSTOP: Duration = Duration::from_secs(5);
 /// grace, so neither needs corroborating.
 pub const HEARTBEAT_CONFIRM: u32 = 1;
 
+/// How the error of a missed heartbeat deadline begins, which tells a
+/// miss from a ping in its history: a ping reporting itself down has its
+/// own message, or "the job reported itself down".
+pub const MISSED_PING: &str = "no ping within the interval of";
+
 /// [`PING_MESSAGE_LIMIT`] as a literal, so `concat!` can spell it into
 /// help text and API descriptions that would otherwise repeat the number.
 #[macro_export]
@@ -1575,7 +1580,7 @@ fn missed_result(node_id: &str, heartbeat: &Heartbeat, at_ms: i64) -> NewCheckRe
         health: Health::Down,
         detail: None,
         error: Some(format!(
-            "no ping within the interval of {} plus {} grace",
+            "{MISSED_PING} {} plus {} grace",
             heartbeat.interval, heartbeat.grace
         )),
         status_code: None,

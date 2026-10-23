@@ -20,6 +20,60 @@ and tells tocsin who they are, in one of two ways:
 `allowed_emails` and `allowed_domains` then narrow who may use the page.
 The keys are in [config.md](config.md#serverauth).
 
+The same sign-in guards the read-only [internal board](#the-internal-board)
+at `/internal/`.
+
+## The internal board
+
+`/internal/` shows every check and heartbeat, including those on no
+public component: the machines, certificates, heartbeats and vendor status
+pages that do not belong on the public page. It replaces the Gatus
+dashboard. It is read-only; checks are changed only in the config files.
+
+Checks are grouped like the status page: each group's components in
+order, then a last section, "Not on the status page", for checks and
+heartbeats on no component. Each check shows:
+
+- its health and how long it has held it;
+- its type, interval, target and component;
+- a latency sparkline of the last 24 hours, one point per half-hour,
+  with a mark under each half-hour that saw a failure, and the same in
+  words beneath it;
+- its 90-day uptime bar, from the daily rollups;
+- the last problem in the past 24 hours, and the newest result's
+  assertions in a sentence;
+- when it last ran;
+- its `[[check.link]]` links, shown nowhere else.
+
+A heartbeat shows its last ping, its next deadline (the last result plus
+`interval` and `grace`) and the message its last ping carried, with its
+`[[heartbeat.link]]` links.
+
+`/internal/checks/<id>` is one check or heartbeat: the same card, every
+assertion of the newest result with what it expected and got, the results
+of the last 24 hours (newest 50), and its outages over 90 days with the
+releases of the projects that list its component (every project's, for a
+check on none).
+
+Both pages read in full without JavaScript. With it, they refresh when
+the status page's event stream reports a check change, and every minute
+besides.
+
+The board answers **403** to every request that is not from a signed-in
+person on the allow-lists, and also while `[server.auth]` is off: unlike
+`/admin/`, which is then a 404, the board exists in every install and
+says how to reach it. An unknown check is a 404 only after sign-in, so ids
+cannot be probed from outside. Every response, refusals included, carries
+`Cache-Control: private, no-store` and `X-Robots-Tag: noindex`, and the
+pages carry no structured data. Nothing public links to the board: not
+`/`, `/llms.txt`, the OpenAPI document or the feeds. tocsin serves no
+sitemap.
+
+The event stream the board listens on, `/api/v1/events`, is the status
+page's and is public: it names a check and its new health when one
+changes, as the anonymous `GET /api/v1/checks` does. Neither carries a
+target, an error, an assertion or a link.
+
 ## Setting it up
 
 ### Cloudflare Access
@@ -91,6 +145,8 @@ them can name any person.
 | A flood of tokens naming unknown keys. | Keys are refetched at most once a minute, by one task at a time. |
 | Access unreachable, so the keys cannot be refreshed. | The last keys are kept for an hour past their age, then refused: a key Cloudflare has revoked stops working within two hours. |
 | Someone the proxy admits who should not run incidents. | `allowed_emails` / `allowed_domains`: 403. |
+| Anyone reading the internal board's targets, errors and links. | Every `/internal/` route takes the same sign-in as `/admin/` and answers 403 without it, including when `[server.auth]` is off. |
+| A shared cache or search engine keeping a copy of the internal board. | `Cache-Control: private, no-store` and `X-Robots-Tag: noindex` on every `/internal/` response, refusals included. |
 | A page on another site submits a form with the person's session. | Two checks, both required: `Origin` (or `Referer`) must be the origin of `[server] public_url` (scheme, host and port; the request's `Host` is never consulted) and `Sec-Fetch-Site`, when sent, `same-origin`; and a token bound to the person, `HMAC-SHA256` with a per-process key, valid for 12 hours, sent as the `csrf` form field. |
 | Script in an incident's title or message. | askama escapes every value; messages are rendered by pulldown-cmark and cleaned by ammonia, and only that output is marked safe. The Content-Security-Policy allows only this site's own script and stylesheet, with no inline code; admin pages load no script at all. |
 | Framing, sniffing, caching of admin pages. | `X-Frame-Options: DENY`, `frame-ancestors 'none'`, `nosniff`, `Cache-Control: no-store`. |
@@ -135,7 +191,10 @@ pattern. The pieces live in
   ```
 
   Both answer 404 while `[server.auth]` is off, 401 to someone the proxy
-  did not vouch for and 403 to someone not on the allow-lists. A form
+  did not vouch for and 403 to someone not on the allow-lists. A
+  read-only page for operators takes `identity::Operator` instead, which
+  runs the same check and answers every refusal, `[server.auth]` being
+  off included, with one 403. A form
   includes `<input type="hidden" name="csrf" value="{{ csrf }}">`, from
   `admin.csrf_token()`.
 - **Forms are plain HTML forms**, without htmx: a write answers `303 See

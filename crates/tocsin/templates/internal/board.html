@@ -1,0 +1,19 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{#- `/internal/`: every check and heartbeat, for signed-in operators
+    (web/internal.rs). The board is its fragment's template, re-fetched from
+    /internal/fragments/board when the event stream names a check change,
+    and every 60 seconds besides. Served complete, so it reads without
+    JavaScript. -#}
+{% extends "status/layout.html" %}
+{% block content %}
+<div class="intro">
+<h1>Internal board</h1>
+<p class="lede">Every check and heartbeat, including those on no public component.</p>
+<p class="muted">Signed in as <span class="who">{{ operator }}</span>. Read-only: checks are configured in the config files.</p>
+</div>
+<div class="live board" hx-ext="sse" sse-connect="{{ events }}">
+<div id="board" hx-get="/internal/fragments/board" hx-trigger="sse:check_changed throttle:5s, sse:resync, every 60s" hx-swap="innerHTML">
+{%- include "internal/fragments/board.html" %}
+</div>
+</div>
+{% endblock %}

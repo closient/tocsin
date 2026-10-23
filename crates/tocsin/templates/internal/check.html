@@ -1,0 +1,17 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{#- `/internal/checks/{id}`: one check or heartbeat, for signed-in
+    operators (web/internal.rs). Below the heading the page is its
+    fragment's template, re-fetched when the event stream names a check
+    change, and every 60 seconds besides. -#}
+{% extends "status/layout.html" %}
+{% block content %}
+<p class="back"><a href="/internal/">Internal board</a></p>
+<div class="intro">
+<h1>{{ detail.card.name }}</h1>
+</div>
+<div class="live board" hx-ext="sse" sse-connect="{{ events }}">
+<div id="check" hx-get="{{ live_url }}" hx-trigger="sse:check_changed throttle:5s, sse:resync, every 60s" hx-swap="innerHTML">
+{%- include "internal/fragments/check.html" %}
+</div>
+</div>
+{% endblock %}

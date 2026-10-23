@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Server-rendered HTML pages: the public status page, the public release
-//! log, and the admin pages. `docs/admin.md` describes the pattern for
+//! log, the read-only internal board, and the admin pages. `docs/admin.md` describes the pattern for
 //! adding a page.
 //!
 //! - **Templates**: askama, in `crates/tocsin/templates/`. Every page
@@ -14,7 +14,8 @@
 //!   `[page] accent` is a second, generated stylesheet ([`theme`]).
 //! - **Identity**: a page that needs a signed-in person takes
 //!   [`identity::Admin`]; a write takes [`identity::AdminForm`], which adds
-//!   the CSRF checks in [`csrf`].
+//!   the CSRF checks in [`csrf`]. The internal board takes
+//!   [`identity::Operator`]: the same proof, refused with a 403.
 //! - **Headers**: every response from these routes gets
 //!   [`page::security_headers`]: a strict CSP, `nosniff`, no framing, and
 //!   `no-store` unless it sets its own caching.
@@ -26,6 +27,7 @@ pub mod csrf;
 pub mod feeds;
 pub mod form;
 pub mod identity;
+pub mod internal;
 pub mod markdown;
 pub mod page;
 pub mod releases;
@@ -36,6 +38,8 @@ pub mod uptime;
 
 #[cfg(test)]
 mod feeds_tests;
+#[cfg(test)]
+mod internal_tests;
 #[cfg(test)]
 mod status_tests;
 #[cfg(test)]
@@ -48,7 +52,7 @@ use crate::http::AppState;
 
 /// The HTML routes: assets, the status page, the release log and their feeds always, the admin pages
 /// when `[server.auth]` turns them on. Without it, `/admin/` is the same 404 as any unknown
-/// path.
+/// path. The internal board is always routed, and refuses everyone with a 403 until auth is on.
 pub fn router(state: &AppState) -> Router<AppState> {
     let mut router = Router::new()
         .route(
@@ -61,7 +65,8 @@ pub fn router(state: &AppState) -> Router<AppState> {
         )
         .merge(status::router())
         .merge(releases::router())
-        .merge(feeds::router());
+        .merge(feeds::router())
+        .merge(internal::router());
     if state.admin.is_some() {
         router = router.merge(admin::router()).merge(timeline::router());
     }

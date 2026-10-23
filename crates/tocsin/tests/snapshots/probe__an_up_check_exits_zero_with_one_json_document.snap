@@ -1,0 +1,81 @@
+---
+source: crates/tocsin/tests/probe.rs
+expression: fixture.json(&output)
+---
+{
+  "assertions": [
+    {
+      "actual": 200,
+      "condition": "status",
+      "expected": [
+        200
+      ],
+      "implicit": false,
+      "on_fail": "down",
+      "passed": true
+    },
+    {
+      "actual": [
+        "application/json"
+      ],
+      "condition": "header",
+      "expected": {
+        "contains": "json",
+        "name": "content-type"
+      },
+      "implicit": false,
+      "on_fail": "down",
+      "passed": true
+    },
+    {
+      "actual": "operational",
+      "condition": "json",
+      "expected": {
+        "eq": "operational",
+        "path": "$.components[?@.name=='API'].status"
+      },
+      "implicit": false,
+      "on_fail": "down",
+      "passed": true
+    },
+    {
+      "actual": "[ms]",
+      "condition": "latency_ms",
+      "expected": {
+        "lt": 5000
+      },
+      "implicit": false,
+      "on_fail": "down",
+      "passed": true
+    }
+  ],
+  "check": "statuspage-api",
+  "duration_ms": "[ms]",
+  "error": null,
+  "facts": {
+    "body": "{\n  \"page\": {\"id\": \"y2j98763l1zq\", \"name\": \"Example\", \"url\": \"https://status.example.com\"},\n  \"components\": [\n    {\"id\": \"b13yz5g2cw10\", \"name\": \"API\", \"status\": \"operational\", \"group\": false},\n    {\"id\": \"9pdnc9dg8yrq\", \"name\": \"CDN\", \"status\": \"degraded_performance\", \"group\": false}\n  ]\n}",
+    "body_bytes": 291,
+    "body_truncated": false,
+    "certificate": null,
+    "headers": {
+      "content-length": [
+        "291"
+      ],
+      "content-type": [
+        "application/json"
+      ],
+      "date": [
+        "[date]"
+      ]
+    },
+    "latency_ms": "[ms]",
+    "redirect_location": null,
+    "status": 200,
+    "type": "http",
+    "url": "http://127.0.0.1:PORT/api/v2/components.json"
+  },
+  "health": "up",
+  "started_at_ms": "[ms]",
+  "target": "http://127.0.0.1:PORT/api/v2/components.json",
+  "type": "http"
+}

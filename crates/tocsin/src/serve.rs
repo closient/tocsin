@@ -100,6 +100,7 @@ pub fn run(config: &Path, data: Option<&Path>) -> Result<Report, Failure> {
     Ok(Report {
         json: json!({ "status": "stopped", "signal": signal_name }),
         text: format!("tocsin stopped ({signal_name})"),
+        exit: Exit::Ok,
     })
 }
 

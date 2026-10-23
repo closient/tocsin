@@ -29,7 +29,7 @@ The path is relative to the file. The schema checks the shape of each file: fiel
 
 ```text
 error: configuration in /etc/tocsin has 2 errors
-/etc/tocsin/checks.toml:5:1: unknown field `intervall`, expected one of `id`, `name`, `component`, `type`, `target`, `interval`, `timeout`, `confirm`, `http`, `dns`, `tls`, `assert` (check[0].intervall)
+/etc/tocsin/checks.toml:5:1: unknown field `intervall`, expected one of `id`, `name`, `component`, `type`, `target`, `interval`, `timeout`, `confirm`, `http`, `dns`, `tls`, `tcp`, `assert`, `link` (check[0].intervall)
   hint: did you mean `interval`?
 /etc/tocsin/checks.toml:9:13: unknown component `apj` (check[1].component)
   hint: did you mean `api`?
@@ -153,15 +153,22 @@ Type-specific settings go in a table named after the type; each is optional and 
 | `follow_redirects` | `false` | Follow 3xx responses. |
 | `headers` | `{}` | Request headers, as a table. Each value **may be secret**. |
 | `body` | none | Request body. **May be secret.** |
-| `verify_certificate` | `true` | Reject invalid TLS certificates. |
+| `verify_certificate` | `true` | Treat a certificate that does not verify as a failed probe (`down`). With `false` the request goes ahead and the certificate is still reported, so `chain_valid` and `hostname_valid` assertions can judge it. |
+| `server_name` | none | The hostname for SNI, the `Host` header and the certificate check, when it differs from the target host. The connection still goes to the target host's address. |
+| `bearer_token` | none | Sent as `Authorization: Bearer <token>`. **Secret.** |
+| `basic_auth` | none | `{ username = "...", password = "${ENV:...}" }`, sent as HTTP basic authentication. `username` **may be secret**; `password` is **secret**. Give `bearer_token` or `basic_auth`, not both. |
 
-`[check.dns]`: `record_type` (`A` by default; also `AAAA`, `CNAME`, `MX`, `NS`, `TXT`, `SRV`, `CAA`) and `resolver`, an IP address as `ip`, `ip:port` or `[ipv6]:port` (the system resolver by default; a hostname is an error).
+An `http` probe reads at most 64 KiB of the response body; assertions see that much, and the result says when the body was cut. Proxy environment variables are ignored: a probe measures the target, not a proxy.
 
-`[check.tls]`: `server_name`, the SNI hostname to send when it differs from the target host.
+`[check.dns]`: `record_type` (`A` by default; also `AAAA`, `CNAME`, `MX`, `NS`, `TXT`, `SRV`, `CAA`) and `resolver`, an IP address as `ip`, `ip:port` or `[ipv6]:port` (the system resolver by default; a hostname is an error). Each probe asks once, with no cache and without the hosts file, and the target is a complete name: no search domains are tried.
+
+`[check.tls]`: `server_name`, the SNI hostname to send, and to check the certificate against, when it differs from the target host.
+
+`[check.tcp]`: `send`, text to write once connected, such as `"PING\r\n"`. The reply, or the server's greeting when nothing is sent, is read only when `send` is set or a `banner` assertion asks for it; see [probes](probes.md#tcp-banners).
 
 ### Assertions: `[[check.assert]]`
 
-Each assertion holds exactly one condition. If it fails, the check is `down`, or `degraded` with `on_fail = "degraded"`.
+Each assertion holds exactly one condition. If it fails, the check is `down`, or `degraded` with `on_fail = "degraded"`. A check's health is the worst of its failing assertions: `up` when every one passes, `down` when any failing one is `down`, `degraded` otherwise. A probe that cannot complete (a timeout, a refused connection, a failed lookup, a certificate that does not verify) is `down` whatever its assertions say.
 
 ```toml
 [[check.assert]]
@@ -180,12 +187,26 @@ json = { path = "$.status", eq = "ok" }
 | `status` | http | A list of acceptable status codes, 100 to 599. |
 | `latency_ms` | every type | Bounds: any of `lt`, `lte`, `gt`, `gte`, `eq`; every bound given must hold. |
 | `json` | http | `path` plus exactly one of `eq`, `ne` (any value), `exists` (bool), `contains` (string). |
-| `body` | http | Exactly one of `contains`, `not_contains`. |
+| `body` | http | Exactly one of `contains`, `not_contains`, `regex`. |
 | `header` | http | `name` plus exactly one of `eq`, `contains`, `exists`. Names match without regard to case. |
-| `certificate_days_remaining` | http, tls | Bounds, as `latency_ms`. |
-| `records` | dns | `contains`: one returned record equals this. |
+| `certificate_days_remaining` | http (https only), tls | Bounds, as `latency_ms`. |
+| `hostname_valid` | http (https only), tls | `true` or `false`: whether the certificate names the host. |
+| `chain_valid` | http (https only), tls | `true` or `false`: whether the chain verifies against the system's roots and is in date. |
+| `records` | dns | Exactly one of `contains` (one returned record equals this) and `eq` (a list: the returned records are exactly these, in any order). IP addresses compare in canonical form, and names without the trailing dot. |
+| `banner` | tcp | Exactly one of `contains`, `not_contains`, `regex`, matched against the reply. |
 
-A JSON `path` starts with `$`, then any of `.key`, `[index]`, `["key"]` or `['key']`: `$.checks[0].status`.
+`regex` is [Rust `regex` syntax](https://docs.rs/regex/latest/regex/#syntax) and matches anywhere unless anchored with `^` and `$`. Patterns, like JSON paths, are checked when the configuration loads.
+
+A JSON `path` is an [RFC 9535](https://www.rfc-editor.org/rfc/rfc9535) JSONPath: `$.checks[0].status`, or with a filter, `$.components[?@.name=='API'].status`. The assertion compares the first node the path selects, so a filter that matches one item reads like gjson's `components.#(name=="API").status`. A path that selects nothing fails every matcher except `exists = false`.
+
+```toml
+# An Atlassian Statuspage component, as vendor status pages publish them.
+[[check.assert]]
+json = { path = "$.components[?@.name=='API Requests'].status", eq = "operational" }
+on_fail = "degraded"
+```
+
+A check with no assertions gets implicit ones, reported with `"implicit": true`: an `http` response's status must be 2xx or 3xx, a `dns` answer's response code must be `NOERROR`, and a `tls` certificate must have a valid chain and name the host. `tcp` and `icmp` checks with no assertions pass when the probe completes.
 
 ### Links: `[[check.link]]` and `[[heartbeat.link]]`
 

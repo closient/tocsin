@@ -1,0 +1,45 @@
+---
+source: crates/tocsin/tests/probe.rs
+expression: fixture.json(&output)
+---
+{
+  "assertions": [
+    {
+      "actual": 302,
+      "condition": "status",
+      "expected": "2xx or 3xx",
+      "implicit": true,
+      "on_fail": "down",
+      "passed": true
+    }
+  ],
+  "check": "moved",
+  "duration_ms": "[ms]",
+  "error": null,
+  "facts": {
+    "body": "",
+    "body_bytes": 0,
+    "body_truncated": false,
+    "certificate": null,
+    "headers": {
+      "content-length": [
+        "0"
+      ],
+      "date": [
+        "[date]"
+      ],
+      "location": [
+        "/api/v2/components.json"
+      ]
+    },
+    "latency_ms": "[ms]",
+    "redirect_location": "/api/v2/components.json",
+    "status": 302,
+    "type": "http",
+    "url": "http://127.0.0.1:PORT/moved"
+  },
+  "health": "up",
+  "started_at_ms": "[ms]",
+  "target": "http://127.0.0.1:PORT/moved",
+  "type": "http"
+}

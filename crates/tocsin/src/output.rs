@@ -12,10 +12,13 @@ use tocsin_core::config::Diagnostic;
 
 use crate::exit::Exit;
 
-/// A successful result, renderable either way.
+/// A result the command ran to the end, renderable either way.
 pub struct Report {
     pub json: Value,
     pub text: String,
+    /// [`Exit::Ok`], or [`Exit::CheckFailed`] when the command ran a check
+    /// and the check failed; the output is printed the same either way.
+    pub exit: Exit,
 }
 
 impl Report {
@@ -24,6 +27,7 @@ impl Report {
         Report {
             json: json!({ "version": version }),
             text: format!("tocsin {version}"),
+            exit: Exit::Ok,
         }
     }
 }
@@ -93,7 +97,7 @@ pub fn emit(result: Result<Report, Failure>, json: bool) -> ExitCode {
             } else {
                 write_stdout(&format!("{}\n", report.text));
             }
-            Exit::Ok.into()
+            report.exit.into()
         }
         Err(failure) => {
             if json {

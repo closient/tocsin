@@ -1,0 +1,45 @@
+---
+source: crates/tocsin/tests/probe.rs
+expression: fixture.json(&output)
+---
+{
+  "assertions": [
+    {
+      "actual": 503,
+      "condition": "status",
+      "expected": "2xx or 3xx",
+      "implicit": true,
+      "on_fail": "down",
+      "passed": false
+    }
+  ],
+  "check": "unavailable",
+  "duration_ms": "[ms]",
+  "error": null,
+  "facts": {
+    "body": "down for maintenance",
+    "body_bytes": 20,
+    "body_truncated": false,
+    "certificate": null,
+    "headers": {
+      "content-length": [
+        "20"
+      ],
+      "content-type": [
+        "text/plain; charset=utf-8"
+      ],
+      "date": [
+        "[date]"
+      ]
+    },
+    "latency_ms": "[ms]",
+    "redirect_location": null,
+    "status": 503,
+    "type": "http",
+    "url": "http://127.0.0.1:PORT/unavailable"
+  },
+  "health": "down",
+  "started_at_ms": "[ms]",
+  "target": "http://127.0.0.1:PORT/unavailable",
+  "type": "http"
+}

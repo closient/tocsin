@@ -1,0 +1,20 @@
+---
+source: crates/tocsin/tests/probe.rs
+expression: "normalized.join(\"\\n\")"
+---
+check `statuspage-cdn` (http http://127.0.0.1:PORT/api/v2/components.json) is degraded after [ms] ms
+facts:
+  body: {\n  "page": {"id": "y2j98763l1zq", "name": "Example", "url": "https://status.example.com"},\n  "components": [\n    {"id": "b13yz5g2cw10", "name": "API", "status": "operational", "group": false},\n  ... (291 bytes in all)
+  body_bytes: 291
+  body_truncated: false
+  certificate: null
+  headers.content-length: 291
+  headers.content-type: application/json
+  headers.date: [date]
+  latency_ms: [ms]
+  redirect_location: null
+  status: 200
+  url: http://127.0.0.1:PORT/api/v2/components.json
+assertions:
+  FAIL json: expected {"eq":"operational","path":"$.components[?@.name=='CDN'].status"}, actual "degraded_performance" -> degraded
+  pass body: expected {"contains":"\"page\""}, actual "{\n  \"page\": {\"id\": \"y2j98763l1zq\", \"name\": \"Example\", \"url\": \"https://status.example.com\"},\n  \"components\": [\n    {\"id\": \"b13yz5g2cw10\", \"name\": \"API\", \"status\": \"operat...

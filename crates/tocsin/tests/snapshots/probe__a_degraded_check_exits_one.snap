@@ -1,0 +1,58 @@
+---
+source: crates/tocsin/tests/probe.rs
+expression: fixture.json(&output)
+---
+{
+  "assertions": [
+    {
+      "actual": "degraded_performance",
+      "condition": "json",
+      "expected": {
+        "eq": "operational",
+        "path": "$.components[?@.name=='CDN'].status"
+      },
+      "implicit": false,
+      "on_fail": "degraded",
+      "passed": false
+    },
+    {
+      "actual": "{\n  \"page\": {\"id\": \"y2j98763l1zq\", \"name\": \"Example\", \"url\": \"https://status.example.com\"},\n  \"components\": [\n    {\"id\": \"b13yz5g2cw10\", \"name\": \"API\", \"status\": \"operational\", \"group\": false},\n    {\"id\": \"9pdnc9dg8yrq\", \"name\": \"CDN\", \"status\": \"degraded_…",
+      "condition": "body",
+      "expected": {
+        "contains": "\"page\""
+      },
+      "implicit": false,
+      "on_fail": "down",
+      "passed": true
+    }
+  ],
+  "check": "statuspage-cdn",
+  "duration_ms": "[ms]",
+  "error": null,
+  "facts": {
+    "body": "{\n  \"page\": {\"id\": \"y2j98763l1zq\", \"name\": \"Example\", \"url\": \"https://status.example.com\"},\n  \"components\": [\n    {\"id\": \"b13yz5g2cw10\", \"name\": \"API\", \"status\": \"operational\", \"group\": false},\n    {\"id\": \"9pdnc9dg8yrq\", \"name\": \"CDN\", \"status\": \"degraded_performance\", \"group\": false}\n  ]\n}",
+    "body_bytes": 291,
+    "body_truncated": false,
+    "certificate": null,
+    "headers": {
+      "content-length": [
+        "291"
+      ],
+      "content-type": [
+        "application/json"
+      ],
+      "date": [
+        "[date]"
+      ]
+    },
+    "latency_ms": "[ms]",
+    "redirect_location": null,
+    "status": 200,
+    "type": "http",
+    "url": "http://127.0.0.1:PORT/api/v2/components.json"
+  },
+  "health": "degraded",
+  "started_at_ms": "[ms]",
+  "target": "http://127.0.0.1:PORT/api/v2/components.json",
+  "type": "http"
+}

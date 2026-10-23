@@ -31,6 +31,17 @@
       "additionalProperties": false,
       "description": "One condition a probe result must meet, and the state a failure maps to.",
       "properties": {
+        "banner": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TextAssertion"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The text a TCP server sends after connecting (and after `send`)."
+        },
         "body": {
           "anyOf": [
             {
@@ -53,6 +64,13 @@
           ],
           "description": "Days until the server certificate expires."
         },
+        "chain_valid": {
+          "description": "Whether the server certificate chains to a trusted root and is\nwithin its validity period.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "header": {
           "anyOf": [
             {
@@ -63,6 +81,13 @@
             }
           ],
           "description": "A response header."
+        },
+        "hostname_valid": {
+          "description": "Whether the server certificate is valid for the host name checked.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "json": {
           "anyOf": [
@@ -127,12 +152,39 @@
       "description": "`[server.auth]`. Reserved for the admin page; it accepts no settings\nyet.",
       "type": "object"
     },
+    "BasicAuth": {
+      "additionalProperties": false,
+      "description": "`[check.http.basic_auth]`.",
+      "properties": {
+        "password": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            }
+          ],
+          "description": "The password. Secret."
+        },
+        "username": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Text"
+            }
+          ],
+          "description": "The user name. It may be a secret, `${ENV:NAME}`."
+        }
+      },
+      "required": [
+        "username",
+        "password"
+      ],
+      "type": "object"
+    },
     "Check": {
       "additionalProperties": false,
       "description": "A probe run on an interval, whose result sets a component's health.",
       "properties": {
         "assert": {
-          "description": "Conditions a result must meet, each `[[check.assert]]` table holding\none. With none, a probe that completes counts as up (for `http`, a\n2xx or 3xx status).",
+          "description": "Conditions a result must meet, each `[[check.assert]]` table holding\none. With none, a probe that completes counts as up, except that\n`http` needs a 2xx or 3xx status, `dns` a `NOERROR` response and\n`tls` a certificate that verifies for the host.",
           "items": {
             "$ref": "#/definitions/Assertion"
           },
@@ -212,6 +264,17 @@
         "target": {
           "description": "What is probed. Its form depends on the type: a URL for `http`,\n`host:port` for `tcp`, `host` or `host:port` for `tls`, a domain\nname for `dns` and a host for `icmp`.",
           "type": "string"
+        },
+        "tcp": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TcpSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Settings for `tcp` checks."
         },
         "timeout": {
           "allOf": [
@@ -485,14 +548,14 @@
       "description": "A condition on one response header.",
       "properties": {
         "contains": {
-          "description": "The header value contains this.",
+          "description": "A value of the header contains this.",
           "type": [
             "string",
             "null"
           ]
         },
         "eq": {
-          "description": "The header value equals this.",
+          "description": "A value of the header equals this.",
           "type": [
             "string",
             "null"
@@ -620,6 +683,28 @@
       "additionalProperties": false,
       "description": "`[check.http]`.",
       "properties": {
+        "basic_auth": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/BasicAuth"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Sent as HTTP basic authentication."
+        },
+        "bearer_token": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Sent as `Authorization: Bearer <token>`. Secret."
+        },
         "body": {
           "anyOf": [
             {
@@ -652,9 +737,16 @@
           "default": "GET",
           "description": "Request method."
         },
+        "server_name": {
+          "description": "The host name sent as TLS SNI and `Host`, and checked against the\ncertificate, when it differs from the target's host. The target's\nhost is still the address connected to.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "verify_certificate": {
           "default": true,
-          "description": "Whether the server's certificate must verify. Defaults to true.",
+          "description": "Whether the server's certificate must verify. Defaults to true.\nWhen false, the request proceeds and the certificate is still\nreported, so `chain_valid` and `hostname_valid` can be asserted.",
           "type": "boolean"
         }
       },
@@ -667,7 +759,7 @@
     },
     "JsonAssertion": {
       "additionalProperties": false,
-      "description": "A value at a path in a JSON response body.",
+      "description": "A value selected from the JSON response body by an RFC 9535 JSON path.",
       "properties": {
         "contains": {
           "description": "The value is a string containing this.",
@@ -680,7 +772,7 @@
           "description": "The value equals this."
         },
         "exists": {
-          "description": "Whether a value exists at the path.",
+          "description": "Whether the path selects any value.",
           "type": [
             "boolean",
             "null"
@@ -690,7 +782,7 @@
           "description": "The value does not equal this."
         },
         "path": {
-          "description": "Where the value is: `$`, then `.key`, `[index]` or `[\"key\"]` steps,\nsuch as `$.checks[0].status`.",
+          "description": "An RFC 9535 JSON path, such as `$.checks[0].status` or\n`$.components[?@.name=='API'].status`. When it selects several\nvalues, the first in document order is compared.",
           "type": "string"
         }
       },
@@ -1058,16 +1150,26 @@
     },
     "RecordsAssertion": {
       "additionalProperties": false,
-      "description": "A condition on the records a DNS lookup returns.",
+      "description": "A condition on the records a DNS lookup returns. Records are compared\nas text, ignoring a trailing `.` on names.",
       "properties": {
         "contains": {
           "description": "One of the records equals this.",
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "eq": {
+          "description": "The records are exactly these, in any order.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
-      "required": [
-        "contains"
-      ],
       "type": "object"
     },
     "Route": {
@@ -1250,6 +1352,20 @@
       ],
       "type": "object"
     },
+    "TcpSettings": {
+      "additionalProperties": false,
+      "description": "`[check.tcp]`.",
+      "properties": {
+        "send": {
+          "description": "Text written once connected, before the banner is read. Escapes such\nas `\\r\\n` are written in TOML's own string syntax.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "TelegramSettings": {
       "additionalProperties": false,
       "description": "`[notifier.telegram]`.",
@@ -1290,6 +1406,13 @@
         },
         "not_contains": {
           "description": "The text does not contain this.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "regex": {
+          "description": "The text matches this regular expression (Rust `regex` syntax),\nanywhere in the text unless anchored with `^` or `$`.",
           "type": [
             "string",
             "null"

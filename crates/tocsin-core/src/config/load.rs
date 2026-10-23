@@ -1260,7 +1260,9 @@ fn text_problem(text: &TextAssertion) -> Option<(String, Option<String>)> {
     })
 }
 
-fn closest<'c>(given: &str, candidates: impl Iterator<Item = &'c str>) -> Option<&'c str> {
+/// The candidate nearest to `given` by edit distance, if any is close
+/// enough to be a likely typo.
+pub fn closest<'c>(given: &str, candidates: impl Iterator<Item = &'c str>) -> Option<&'c str> {
     let limit = (given.chars().count() / 3).max(2);
     candidates
         .map(|candidate| (edit_distance(given, candidate), candidate))

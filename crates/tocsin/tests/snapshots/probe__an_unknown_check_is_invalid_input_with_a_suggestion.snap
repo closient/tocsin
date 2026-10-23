@@ -1,0 +1,10 @@
+---
+source: crates/tocsin/tests/probe.rs
+expression: fixture.json(&output)
+---
+{
+  "error": {
+    "kind": "invalid_input",
+    "message": "no check has the id `statuspage-ap`; did you mean `statuspage-api`?"
+  }
+}

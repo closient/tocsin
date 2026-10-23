@@ -47,6 +47,11 @@ pub enum Command {
         #[command(subcommand)]
         command: DbCommand,
     },
+    /// Run checks by hand.
+    Probe {
+        #[command(subcommand)]
+        command: ProbeCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -85,6 +90,23 @@ pub enum DbCommand {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum ProbeCommand {
+    /// Run one check once from the configuration, with no server and no
+    /// database, and print the facts the probe gathered and each
+    /// assertion's verdict. Exits 0 when the check is up, 1 when it is
+    /// degraded or down.
+    Run {
+        /// The `id` of the check to run.
+        #[arg(value_name = "CHECK_ID")]
+        check: String,
+
+        /// Folder of `*.toml` configuration files.
+        #[arg(long, value_name = "DIR", default_value = DEFAULT_CONFIG)]
+        config: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
     /// Validate every `*.toml` file in the folder, reporting every error
     /// with its file, line and column. Exits 2 if any error is found.
@@ -104,5 +126,5 @@ pub enum ConfigCommand {
     Schema,
 }
 
-/// Where `tocsin config` looks when `--config` is not given.
+/// Where `tocsin` looks for configuration when `--config` is not given.
 const DEFAULT_CONFIG: &str = "/etc/tocsin";

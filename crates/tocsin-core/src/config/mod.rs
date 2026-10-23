@@ -29,7 +29,7 @@ pub use check::{
     TlsSettings,
 };
 pub use diagnostic::Diagnostic;
-pub use load::{Environment, Source, host_and_port, load};
+pub use load::{Environment, Source, closest, host_and_port, load};
 pub use notifier::{
     AlertmanagerSettings, DiscordSettings, EmailSettings, Notifier, NotifierSettings, NotifierType,
     NtfySettings, PushoverSettings, SlackSettings, TelegramSettings, WebhookSettings,

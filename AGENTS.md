@@ -59,6 +59,7 @@ tocsin serve [--config <dir>] [--data <dir>] # until SIGINT/SIGTERM; --data defa
 tocsin db info --data <dir> --json           # read-only: size, schema version, row counts, oldest result
 tocsin db rollup --data <dir> --since YYYY-MM-DD
 tocsin db vacuum --data <dir>                # refused while serve runs on <dir>
+tocsin probe run <check> [--config <dir>] --json # one check, once: facts and each assertion's verdict
 ```
 
 `--config` defaults to `/etc/tocsin`; a folder with no `*.toml` file is an error (exit 2).
@@ -67,4 +68,4 @@ The configuration format is documented in [`docs/config.md`](docs/config.md); [`
 
 The storage schema and its rules are in [`docs/storage.md`](docs/storage.md); `serve` keeps `[server] retention_days` of raw results.
 
-One-shot probes (`tocsin probe run <check> --json`, which runs a single check and explains its verdict) are not implemented yet; they arrive with the probe engine.
+`tocsin probe run` needs no server or database; it exits 0 when the check is up, 1 when it is degraded or down, 2 for an unknown check or invalid configuration, and 3 when the probe cannot run on this machine. Its output, each probe's facts and the ICMP permissions are documented in [`docs/probes.md`](docs/probes.md); the JSON shape is pinned by the snapshots in `crates/tocsin/tests/snapshots/`.

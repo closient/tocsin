@@ -4,7 +4,7 @@
 //! column.
 
 use tocsin_core::config::{
-    CheckType, Config, Diagnostic, Environment, Id, NotifierType, Source, load,
+    CheckType, Config, Diagnostic, Environment, Id, NotifierType, Secret, Source, load,
 };
 
 const HOSTNAME: &str = "probe-01";
@@ -608,6 +608,99 @@ target = "x"
             "checks.toml:22:6: invalid id `Bad_Id`: use lowercase letters, digits and hyphens, starting with a letter or digit",
             "routes.toml:3:13: a route needs at least one notifier",
             "routes.toml:4:18: unknown check `dbb`",
+        ]
+    );
+}
+
+#[test]
+fn statuspage_filters_and_probe_settings_load() {
+    let checks = r#"
+[[check]]
+id = "github-api"
+type = "http"
+target = "https://www.githubstatus.com/api/v2/components.json"
+[check.http]
+server_name = "www.githubstatus.com"
+bearer_token = "${ENV:TOKEN_A}"
+
+[[check.assert]]
+json = { path = "$.components[?@.name=='API Requests'].status", eq = "operational" }
+on_fail = "degraded"
+
+[[check.assert]]
+body = { regex = "\"status\":\\s*\"\\w+\"" }
+
+[[check]]
+id = "redis"
+type = "tcp"
+target = "cache.example.com:6379"
+[check.tcp]
+send = "PING\r\n"
+
+[[check.assert]]
+banner = { regex = "^\\+PONG$" }
+"#;
+    let config = run(&[("checks.toml", checks)]).expect("valid");
+    let github = &config.checks[0];
+    let http = github.http.as_ref().expect("http settings");
+    assert_eq!(http.server_name.as_deref(), Some("www.githubstatus.com"));
+    assert_eq!(
+        http.bearer_token.as_ref().map(Secret::expose),
+        Some("SHARED-TOKEN-SECRET")
+    );
+    assert!(http.verify_certificate);
+    assert!(!http.follow_redirects);
+    let tcp = config.checks[1].tcp.as_ref().expect("tcp settings");
+    assert_eq!(tcp.send.as_deref(), Some("PING\r\n"));
+}
+
+#[test]
+fn http_checks_verify_certificates_without_an_http_table() {
+    let checks = "[[check]]\nid = \"web\"\ntype = \"http\"\ntarget = \"https://example.com\"\n";
+    let config = run(&[("checks.toml", checks)]).expect("valid");
+    let verify = config.checks[0]
+        .http
+        .as_ref()
+        .is_none_or(|http| http.verify_certificate);
+    assert!(verify);
+}
+
+#[test]
+fn assertions_and_probe_settings_are_checked_when_loaded() {
+    let checks = r#"
+[[check]]
+id = "web"
+type = "http"
+target = "http://example.com"
+[check.http]
+bearer_token = "${ENV:TOKEN_A}"
+basic_auth = { username = "monitor", password = "${ENV:TOKEN_C}" }
+
+[[check.assert]]
+json = { path = "$.components[?@.name=='API'", eq = "operational" }
+
+[[check.assert]]
+body = { regex = "(unclosed" }
+
+[[check.assert]]
+certificate_days_remaining = { gt = 14 }
+
+[[check]]
+id = "cache"
+type = "tcp"
+target = "cache.example.com:6379"
+
+[[check.assert]]
+banner = { contains = "PONG", regex = "PONG" }
+"#;
+    assert_eq!(
+        errors(&[("checks.toml", checks)]),
+        [
+            "checks.toml:8:14: give `bearer_token` or `basic_auth`, not both",
+            "checks.toml:11:8: `$.components[?@.name=='API'` is not a JSONPath: at position 27, in long-hand segment, expected closing ']'",
+            "checks.toml:14:8: `(unclosed` is not a regular expression: regex parse error:\n    (unclosed\n    ^\nerror: unclosed group",
+            "checks.toml:17:30: a `certificate_days_remaining` assertion needs an https:// target, and this one is http://",
+            "checks.toml:25:10: give exactly one of contains, not_contains or regex",
         ]
     );
 }

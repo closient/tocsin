@@ -7,11 +7,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
+use tocsin_core::config::Config;
 use tocsin_store::{DB_FILE, Retention, Store};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::time::MissedTickBehavior;
 
 use crate::exit::Exit;
+use crate::http::{self, AppState, events::EventBus};
 use crate::lock;
 use crate::output::{Failure, Report};
 
@@ -31,6 +33,7 @@ pub fn run(config: &Path, data: Option<&Path>) -> Result<Report, Failure> {
     };
     let data = data.as_path();
     let retention_days = loaded.config.server.retention_days;
+    let files = loaded.files.len();
     // `symlink_metadata` also catches a dangling symlink, which `exists()`
     // reports as absent and `create_dir_all` then fails on.
     if data.symlink_metadata().is_ok() && !data.is_dir() {
@@ -57,45 +60,10 @@ pub fn run(config: &Path, data: Option<&Path>) -> Result<Report, Failure> {
         .enable_all()
         .build()
         .map_err(|error| Failure::new(Exit::Runtime, format!("cannot start runtime: {error}")))?;
-    let signal_name = runtime.block_on(async {
-        let shutdown = Shutdown::install()?;
-        let path = data.join(DB_FILE);
-        let store = Store::open(&path).map_err(|error| {
-            Failure::new(
-                Exit::Runtime,
-                format!("cannot open database {}: {error}", path.display()),
-            )
-        })?;
-        let store = Arc::new(store);
-        let maintenance = tokio::spawn(maintain(
-            Arc::clone(&store),
-            Retention::days(retention_days),
-        ));
-        // Logged only once both handlers exist, so a signal sent after this
-        // line is always handled rather than killing the process outright.
-        tracing::info!(
-            config = %config.display(),
-            data = %data.display(),
-            files = loaded.files.len(),
-            checks = loaded.config.checks.len(),
-            retention_days,
-            "tocsin serving; waiting for SIGINT or SIGTERM"
-        );
-        let signal_name = shutdown.wait().await;
-        tracing::info!(signal = signal_name, "shutting down");
-        maintenance.abort();
-        // An aborted task drops its handle on the store at its next await,
-        // which `await` on the join handle waits for.
-        let _ = maintenance.await;
-        let Ok(store) = Arc::try_unwrap(store) else {
-            tracing::warn!("database still in use at shutdown; not closed");
-            return Ok(signal_name);
-        };
-        if let Err(error) = store.close().await {
-            tracing::warn!(%error, "database did not close cleanly");
-        }
-        Ok::<_, Failure>(signal_name)
-    })?;
+    let config_folder = config;
+    let config = Arc::new(loaded.config);
+    let signal_name =
+        runtime.block_on(serve(config_folder, data, &config, files, retention_days))?;
 
     Ok(Report {
         json: json!({ "status": "stopped", "signal": signal_name }),
@@ -103,6 +71,107 @@ pub fn run(config: &Path, data: Option<&Path>) -> Result<Report, Failure> {
         exit: Exit::Ok,
     })
 }
+
+/// Serves until a shutdown signal, then drains and closes the store.
+/// Resolves with the signal's name.
+async fn serve(
+    config_folder: &Path,
+    data: &Path,
+    config: &Arc<Config>,
+    files: usize,
+    retention_days: u32,
+) -> Result<&'static str, Failure> {
+    let shutdown = Shutdown::install()?;
+    let path = data.join(DB_FILE);
+    let store = Store::open(&path).map_err(|error| {
+        Failure::new(
+            Exit::Runtime,
+            format!("cannot open database {}: {error}", path.display()),
+        )
+    })?;
+    let store = Arc::new(store);
+    let listen = config.server.listen;
+    let listener = tokio::net::TcpListener::bind(listen)
+        .await
+        .map_err(|error| {
+            Failure::new(Exit::Runtime, format!("cannot listen on {listen}: {error}"))
+        })?;
+    let address = listener.local_addr().map_err(|error| {
+        Failure::new(Exit::Runtime, format!("cannot listen on {listen}: {error}"))
+    })?;
+    let maintenance = tokio::spawn(maintain(
+        Arc::clone(&store),
+        Retention::days(retention_days),
+    ));
+    let app = http::router(AppState {
+        store: Arc::clone(&store),
+        config: Arc::clone(config),
+        events: EventBus::new(),
+    });
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let mut server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+    });
+    // Logged only once both handlers exist and the socket is bound, so a
+    // signal sent after this line is always handled and a request sent
+    // after it is always answered.
+    tracing::info!(
+        config = %config_folder.display(),
+        data = %data.display(),
+        listen = %address,
+        files,
+        checks = config.checks.len(),
+        retention_days,
+        "tocsin serving; waiting for SIGINT or SIGTERM"
+    );
+    let signal_name = tokio::select! {
+        signal_name = shutdown.wait() => signal_name,
+        result = &mut server => {
+            let message = match result {
+                Ok(Ok(())) => "the HTTP server stopped on its own".to_owned(),
+                Ok(Err(error)) => format!("the HTTP server failed: {error}"),
+                Err(error) => format!("the HTTP server panicked: {error}"),
+            };
+            return Err(Failure::new(Exit::Runtime, message));
+        }
+    };
+    tracing::info!(signal = signal_name, "shutting down");
+    // Stop accepting, then let requests in flight finish so their
+    // writes commit before the store closes.
+    let _ = stop.send(());
+    match tokio::time::timeout(DRAIN_FOR, &mut server).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(error))) => tracing::warn!(%error, "HTTP server stopped with an error"),
+        Ok(Err(error)) => tracing::warn!(%error, "HTTP server panicked while draining"),
+        Err(_) => {
+            tracing::warn!(
+                seconds = DRAIN_FOR.as_secs(),
+                "requests still running; dropping them"
+            );
+            server.abort();
+            let _ = server.await;
+        }
+    }
+    maintenance.abort();
+    // An aborted task drops its handle on the store at its next await,
+    // which `await` on the join handle waits for.
+    let _ = maintenance.await;
+    let Ok(store) = Arc::try_unwrap(store) else {
+        tracing::warn!("database still in use at shutdown; not closed");
+        return Ok(signal_name);
+    };
+    if let Err(error) = store.close().await {
+        tracing::warn!(%error, "database did not close cleanly");
+    }
+    Ok(signal_name)
+}
+
+/// How long requests in flight may run after a shutdown signal.
+const DRAIN_FOR: Duration = Duration::from_secs(10);
 
 /// How often rollups are brought up to date and retention runs.
 const MAINTENANCE_EVERY: Duration = Duration::from_hours(1);

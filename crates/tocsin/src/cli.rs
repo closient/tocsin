@@ -4,7 +4,8 @@
 
 use std::path::PathBuf;
 
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use tocsin_core::incident::{Impact, IncidentStatus, Timestamp};
 
 /// Single-binary uptime monitor, status page and release log.
 #[derive(Debug, Parser)]
@@ -52,6 +53,203 @@ pub enum Command {
         #[command(subcommand)]
         command: ProbeCommand,
     },
+    /// Open, update, list and export incidents on a running server.
+    Incident {
+        #[command(subcommand)]
+        command: IncidentCommand,
+    },
+    /// Announce scheduled maintenance on a running server.
+    Maintenance {
+        #[command(subcommand)]
+        command: MaintenanceCommand,
+    },
+    /// Print the OpenAPI document for the HTTP API.
+    Openapi,
+}
+
+/// Which server to talk to, and as whom.
+#[derive(Debug, Args)]
+pub struct ServerArgs {
+    /// Base URL of the tocsin server, such as `https://status.example.com`.
+    #[arg(long, env = "TOCSIN_URL", value_name = "URL")]
+    pub url: String,
+
+    /// A `[[token]]` secret with the `incident` scope; needed to write.
+    /// Prefer the environment variable: arguments show in `ps`.
+    #[arg(
+        long,
+        env = "TOCSIN_TOKEN",
+        hide_env_values = true,
+        value_name = "TOKEN"
+    )]
+    pub token: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum IncidentCommand {
+    /// Open an incident.
+    New {
+        #[command(flatten)]
+        server: ServerArgs,
+
+        /// One line, shown on the status page.
+        #[arg(long)]
+        title: String,
+
+        /// none, minor, major or critical. Defaults to none.
+        #[arg(long)]
+        impact: Option<Impact>,
+
+        /// An affected `[[component]]` id; repeat for several.
+        #[arg(long = "component", value_name = "ID")]
+        components: Vec<String>,
+
+        /// The first update, in markdown.
+        #[arg(long)]
+        message: String,
+
+        /// The first status. Defaults to investigating.
+        #[arg(long)]
+        status: Option<IncidentStatus>,
+    },
+    /// Post an update, moving the incident to a status.
+    Update {
+        #[command(flatten)]
+        server: ServerArgs,
+
+        /// The incident's id.
+        id: i64,
+
+        /// investigating, identified, monitoring or resolved; for
+        /// maintenance, scheduled, `in_progress` or completed.
+        #[arg(long)]
+        status: IncidentStatus,
+
+        /// The update, in markdown.
+        #[arg(long)]
+        message: String,
+    },
+    /// Change the title, impact, components or schedule.
+    Edit {
+        #[command(flatten)]
+        server: ServerArgs,
+
+        /// The incident's id.
+        id: i64,
+
+        /// A new title.
+        #[arg(long)]
+        title: Option<String>,
+
+        /// A new impact.
+        #[arg(long)]
+        impact: Option<Impact>,
+
+        /// The new set of affected components, replacing the old; repeat
+        /// for several.
+        #[arg(
+            long = "component",
+            value_name = "ID",
+            conflicts_with = "no_components"
+        )]
+        components: Vec<String>,
+
+        /// Clear the affected components.
+        #[arg(long)]
+        no_components: bool,
+
+        /// A new planned start (maintenance), in RFC 3339.
+        #[arg(long, value_name = "TIME")]
+        start: Option<Timestamp>,
+
+        /// A new planned end (maintenance), in RFC 3339.
+        #[arg(long, value_name = "TIME")]
+        end: Option<Timestamp>,
+    },
+    /// Show one incident with every update.
+    Show {
+        #[command(flatten)]
+        server: ServerArgs,
+
+        /// The incident's id.
+        id: i64,
+    },
+    /// List incidents and maintenance, newest first.
+    List {
+        #[command(flatten)]
+        server: ServerArgs,
+
+        /// How many, 1 to 100.
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+
+        /// Only incidents with a smaller id: the previous page's
+        /// `next_before`.
+        #[arg(long, value_name = "ID")]
+        before: Option<i64>,
+    },
+    /// Write incidents as markdown with front matter.
+    Export {
+        #[command(flatten)]
+        server: ServerArgs,
+
+        /// The incident's id.
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        id: Option<i64>,
+
+        /// Every incident and maintenance, one file each; needs `--out`.
+        #[arg(long, requires = "out")]
+        all: bool,
+
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = ExportFormat::Md)]
+        format: ExportFormat,
+
+        /// Folder to write `incident-<id>.md` files to, created if
+        /// missing. Without it, one incident is printed.
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MaintenanceCommand {
+    /// Announce maintenance ahead of time.
+    Schedule {
+        #[command(flatten)]
+        server: ServerArgs,
+
+        /// One line, shown on the status page.
+        #[arg(long, default_value = "Scheduled maintenance")]
+        title: String,
+
+        /// When it begins, in RFC 3339 such as `2026-11-01T02:00:00Z`.
+        #[arg(long, value_name = "TIME")]
+        start: Timestamp,
+
+        /// When it ends, after `--start`.
+        #[arg(long, value_name = "TIME")]
+        end: Timestamp,
+
+        /// An affected `[[component]]` id; repeat for several.
+        #[arg(long = "component", value_name = "ID")]
+        components: Vec<String>,
+
+        /// What will happen, in markdown.
+        #[arg(long)]
+        message: String,
+
+        /// none, minor, major or critical. Defaults to none.
+        #[arg(long)]
+        impact: Option<Impact>,
+    },
+}
+
+/// Formats `incident export` writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ExportFormat {
+    /// Markdown with YAML front matter.
+    Md,
 }
 
 #[derive(Debug, Subcommand)]

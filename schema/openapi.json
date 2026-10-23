@@ -1,0 +1,778 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "tocsin",
+    "description": "Uptime monitor, status page and release log. Reads are public; writes need a `[[token]]` with the route's scope.",
+    "license": {
+      "name": "AGPL-3.0-only",
+      "identifier": "AGPL-3.0-only"
+    },
+    "version": "1"
+  },
+  "paths": {
+    "/api/v1/incidents": {
+      "get": {
+        "tags": [
+          "incidents"
+        ],
+        "summary": "List incidents and maintenance, newest first.",
+        "operationId": "list_incidents",
+        "parameters": [
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Only incidents with a smaller id: the previous page's `next_before`.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, 1 to 100; default 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentList"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A bad `before` or `limit`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "incidents"
+        ],
+        "summary": "Open an incident or announce scheduled maintenance.",
+        "operationId": "create_incident",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewIncident"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created; `Location` names it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Incident"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks the `incident` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid fields, by path",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/incidents/{id}": {
+      "get": {
+        "tags": [
+          "incidents"
+        ],
+        "summary": "One incident with every update.",
+        "operationId": "get_incident",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Incident id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The incident",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Incident"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No incident has that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "incidents"
+        ],
+        "summary": "Change the title, impact, components or schedule. Fields left out are\nunchanged; status changes only through an update.",
+        "operationId": "edit_incident",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Incident id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IncidentEdit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The incident after the edit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Incident"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks the `incident` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No incident has that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid fields, by path",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/incidents/{id}/updates": {
+      "post": {
+        "tags": [
+          "incidents"
+        ],
+        "summary": "Append an update, moving the incident to its status.",
+        "operationId": "add_update",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Incident id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Appended; the incident with the new update last",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Incident"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks the `incident` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No incident has that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid fields, by path",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Actor": {
+        "type": "object",
+        "description": "Who wrote a change: recorded with every incident, update and edit.",
+        "required": [
+          "kind",
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The token's id, or the person's identity from the proxy."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ActorKind",
+            "description": "How the writer was identified."
+          }
+        }
+      },
+      "ActorKind": {
+        "type": "string",
+        "description": "How a writer was identified.",
+        "enum": [
+          "token",
+          "person"
+        ]
+      },
+      "ErrorBody": {
+        "type": "object",
+        "description": "The body of every error response.",
+        "required": [
+          "error",
+          "message"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Stable machine-readable code: `unauthorized`, `forbidden`,\n`not_found`, `method_not_allowed`, `bad_request`, `invalid` or `internal`."
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldError"
+            },
+            "description": "For `invalid`: every problem, by path in the request."
+          },
+          "message": {
+            "type": "string",
+            "description": "What went wrong, for a person."
+          }
+        }
+      },
+      "FieldError": {
+        "type": "object",
+        "description": "One problem with a request, at a field path such as `components[1]`.",
+        "required": [
+          "path",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "What is wrong."
+          },
+          "path": {
+            "type": "string",
+            "description": "Where in the request body; empty for the body as a whole."
+          }
+        }
+      },
+      "Impact": {
+        "type": "string",
+        "description": "How badly the affected components are hit. Ordered least to worst.",
+        "enum": [
+          "none",
+          "minor",
+          "major",
+          "critical"
+        ]
+      },
+      "Incident": {
+        "type": "object",
+        "description": "An incident or scheduled maintenance, with every update.",
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "impact",
+          "status",
+          "components",
+          "created_at",
+          "created_by",
+          "updated_at",
+          "updated_by",
+          "updates"
+        ],
+        "properties": {
+          "components": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ids of the affected `[[component]]`s, sorted."
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When it was opened."
+          },
+          "created_by": {
+            "$ref": "#/components/schemas/Actor",
+            "description": "Who opened it."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Assigned by tocsin; never reused."
+          },
+          "impact": {
+            "$ref": "#/components/schemas/Impact",
+            "description": "How badly the affected components are hit."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/IncidentKind",
+            "description": "Incident or maintenance. Fixed at creation."
+          },
+          "resolved_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When the latest update moved it to `resolved` or `completed`; cleared\nif a later update reopens it."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scheduled_end": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When maintenance is planned to end; after `scheduled_start`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scheduled_start": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When maintenance is planned to begin; always set for maintenance,\nnever for an incident."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/IncidentStatus",
+            "description": "The status of the latest update."
+          },
+          "title": {
+            "type": "string",
+            "description": "One line, shown on the status page."
+          },
+          "updated_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When it last changed: an update or an edit."
+          },
+          "updated_by": {
+            "$ref": "#/components/schemas/Actor",
+            "description": "Who made the last change."
+          },
+          "updates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IncidentUpdate"
+            },
+            "description": "Every update, oldest first. The first is the opening message."
+          }
+        }
+      },
+      "IncidentEdit": {
+        "type": "object",
+        "description": "`PATCH /api/v1/incidents/{id}`: change what an incident says. Only the\nfields given change; status changes only through an update.",
+        "properties": {
+          "components": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "The full new set of affected components (not a delta)."
+          },
+          "impact": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Impact",
+                "description": "A new impact."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scheduled_end": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "A new planned end. Maintenance only."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scheduled_start": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "A new planned start. Maintenance only."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A new title, not empty."
+          }
+        },
+        "additionalProperties": false
+      },
+      "IncidentKind": {
+        "type": "string",
+        "description": "Whether something broke or work was planned.",
+        "enum": [
+          "incident",
+          "maintenance"
+        ]
+      },
+      "IncidentList": {
+        "type": "object",
+        "description": "`GET /api/v1/incidents`: one page of incidents, newest first.",
+        "required": [
+          "incidents"
+        ],
+        "properties": {
+          "incidents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Incident"
+            },
+            "description": "Newest first."
+          },
+          "next_before": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Pass as `before` to get the next page; `null` on the last page."
+          }
+        }
+      },
+      "IncidentStatus": {
+        "type": "string",
+        "description": "Where an incident or maintenance stands. The first four belong to\nincidents, the last three to maintenance; see\n[`IncidentStatus::allowed_for`].",
+        "enum": [
+          "investigating",
+          "identified",
+          "monitoring",
+          "resolved",
+          "scheduled",
+          "in_progress",
+          "completed"
+        ]
+      },
+      "IncidentUpdate": {
+        "type": "object",
+        "description": "One entry in an incident's timeline. Updates are never changed.",
+        "required": [
+          "id",
+          "status",
+          "message",
+          "created_at",
+          "created_by"
+        ],
+        "properties": {
+          "created_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When it was posted."
+          },
+          "created_by": {
+            "$ref": "#/components/schemas/Actor",
+            "description": "Who posted it."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Assigned by tocsin."
+          },
+          "message": {
+            "type": "string",
+            "description": "Markdown."
+          },
+          "status": {
+            "$ref": "#/components/schemas/IncidentStatus",
+            "description": "The status the incident moved to (or stayed at)."
+          }
+        }
+      },
+      "NewIncident": {
+        "type": "object",
+        "description": "`POST /api/v1/incidents`: open an incident or announce maintenance.",
+        "required": [
+          "title",
+          "message"
+        ],
+        "properties": {
+          "components": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ids of configured components. May be empty."
+          },
+          "impact": {
+            "$ref": "#/components/schemas/Impact",
+            "description": "Defaults to `none`."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/IncidentKind",
+            "description": "Defaults to `incident`."
+          },
+          "message": {
+            "type": "string",
+            "description": "The first update, in markdown. Not empty."
+          },
+          "scheduled_end": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "Required for maintenance, after `scheduled_start`; refused for an\nincident."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scheduled_start": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "Required for maintenance, refused for an incident."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/IncidentStatus",
+                "description": "The first update's status. Defaults to `investigating` for an\nincident and `scheduled` for maintenance."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "type": "string",
+            "description": "One line, not empty."
+          }
+        },
+        "additionalProperties": false
+      },
+      "NewUpdate": {
+        "type": "object",
+        "description": "`POST /api/v1/incidents/{id}/updates`: append an update.",
+        "required": [
+          "status",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "Markdown. Not empty."
+          },
+          "status": {
+            "$ref": "#/components/schemas/IncidentStatus",
+            "description": "The status the incident moves to; it must suit the incident's kind."
+          }
+        },
+        "additionalProperties": false
+      },
+      "Timestamp": {
+        "type": "string",
+        "format": "date-time",
+        "description": "RFC 3339; written in UTC with millisecond precision, read with any offset.",
+        "examples": [
+          "2026-10-23T14:05:00.000Z"
+        ]
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A `[[token]]` secret from the configuration."
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "incidents",
+      "description": "Incidents and scheduled maintenance"
+    }
+  ]
+}

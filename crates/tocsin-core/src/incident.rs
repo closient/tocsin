@@ -393,6 +393,15 @@ impl IncidentEdit {
     }
 }
 
+/// `GET /api/v1/incidents`: one page of incidents, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct IncidentList {
+    /// Newest first.
+    pub incidents: Vec<Incident>,
+    /// Pass as `before` to get the next page; `null` on the last page.
+    pub next_before: Option<i64>,
+}
+
 /// One problem with a request, at a field path such as `components[1]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct FieldError {

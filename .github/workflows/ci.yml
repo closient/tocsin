@@ -79,9 +79,10 @@ jobs:
           "$RUNNER_TEMP/taplo" check --no-auto-config --schema "file://$GITHUB_WORKSPACE/schema/tocsin.schema.json" "${files[@]}"
           "$RUNNER_TEMP/taplo" check --no-auto-config "${files[@]}"
 
-  # Informational: the p99 append latency of 100 checks, on one core, while
-  # retention purges a backlog. Results land in the job summary; a slow
-  # shared runner does not fail the pull request.
+  # The p99 append latency of 100 checks, on one core, while retention
+  # purges a backlog, must stay under 50 ms. Checkpoints used to run inside
+  # writes and put p99s of up to 320 ms here; off the write path, 60 runs
+  # across runner types stayed under 12 ms (TOC-57, docs/storage.md).
   bench:
     runs-on: ubuntu-24.04
     steps:
@@ -91,7 +92,6 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo test --release --locked -p tocsin-store --test write_latency --no-run
       - name: Write latency on one core
-        continue-on-error: true
         run: taskset -c 0 cargo test --release --locked -p tocsin-store --test write_latency -- --ignored --nocapture
 
   # CONTRIBUTING.md promises unsigned commits are not merged; this keeps

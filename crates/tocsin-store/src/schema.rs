@@ -45,7 +45,18 @@ pub(crate) fn open_writer(path: &Path) -> Result<Connection> {
     // can drop the last commits but never corrupts the database.
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    // Commits never checkpoint: the checkpointer thread does, on its own
+    // connection, so a checkpoint's fsyncs never hold up a write.
+    conn.pragma_update(None, "wal_autocheckpoint", 0)?;
     migrations().to_latest(&mut conn)?;
+    Ok(conn)
+}
+
+/// Opens the checkpointer's connection. It only ever runs `PRAGMA
+/// wal_checkpoint`.
+pub(crate) fn open_checkpointer(path: &Path) -> Result<Connection> {
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
     Ok(conn)
 }
 

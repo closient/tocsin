@@ -22,6 +22,7 @@ WAL, and runs any pending migrations before doing anything else.
 | `journal_mode` | `WAL` | Readers never wait for the writer, and the writer never waits for readers. `Store::open` fails if WAL cannot be enabled (for example, on a network filesystem). |
 | `synchronous` | `NORMAL` | Safe under WAL: a power cut can lose the last few commits but never corrupts the file. Probe results are cheap to lose; a full fsync per commit is not cheap. |
 | `foreign_keys` | `ON` | An incident's components, updates and edits cascade with it. |
+| `wal_autocheckpoint` | `0` on the writer | Commits never checkpoint; the checkpointer thread does (below). |
 | `busy_timeout` | 5 s | Covers a checkpoint or a hand-run `sqlite3` holding a lock briefly. |
 
 **One writer.** Every write goes through a single dedicated thread fed by a
@@ -42,6 +43,26 @@ the write lock up front. A deferred one would read on a snapshot and then
 need to upgrade it, which fails with `SQLITE_BUSY_SNAPSHOT` (no retry, no
 busy wait) if another connection, such as a hand-run `sqlite3`, committed
 in between.
+
+**One checkpointer.** Under WAL, commits only append to the log; the
+fsyncs happen when a checkpoint copies the log back into the database file.
+SQLite's default runs that checkpoint inside whichever commit takes the log
+past 1000 pages, on the committing connection, which here is the writer
+thread: every write queued behind it waited for the copy and both fsyncs.
+On CI runners those took 20 to 480 ms and were the whole p99 tail of the
+write-latency bench (up to 320 ms; TOC-57). So the writer turns automatic
+checkpoints off and, after each write, nudges a second thread with its own
+connection, which runs `PRAGMA wal_checkpoint(PASSIVE)` at most once a
+second while writes keep coming. A passive checkpoint takes no lock the
+writer or the readers need and skips frames a reader still uses, so it
+never holds them up; the log stays about a second's worth of writes long.
+The disk is still shared: on ext4 a write can wait for the filesystem
+journal while a checkpoint's fsync commits it. On a runner still flushing
+a gigabyte of build output that cost single writes up to 200 ms, while the
+p99 stayed under 12 ms. If the checkpointer thread ever dies, the writer
+logs an error and turns automatic checkpoints back on rather than let the
+log grow without bound. On close, the writer's connection closes first;
+the checkpointer's closes last, which checkpoints and removes the log.
 
 **A pool of four readers**, each opened `query_only`, behind a semaphore.
 Queries run on tokio's blocking pool. It is hand-rolled (about 140 lines)

@@ -2,7 +2,8 @@
 
 //! Tests that need the writer's internals.
 
-use std::time::Duration;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 use rusqlite::{TransactionBehavior, params};
 
@@ -10,7 +11,9 @@ use tocsin_core::incident::{
     Actor, Impact, Incident, IncidentKind, IncidentStatus, NewIncident, NewUpdate, Timestamp,
 };
 
-use crate::{DB_FILE, Day, Error, NewCheckResult, Retention, Store, now_ms};
+use crate::checkpoint::Nudge;
+use crate::writer::Writer;
+use crate::{DB_FILE, Day, Error, NewCheckResult, Retention, Store, now_ms, schema};
 
 fn open() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
@@ -403,4 +406,88 @@ async fn listing_a_page_does_not_query_per_incident() {
         "statements for 1 and 5 incidents: {costs:?}"
     );
     store.close().await.unwrap();
+}
+
+/// Writes about 5 MB in one transaction: past the 1000 pages (4 MB) at which
+/// SQLite's automatic checkpoint would run inside the commit.
+async fn fill_log(writer: &Writer) {
+    writer
+        .run(|conn| {
+            conn.execute_batch(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10000)
+                 INSERT INTO check_result (node_id, check_id, started_at, duration_ms, health, error)
+                 SELECT 'node-a', 'bulk', i, 1, 'up', hex(randomblob(250)) FROM n;",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// The database file only grows when a checkpoint copies the log into it.
+fn database_bytes(path: &Path) -> u64 {
+    std::fs::metadata(path).unwrap().len()
+}
+
+/// A commit that pushes the log past SQLite's checkpoint threshold leaves
+/// the copy to the checkpointer (TOC-57): the database file is untouched and
+/// the checkpointer is nudged.
+#[tokio::test]
+async fn writes_leave_the_checkpoint_to_the_checkpointer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(DB_FILE);
+    let (nudge, nudges) = Nudge::detached();
+    let writer = Writer::spawn(schema::open_writer(&path).unwrap(), nudge).unwrap();
+    let before = database_bytes(&path);
+    fill_log(&writer).await;
+    fill_log(&writer).await;
+    assert_eq!(
+        database_bytes(&path),
+        before,
+        "a commit checkpointed the log on the writer thread"
+    );
+    assert!(nudges.try_recv().is_ok(), "the checkpointer was not nudged");
+    writer.close().join().unwrap();
+}
+
+/// The checkpointer copies the log into the database file soon after a
+/// write, without anything else happening, and closing the store removes
+/// the log.
+#[tokio::test]
+async fn the_checkpointer_copies_the_log_after_writes() {
+    let (dir, store) = open();
+    let path = dir.path().join(DB_FILE);
+    let before = database_bytes(&path);
+    fill_log(&store.writer).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while database_bytes(&path) == before {
+        assert!(
+            Instant::now() < deadline,
+            "the log was not checkpointed within 10s"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    store.close().await.unwrap();
+    // The last connection to close checkpoints and removes the log.
+    assert!(!dir.path().join(format!("{DB_FILE}-wal")).exists());
+}
+
+/// If the checkpointer is gone, writes checkpoint the log themselves again
+/// rather than letting it grow without bound.
+#[tokio::test]
+async fn without_a_checkpointer_writes_checkpoint_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(DB_FILE);
+    let (nudge, nudges) = Nudge::detached();
+    drop(nudges);
+    let writer = Writer::spawn(schema::open_writer(&path).unwrap(), nudge).unwrap();
+    // The first write finds the checkpointer gone.
+    writer.run(|_| Ok(())).await.unwrap();
+    let before = database_bytes(&path);
+    fill_log(&writer).await;
+    assert!(
+        database_bytes(&path) > before,
+        "the log was not checkpointed by the write"
+    );
+    writer.close().join().unwrap();
 }

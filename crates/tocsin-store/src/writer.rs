@@ -13,6 +13,7 @@ use std::thread::JoinHandle;
 use rusqlite::{Connection, TransactionBehavior, params};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::checkpoint::Nudge;
 use crate::error::{Error, Result};
 use crate::{NewCheckResult, OutageChange};
 
@@ -42,11 +43,11 @@ pub(crate) struct Writer {
 }
 
 impl Writer {
-    pub(crate) fn spawn(conn: Connection) -> Result<Writer> {
+    pub(crate) fn spawn(conn: Connection, nudge: Nudge) -> Result<Writer> {
         let (sender, receiver) = mpsc::channel(QUEUE_DEPTH);
         let thread = std::thread::Builder::new()
             .name("tocsin-store-writer".into())
-            .spawn(move || run(conn, receiver))?;
+            .spawn(move || run(conn, receiver, nudge))?;
         Ok(Writer { sender, thread })
     }
 
@@ -82,18 +83,18 @@ impl Writer {
     }
 
     /// Stops taking work, lets the queue drain and returns the thread, which
-    /// finishes once the connection is closed (checkpointing the WAL).
+    /// finishes once the connection is closed.
     pub(crate) fn close(self) -> JoinHandle<()> {
         drop(self.sender);
         self.thread
     }
 }
 
-fn run(mut conn: Connection, mut receiver: mpsc::Receiver<Command>) {
+fn run(mut conn: Connection, mut receiver: mpsc::Receiver<Command>, mut nudge: Nudge) {
     let mut next = None;
     loop {
         let Some(command) = next.take().or_else(|| receiver.blocking_recv()) else {
-            return;
+            break;
         };
         match command {
             Command::Run(job) => job(&mut conn),
@@ -116,7 +117,13 @@ fn run(mut conn: Connection, mut receiver: mpsc::Receiver<Command>) {
                 }
             }
         }
+        nudge.after_write(&conn);
     }
+    // Only the last connection to close checkpoints and removes the log, and
+    // the checkpointer closes its own once the nudge is gone: close this one
+    // first so the two never close together and both leave the log behind.
+    drop(conn);
+    drop(nudge);
 }
 
 /// Runs `write`, turning a panic into [`Error::WriterPanicked`] after

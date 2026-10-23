@@ -1646,7 +1646,7 @@
         },
         {
           "const": "status:read",
-          "description": "Reading what is not public in the read API: non-public projects'\nreleases and deploys, check targets, and raw check results.",
+          "description": "Reading what is not public in the read API: non-public projects'\nreleases and deploys, check targets, raw check results, and how the\nconfiguration last reloaded.",
           "type": "string"
         }
       ]

@@ -233,12 +233,14 @@ flight is abandoned, not recorded.
   says when to redraw.
 - **Metrics**: the same snapshot for gauges, and the bus for counters of
   changes.
-- **Reloading configuration**: build a new `Plan` from the new
-  configuration, `shutdown()` the running engine and `Engine::start` the
-  new one with the same parts. Seeding carries each check's state
-  across, so a reload loses no state that matters; the confirmation run
-  in progress is the only thing that starts over. Seeding is
-  `seed_checks` in `engine.rs`.
+- **Reloading configuration**: build a new `Plan` and pass it to
+  `Engine::reconcile`, which adds, removes and restarts checks and
+  heartbeats by id, carries a changed one's state across, rebuilds the
+  components, and withdraws the open outage of each one removed (ended
+  with no recovery, so nothing resolves). Every read happens before
+  anything stops, so an error leaves the old plan running.
+  `Engine::start` withdraws the same orphans, for checks removed while
+  the engine was stopped. `crates/tocsin/src/reload.rs` is the caller.
 - **Pinging**: `Engine::heartbeats()` gives a cloneable `HeartbeatHandle`
   whose `ping` resolves once the result is stored, with its time. The HTTP
   route in `crates/tocsin/src/http/heartbeats.rs` is one caller.

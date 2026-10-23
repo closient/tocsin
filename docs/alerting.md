@@ -114,6 +114,15 @@ running are abandoned and their deliveries stay `pending`. Everything the
 worker knows lives in the store, so a delivery pending at shutdown is sent
 after the next start.
 
+**Reloading.** A reload swaps the routes and notifiers at once; an alert
+already firing keeps the notifiers it fired on. When a reload (or a start)
+drops a check or heartbeat that has an outage open, the outage is
+withdrawn: its alerts end without a resolve, since nobody saw it recover,
+and one still ringing gets a cancel. When it drops a notifier, the alerts
+open on it end and nothing more is sent through it; deliveries already
+queued for it are abandoned and counted. See
+[config.md](config.md#reloading).
+
 **Secrets.** Webhook URLs, tokens and SMTP passwords never appear in logs or
 in a recorded error: errors name the notifier, and a URL is shown without
 its path or query.

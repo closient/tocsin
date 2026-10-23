@@ -9,7 +9,7 @@ tocsin config show --config /etc/tocsin --json     # the merged result, secrets 
 tocsin config schema > tocsin.schema.json          # the JSON Schema for one file
 ```
 
-`--config` defaults to `/etc/tocsin` for every command, `tocsin serve` included. `tocsin serve` loads the same folder and refuses to start (exit 2) if it does not validate. A folder with no `*.toml` file is an error (exit 2), not an empty configuration.
+`--config` defaults to `/etc/tocsin` for every command, `tocsin serve` included. `tocsin serve` loads the same folder and refuses to start (exit 2) if it does not validate, then [reloads it](#reloading) as it changes. A folder with no `*.toml` file is an error (exit 2), not an empty configuration.
 
 Hidden files and folders (names starting with `.`) are skipped. A symlinked file is read; a symlinked folder is not followed.
 
@@ -48,6 +48,37 @@ Every error has all six keys; `line`, `column`, `path` and `hint` are `null` whe
 Each `[[check]]`, `[[component]]` and other item is read on its own, so one broken item does not hide problems in the others. Within one item, a value that cannot be read at all (an unknown field, a wrong type, a bad duration) is reported, and that item's other rules are not checked until it is fixed.
 
 A file with a TOML syntax error, or one that cannot be read or is not UTF-8, is reported and otherwise skipped. The ids it defines are then unknown, so unknown references are not reported until it is fixed, rather than reporting every reference to an id in it.
+
+## Reloading
+
+`tocsin serve` reloads the folder by itself half a second after the last change to a `*.toml` file or a subfolder in it, and at once on SIGHUP (`systemctl reload tocsin`). Changes to hidden files, such as an editor's swap files, are ignored. A Kubernetes `ConfigMap` mounted as the folder reloads when Kubernetes swaps in a new version. If the folder cannot be watched, the log says so and only SIGHUP reloads it.
+
+A reload reads and validates the whole folder exactly as startup does, and either takes all of it or none of it:
+
+- **A configuration that validates** goes in at once. Checks and heartbeats it adds start; ones it removes stop; ones it changes restart with their state, so a down check stays down and its outage stays open. Unchanged ones keep running untouched. Notifiers, routes, components, projects, tokens, `[page]` and everything else served over HTTP take effect for the next request. Every result already recorded stays in history, removed checks' included.
+- **A configuration that does not validate changes nothing**: the last good one keeps running, and the reason shows in four places: the log (`configuration reload failed`, with every error), the metrics `tocsin_config_reload_success` (0) and `tocsin_config_last_error_timestamp`, `GET /api/v1/config/status`, and `tocsin config status`. An `${ENV:...}` naming a variable that is not set is an invalid configuration like any other.
+- **`[server]`** is read only at startup: it names the socket, the database and the node the history belongs to. A reload keeps the running `[server]` and logs a warning if the files say something else; restart to apply it. The environment is likewise read once, so a new secret needs a restart.
+
+Removing something that is alerting ends it rather than leaving it open:
+
+- **A removed check or heartbeat** with an open outage has the outage withdrawn: ended at the reload, with no resolve sent, since nobody saw it recover. An alert still ringing (a Pushover emergency) is cancelled.
+- **A removed notifier** has its open alerts ended, with nothing sent, since there is nothing left to send through.
+- **A changed route** applies to outages opened from then on; an alert already firing keeps the notifiers it fired on.
+
+The same happens at startup, for whatever the configuration dropped while tocsin was stopped.
+
+```sh
+tocsin config status --json    # exit 0 if the last reload succeeded, 1 if it failed
+```
+
+```json
+{"loaded_at": "2026-10-23T09:12:03.120Z", "last_attempt_at": "2026-10-23T09:40:51.007Z", "ok": false,
+ "errors": [{"file": "/etc/tocsin/tokens.toml", "line": 4, "column": 10, "path": "token[0].secret",
+             "message": "environment variable `DEPLOY_TOKEN` is not set",
+             "hint": "set DEPLOY_TOKEN in the environment tocsin runs in"}]}
+```
+
+`loaded_at` is when the running configuration was read; `last_attempt_at` is the latest reload, successful or not; `errors` has the shape `tocsin config check --json` reports. `tocsin config status` asks a running server (`--url` or `TOCSIN_URL`) and needs a token with `status:read` (`--token` or `TOCSIN_TOKEN`), as does the endpoint: the errors name files and environment variables.
 
 ## Conventions
 
@@ -334,5 +365,5 @@ A bearer token for the API: writing incidents, releases and heartbeats, and read
 |-----|------|-|
 | `id` | id | Required. Logged with each write. |
 | `secret` | secret | Required. Two tokens may not resolve to the same value; the error names both tokens, never the value. |
-| `scopes` | list of `heartbeat`, `incident`, `release`, `status:read` | Required, at least one. `release` publishes releases and stamps deploys; `status:read` reads what the public cannot: non-public projects' releases and deploys, check targets, and raw check results. See [api.md](api.md#who-sees-what). |
+| `scopes` | list of `heartbeat`, `incident`, `release`, `status:read` | Required, at least one. `release` publishes releases and stamps deploys; `status:read` reads what the public cannot: non-public projects' releases and deploys, check targets, raw check results, and [the reload status](#reloading). See [api.md](api.md#who-sees-what). |
 | `description` | string | Optional. Who or what uses the token. |

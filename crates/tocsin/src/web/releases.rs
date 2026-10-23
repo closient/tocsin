@@ -24,7 +24,7 @@ use tocsin_core::release::Release;
 use tocsin_store::ReleaseQuery;
 
 use super::markdown;
-use super::page::{HtmlError, Layout, render, when};
+use super::page::{HtmlError, Layout, render, when, when_in};
 use crate::http::AppState;
 use crate::http::auth::Viewer;
 use crate::http::releases::visible_projects;
@@ -54,6 +54,14 @@ impl Stamp {
     pub fn new(at: Timestamp) -> Self {
         Stamp {
             text: when(at),
+            iso: at.to_string(),
+        }
+    }
+
+    /// `at` shown in `zone`; the exact instant stays UTC.
+    pub fn zoned(at: Timestamp, zone: &jiff::tz::TimeZone) -> Self {
+        Stamp {
+            text: when_in(at, zone),
             iso: at.to_string(),
         }
     }
@@ -150,7 +158,7 @@ impl ProjectFilter {
 /// The public view of `project`'s published versions, or every public
 /// project's, one release standing for each, newest first; whether more
 /// matched than `limit`.
-async fn versions(
+pub(super) async fn versions(
     state: &AppState,
     project: Option<String>,
     limit: u32,
@@ -170,7 +178,7 @@ async fn versions(
 }
 
 /// `[[project]]` `id`'s display name; the id if it has none configured.
-fn project_name(state: &AppState, id: &str) -> String {
+pub(super) fn project_name(state: &AppState, id: &str) -> String {
     state
         .config
         .projects
@@ -179,7 +187,7 @@ fn project_name(state: &AppState, id: &str) -> String {
         .map_or_else(|| id.to_owned(), |project| project.name.clone())
 }
 
-fn href(release: &Release) -> String {
+pub(super) fn href(release: &Release) -> String {
     format!("/releases/{}/{}", release.project, release.version)
 }
 

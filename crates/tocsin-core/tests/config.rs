@@ -1220,3 +1220,73 @@ fn a_heartbeat_must_wait_well_inside_retention() {
         "heartbeat `backup`: `interval` (45d) + `grace` (1m) must be at most half of the default `[server] retention_days = 90`"
     );
 }
+
+#[test]
+fn the_page_takes_a_logo_links_an_order_and_a_time_zone() {
+    let page = r#"
+[page]
+title = "Acme status"
+groups = ["data", "edge"]
+components = ["db", "api"]
+timezone = "Europe/Berlin"
+
+[page.logo]
+url = "/brand/logo.svg"
+alt = "Acme"
+
+[[page.link]]
+name = "Support"
+url = "https://acme.example/support"
+"#;
+    let components = "[[group]]\nid = \"edge\"\nname = \"Edge\"\n\n[[group]]\nid = \"data\"\nname = \"Data\"\n\n\
+                      [[component]]\nid = \"api\"\nname = \"API\"\n\n[[component]]\nid = \"db\"\nname = \"DB\"\n";
+    let config = run(&[("page.toml", page), ("components.toml", components)]).unwrap();
+    let logo = config.page.logo.as_ref().unwrap();
+    assert_eq!(
+        (logo.url.as_str(), logo.alt.as_str()),
+        ("/brand/logo.svg", "Acme")
+    );
+    assert_eq!(config.page.links[0].name, "Support");
+    let ids = |ids: &[tocsin_core::config::Id]| -> Vec<String> {
+        ids.iter().map(|id| id.as_str().to_owned()).collect()
+    };
+    assert_eq!(ids(&config.page.groups), ["data", "edge"]);
+    assert_eq!(ids(&config.page.components), ["db", "api"]);
+    assert_eq!(config.page.timezone, "Europe/Berlin");
+    // Unset, the page shows UTC.
+    assert_eq!(run(&[]).unwrap().page.timezone, "UTC");
+}
+
+#[test]
+fn page_settings_are_checked_when_loaded() {
+    let page = r#"
+[page]
+groups = ["edge", "egde", "edge"]
+components = ["api", "api"]
+timezone = "Mars/Olympus"
+
+[page.logo]
+url = "https://cdn.example.com/logo.svg"
+alt = "Acme"
+
+[[page.link]]
+name = " "
+url = "support.example.com"
+"#;
+    let components = "[[group]]\nid = \"edge\"\nname = \"Edge\"\n\n[[component]]\nid = \"api\"\nname = \"API\"\n";
+    let diagnostics =
+        run(&[("page.toml", page), ("components.toml", components)]).expect_err("invalid");
+    let shown: Vec<String> = diagnostics.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        shown,
+        [
+            "page.toml:3:19: unknown group `egde` (page.groups[1])\n  hint: did you mean `edge`?",
+            "page.toml:3:27: `edge` is listed twice (page.groups[2])",
+            "page.toml:4:22: `api` is listed twice (page.components[1])",
+            "page.toml:5:12: unknown time zone `Mars/Olympus` (page.timezone)\n  hint: use an IANA name such as \"Europe/Berlin\", or \"UTC\"",
+            "page.toml:8:7: `https://cdn.example.com/logo.svg` is not a path on this site, such as \"/brand/logo.svg\" (page.logo.url)\n  hint: the page loads images from its own origin only; serve the logo from the proxy in front of tocsin",
+            "page.toml:12:8: a link needs a non-empty `name` (page.link[0].name)",
+            "page.toml:13:7: `support.example.com` is not an http:// or https:// URL (page.link[0].url)",
+        ]
+    );
+}

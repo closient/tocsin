@@ -1,0 +1,33 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{#- `/`. Each section is its fragment's template, re-fetched from
+    /fragments/<name> when the event stream names a change to it, and every
+    60 seconds besides. Served complete, so it reads without JavaScript. -#}
+{% extends "status/layout.html" %}
+{% block content %}
+<h1>{{ chrome.site }}</h1>
+{%- if let Some(description) = chrome.description %}
+<p class="muted">{{ description }}</p>
+{%- endif %}
+<div class="live" hx-ext="sse" sse-connect="{{ events }}">
+<div id="banner" role="status" hx-get="/fragments/banner" hx-trigger="sse:component_changed, sse:incident_created, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML">
+{%- include "status/fragments/banner.html" %}
+</div>
+<section id="incidents" aria-labelledby="incidents-heading" hx-get="/fragments/incidents" hx-trigger="sse:incident_created, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML">
+{%- include "status/fragments/incidents.html" %}
+</section>
+<section id="components" aria-labelledby="components-heading" hx-get="/fragments/components" hx-trigger="sse:component_changed, sse:incident_created, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML">
+{%- include "status/fragments/components.html" %}
+</section>
+<section id="uptime" aria-labelledby="uptime-heading" hx-get="/fragments/uptime" hx-trigger="sse:resync, every 600s" hx-swap="innerHTML">
+{%- include "status/fragments/uptime.html" %}
+</section>
+<section id="resolved" aria-labelledby="resolved-heading" hx-get="/fragments/resolved" hx-trigger="sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML">
+{%- include "status/fragments/resolved.html" %}
+</section>
+{%- if let Some(releases) = releases %}
+<section id="releases" aria-labelledby="releases-heading" hx-get="/fragments/releases" hx-trigger="sse:release_published, sse:release_deployed, sse:resync, every 60s" hx-swap="innerHTML">
+{%- include "status/fragments/releases.html" %}
+</section>
+{%- endif %}
+</div>
+{% endblock %}

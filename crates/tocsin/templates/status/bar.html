@@ -1,0 +1,9 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{#- One uptime bar; the including template binds `bar`. Each day's text is
+    hidden until hover, and read by screen readers. -#}
+<ol class="bar">
+  {%- for day in bar.days %}
+  <li class="day {{ day.tone.class() }}"><span class="tip">{{ day.text }}</span></li>
+  {%- endfor %}
+</ol>
+<p class="bar-summary">{{ bar.summary }}</p>

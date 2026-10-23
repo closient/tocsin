@@ -1,0 +1,12 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+<h2 id="resolved-heading">Recently resolved</h2>
+{%- if resolved.is_empty() %}
+<p class="muted">Nothing resolved yet.</p>
+{%- else %}
+<ul class="items">
+  {%- for card in resolved %}
+  {%- include "status/card.html" %}
+  {%- endfor %}
+</ul>
+{%- endif %}
+<p class="pager"><a href="/history">Incident history</a></p>

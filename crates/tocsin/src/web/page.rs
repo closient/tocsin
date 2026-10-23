@@ -52,6 +52,20 @@ pub fn when(at: Timestamp) -> String {
     )
 }
 
+/// `at` for a person in `zone`: `2026-10-23 16:05 CEST`, or `... UTC`.
+/// The public pages use the `[page] timezone`.
+pub fn when_in(at: Timestamp, zone: &jiff::tz::TimeZone) -> String {
+    jiff::Timestamp::from_millisecond(at.as_millis()).map_or_else(
+        |_| at.to_string(),
+        |instant| {
+            instant
+                .to_zoned(zone.clone())
+                .strftime("%Y-%m-%d %H:%M %Z")
+                .to_string()
+        },
+    )
+}
+
 /// `page` as an HTML response with `status`.
 pub fn render(status: StatusCode, page: &impl Template) -> Response {
     match page.render() {

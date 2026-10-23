@@ -158,11 +158,42 @@ comparing against the request's `Host`.
 
 ## `[page]`
 
+How the public status page looks; what it shows is in
+[status-page.md](status-page.md).
+
 | Key | Type | Default | |
 |-----|------|---------|-|
 | `title` | string | `"Status"` | The page title. |
 | `description` | string | none | A line under the title. |
 | `homepage_url` | URL | none | Where the logo and title link to. |
+| `groups` | list of group ids | definition order | The order groups are shown in. Groups not listed follow in the order they are defined. |
+| `components` | list of component ids | definition order | The order components are shown in within their group. |
+| `timezone` | IANA name | `"UTC"` | The time zone the page shows times in. The uptime bars' days are UTC days regardless. |
+| `[page.logo]` | table | none | `url`, a path on this site, and `alt`, its text. |
+| `[[page.link]]` | tables | none | `name` and `url`: links in the page's header, such as the main site or a support address. |
+
+```toml
+[page]
+title = "Example status"
+description = "Live status of the Example API and website."
+homepage_url = "https://example.com"
+groups = ["edge", "core"]
+components = ["web", "api"]
+timezone = "Europe/Berlin"
+
+[page.logo]
+url = "/brand/logo.svg"
+alt = "Example"
+
+[[page.link]]
+name = "Support"
+url = "mailto:support@example.com"
+```
+
+Each id in `groups` and `components` must name a `[[group]]` or
+`[[component]]`, once. The logo must be a path on this site, served by the
+proxy in front of tocsin: the page's content security policy loads images
+from its own origin only, so a URL on another host would not show.
 
 ## `[[group]]` and `[[component]]`
 

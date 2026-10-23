@@ -1,0 +1,11 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+<h2 id="incidents-heading">Active incidents and maintenance</h2>
+{%- if active.is_empty() %}
+<p class="muted">No incidents or maintenance in progress.</p>
+{%- else %}
+<ul class="items">
+  {%- for card in active %}
+  {%- include "status/card.html" %}
+  {%- endfor %}
+</ul>
+{%- endif %}

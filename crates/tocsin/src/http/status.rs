@@ -70,6 +70,21 @@ pub async fn get_component(
     viewer: Viewer,
     Path(id): Path<String>,
 ) -> Result<Json<ComponentDetail>, ApiError> {
+    component_detail(&state, viewer, &id).await.map(Json)
+}
+
+/// Component `id` as `viewer` may see it: its status, its checks and
+/// heartbeats, and the open incidents naming it. The API route and the
+/// status page's component page both read through here.
+///
+/// # Errors
+///
+/// 404 if no `[[component]]` has that id; 500 if the store fails.
+pub async fn component_detail(
+    state: &AppState,
+    viewer: Viewer,
+    id: &str,
+) -> Result<ComponentDetail, ApiError> {
     let component = state
         .config
         .components
@@ -82,16 +97,16 @@ pub async fn get_component(
         .unresolved_incidents()
         .await?
         .into_iter()
-        .filter(|incident| incident.components.contains(&id))
+        .filter(|incident| incident.components.iter().any(|named| named == id))
         .collect();
-    Ok(Json(ComponentDetail {
+    Ok(ComponentDetail {
         component: component_state(component, &snapshot),
         checks: checks(&state.config, &snapshot, viewer)
             .into_iter()
-            .filter(|check| check.component.as_deref() == Some(id.as_str()))
+            .filter(|check| check.component.as_deref() == Some(id))
             .collect(),
         incidents,
-    }))
+    })
 }
 
 /// Every check and heartbeat with its current state.

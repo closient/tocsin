@@ -455,7 +455,7 @@ mod tests {
 
     use notify::event::{AccessKind, AccessMode, CreateKind, Flag, ModifyKind};
     use notify::{Event, EventKind};
-    use reqwest::StatusCode;
+    use reqwest::{StatusCode, header};
     use tocsin_store::{DB_FILE, Store};
     use tokio::sync::watch;
     use tokio::time::{Instant, timeout};
@@ -676,6 +676,22 @@ scopes = ["release"]
                 .status()
         }
 
+        /// A status page at `path`: its tag and its body.
+        async fn page(&self, path: &str) -> (String, String) {
+            let response = self
+                .http
+                .get(format!("{}{path}", self.url))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            let tag = response.headers()[header::ETAG]
+                .to_str()
+                .unwrap()
+                .to_owned();
+            (tag, response.text().await.unwrap())
+        }
+
         /// `GET /metrics`, read with a `status:read` token.
         async fn scrape(&self) -> String {
             let response = self
@@ -844,6 +860,44 @@ scopes = ["release"]
             .await
             .unwrap();
         assert_eq!(history.len(), 1, "{history:?}");
+    }
+
+    #[tokio::test]
+    async fn the_status_page_follows_a_reload() {
+        let (target, _accepting) = target().await;
+        let mut served = Served::start(&target).await;
+        let page = |title: &str, link: &str| {
+            format!(
+                "[page]\ntitle = \"{title}\"\n\n[[page.link]]\nname = \"{link}\"\nurl = \"https://example.com/{link}\"\n"
+            )
+        };
+        let status = served
+            .change("page.toml", Some(&page("Kestrel", "Handbook")))
+            .await;
+        assert!(status.ok, "{status:?}");
+        let (before, body) = served.page("/").await;
+        assert!(
+            body.contains("Kestrel") && body.contains("Handbook"),
+            "{body}"
+        );
+
+        let status = served
+            .change("page.toml", Some(&page("Osprey", "Runbook")))
+            .await;
+        assert!(status.ok, "{status:?}");
+        let (after, body) = served.page("/").await;
+        assert!(
+            body.contains("Osprey") && body.contains("Runbook"),
+            "{body}"
+        );
+        assert!(
+            !body.contains("Kestrel") && !body.contains("Handbook"),
+            "{body}"
+        );
+        assert_ne!(before, after, "a reloaded page is a new representation");
+        let (_, history) = served.page("/history").await;
+        assert!(history.contains("Osprey"), "{history}");
+        served.reloader.into_monitor().await.stop().await;
     }
 
     #[tokio::test]

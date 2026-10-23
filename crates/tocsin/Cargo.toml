@@ -18,6 +18,8 @@ askama.workspace = true
 axum.workspace = true
 base64.workspace = true
 clap.workspace = true
+# `stream::unfold`, to turn the event bus into an SSE response.
+futures-util.workspace = true
 gethostname.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
@@ -50,6 +52,9 @@ workspace = true
 # Same version as tocsin-store's, to set up databases a newer build wrote.
 rusqlite = { version = "0.40", features = ["bundled"] }
 insta = { workspace = true }
+# The structural accessibility audit of the status pages.
+html5ever = "0.40"
+regex.workspace = true
 tempfile = "3"
 # A bound, never-listening socket: a port that refuses connections and stays ours.
 socket2 = "0.6"

@@ -67,6 +67,7 @@ footer.site { color: var(--muted); font-size: 0.875rem; padding-bottom: 2rem; }
 
 h1 { font-size: 1.5rem; line-height: 1.25; margin: 0.5rem 0 1rem; overflow-wrap: anywhere; }
 h2 { font-size: 1.125rem; margin: 2rem 0 0.75rem; }
+h3 { font-size: 1rem; margin: 1.25rem 0 0.5rem; }
 a { color: var(--accent); }
 p, ul, ol { margin: 0 0 0.75rem; }
 
@@ -75,9 +76,9 @@ p, ul, ol { margin: 0 0 0.75rem; }
 .notice.error { border-color: var(--bad); }
 
 /* Lists of incidents and timelines */
-ul.items { list-style: none; padding: 0; margin: 0; }
-ul.items > li { padding: 0.75rem 0; border-bottom: 1px solid var(--line); }
-ul.items > li:last-child { border-bottom: 0; }
+.items { list-style: none; padding: 0; margin: 0; }
+.items > li { padding: 0.75rem 0; border-bottom: 1px solid var(--line); }
+.items > li:last-child { border-bottom: 0; }
 .item-title { font-weight: 600; overflow-wrap: anywhere; }
 .meta { color: var(--muted); font-size: 0.875rem; }
 
@@ -138,3 +139,72 @@ button:disabled, .htmx-request button { opacity: 0.6; cursor: progress; }
 .field-error { color: var(--bad); font-size: 0.875rem; font-weight: 400; }
 .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 .pager { margin-top: 1rem; }
+
+/* The public status page (templates/status/). A status is always a word
+   with a glyph beside it; colour only repeats what they say. */
+.skip { position: absolute; left: -100vw; top: 0.5rem; padding: 0.5rem 1rem; background: var(--bg); color: var(--accent); border: 1px solid var(--accent); border-radius: var(--radius); }
+.skip:focus { left: 0.5rem; z-index: 2; }
+header.site.status a.home { display: inline-flex; gap: 0.5rem; align-items: center; font-size: 1.125rem; }
+header.site.status .logo { height: 2rem; width: auto; }
+ul.links { list-style: none; display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; padding: 0; margin: 0; }
+footer.site.status { padding-top: 1rem; border-top: 1px solid var(--line); }
+footer.site.status ul.links { margin-bottom: 0.5rem; }
+
+.banner {
+  margin: 0 0 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid currentColor;
+  border-left-width: 0.5rem;
+  border-radius: var(--radius);
+  background: var(--panel);
+  font-size: 1.125rem;
+  font-weight: 700;
+}
+.status { font-weight: 600; white-space: nowrap; }
+.banner.operational, .status.operational { color: var(--ok); }
+.banner.degraded, .status.degraded { color: var(--warn); }
+.banner.down, .status.down { color: var(--bad); }
+.banner.maintenance, .status.maintenance { color: var(--accent); }
+.banner.unknown, .status.unknown { color: var(--muted); }
+.badge.maintenance, .badge.scheduled, .badge.in_progress { color: var(--accent); }
+
+ul.components { list-style: none; padding: 0; margin: 0 0 1rem; }
+ul.components > li { padding: 0.5rem 0; border-bottom: 1px solid var(--line); }
+ul.components > li:last-child { border-bottom: 0; }
+.component-line { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; justify-content: space-between; }
+
+/* Uptime bars: one cell per day. Up is solid, degraded striped, down
+   cross-hatched, no data an empty outline; each cell's text shows on
+   hover and is read by screen readers. */
+ul.uptime { list-style: none; padding: 0; margin: 0; }
+ul.uptime > li { padding: 0.5rem 0; }
+.uptime-name { font-weight: 600; }
+ol.bar { list-style: none; display: flex; gap: 1px; height: 2rem; padding: 0; margin: 0.25rem 0; }
+ol.bar .day { position: relative; flex: 1 1 0; min-width: 0; border-radius: 1px; }
+.day.up { background: var(--ok); }
+.day.degraded { background: repeating-linear-gradient(135deg, var(--warn) 0 3px, transparent 3px 5px); }
+.day.down {
+  background:
+    repeating-linear-gradient(45deg, var(--bad) 0 2px, transparent 2px 4px),
+    repeating-linear-gradient(135deg, var(--bad) 0 2px, transparent 2px 4px);
+}
+.day.none { border: 1px solid var(--muted); }
+.day .tip { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.day:hover .tip {
+  bottom: calc(100% + 0.25rem);
+  left: 50%;
+  z-index: 1;
+  width: auto;
+  height: auto;
+  overflow: visible;
+  clip-path: none;
+  transform: translateX(-50%);
+  padding: 0.25rem 0.5rem;
+  border-radius: var(--radius);
+  background: var(--fg);
+  color: var(--bg);
+  font-size: 0.75rem;
+}
+.day:nth-child(-n+20):hover .tip { left: 0; transform: none; }
+.day:nth-last-child(-n+20):hover .tip { left: auto; right: 0; transform: none; }
+.bar-summary { margin: 0; color: var(--muted); font-size: 0.875rem; }

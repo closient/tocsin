@@ -157,7 +157,7 @@ async fn serve(
     let state = AppState {
         store: Arc::clone(&store),
         config: Arc::clone(config),
-        events,
+        events: events.clone(),
         admin,
         live: Arc::new(monitor.status_handle()),
         heartbeats: monitor.heartbeats(),
@@ -181,7 +181,7 @@ async fn serve(
         Some(hangup),
     );
     let (stop, stopped) = oneshot::channel::<()>();
-    let server = spawn_server(listener, service, stopped);
+    let server = spawn_server(listener, service, stopped, events);
     // Logged only once both handlers exist and the socket is bound, so a
     // signal sent after this line is always handled and a request sent
     // after it is always answered.
@@ -533,8 +533,9 @@ async fn drain(stop: oneshot::Sender<()>, server: JoinHandle<Connections>, drain
     }
 }
 
-/// Answers HTTP on `listener` with `service` until `stopped`, then hands
-/// back its connections, still finishing their requests.
+/// Answers HTTP on `listener` with `service` until `stopped`, then ends
+/// the event streams on `events` and hands back its connections, still
+/// finishing their requests.
 ///
 /// The server owns a task per connection, unlike `axum::serve`, which
 /// detaches them: a request that runs past the drain can then be aborted,
@@ -543,6 +544,7 @@ fn spawn_server(
     listener: TcpListener,
     service: axum::Router,
     mut stopped: oneshot::Receiver<()>,
+    events: EventBus,
 ) -> JoinHandle<Connections> {
     tokio::spawn(async move {
         let mut connections = Connections::default();
@@ -567,6 +569,9 @@ fn spawn_server(
                 Some(ended) = connections.tasks.join_next() => reap(ended),
             }
         }
+        // An event stream never finishes by itself; without this the
+        // drain waits out every open status page.
+        events.close();
         connections
     })
 }
@@ -931,6 +936,86 @@ mod tests {
         assert!(weak.upgrade().is_none(), "something still holds the store");
     }
 
+    /// A status page holds `/api/v1/events` open for as long as it is
+    /// shown. Shutting down ends the stream, so the drain finishes at once
+    /// rather than waiting out its 10 seconds and aborting the connection.
+    #[tokio::test]
+    async fn a_signal_ends_open_event_streams_so_the_drain_is_quick() {
+        let log = Captured::default();
+        let _log = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(log.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+        let (_dir, store) = open();
+        let weak = Arc::downgrade(&store);
+        let config = tocsin_core::config::load(
+            &[Source {
+                name: "tocsin.toml".into(),
+                text: Ok("[[component]]\nid = \"api\"\nname = \"API\"\n".into()),
+            }],
+            &Environment {
+                hostname: "test".into(),
+                variable: &|_| None,
+            },
+        )
+        .unwrap();
+        let events = EventBus::new();
+        let app = http::router(AppState {
+            store: Arc::clone(&store),
+            config: Arc::new(config),
+            events: events.clone(),
+            admin: None,
+            live: Arc::new(tocsin_engine::Snapshot::default()),
+            heartbeats: tocsin_engine::HeartbeatHandle::default(),
+            config_status: crate::reload::steady_status(),
+            metrics: Arc::new(crate::metrics::Metrics::new()),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, stopped) = oneshot::channel();
+        let server = spawn_server(listener, app, stopped, events);
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut stream = reqwest::Client::new()
+            .get(format!("http://{address}/api/v1/events"))
+            .send()
+            .await
+            .unwrap();
+        // The opening `resync` is on the wire: the stream is open.
+        let first = stream.chunk().await.unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&first).contains("event: resync"));
+        let maintenance = holding(&store);
+
+        let started = std::time::Instant::now();
+        let (outcome, closed) = supervise(
+            ready("SIGTERM"),
+            stop,
+            server,
+            maintenance,
+            None,
+            store,
+            Grace::SHUTDOWN,
+        )
+        .await;
+
+        assert_eq!(outcome.unwrap(), "SIGTERM");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the drain waited {:?} on an open event stream",
+            started.elapsed()
+        );
+        assert!(
+            !log.text().contains("aborting them"),
+            "the event stream was aborted, not ended: {}",
+            log.text()
+        );
+        assert!(closed, "the store was not closed");
+        assert!(weak.upgrade().is_none(), "something still holds the store");
+        // The client sees the stream end, not a reset.
+        assert!(stream.chunk().await.unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn a_store_still_held_at_shutdown_is_reported_not_closed() {
         let (_dir, store) = open();
@@ -988,7 +1073,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (stop, stopped) = oneshot::channel();
-        (address, stop, spawn_server(listener, app, stopped), starts)
+        (
+            address,
+            stop,
+            spawn_server(listener, app, stopped, EventBus::new()),
+            starts,
+        )
     }
 
     /// Sends `GET path` on a new connection.
@@ -1111,7 +1201,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (stop, stopped) = oneshot::channel();
-        let server = spawn_server(listener, app, stopped);
+        let server = spawn_server(listener, app, stopped, EventBus::new());
         let mut client = TcpStream::connect(address).await.unwrap();
         client
             .write_all(b"GET /peer HTTP/1.1\r\nhost: tocsin\r\nconnection: close\r\n\r\n")

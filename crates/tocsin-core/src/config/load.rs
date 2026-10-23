@@ -25,7 +25,7 @@ use super::{
     Auth, AuthMode, Check, Component, Config, Group, Heartbeat, Link, Notifier, Page, Project,
     Route, Server, Token,
 };
-use crate::link::http_url;
+use crate::link::{http_url, site_path};
 
 /// One configuration file's name and contents.
 #[derive(Debug, Clone)]
@@ -536,6 +536,17 @@ impl<'a> Loader<'a> {
                 ));
             }
         }
+        if let Some(page) = &items.page {
+            let lists = [
+                ("group", "groups", &page.value.groups),
+                ("component", "components", &page.value.components),
+            ];
+            for (kind, key, ids) in lists {
+                for (index, id) in ids.iter().enumerate() {
+                    references.push((kind, id, page.origin.key(key).index(index)));
+                }
+            }
+        }
         for route in &items.routes {
             let lists = [
                 ("notifier", "notifiers", &route.value.notifiers),
@@ -573,10 +584,8 @@ impl<'a> Loader<'a> {
             self.validate_server(server);
         }
         self.validate_email_senders(items);
-        if let Some(page) = &items.page
-            && let Some(url) = &page.value.homepage_url
-        {
-            self.url(&page.origin.key("homepage_url"), url);
+        if let Some(page) = &items.page {
+            self.validate_page(page);
         }
         for project in &items.projects {
             if let Some(url) = &project.value.url {
@@ -1246,6 +1255,49 @@ impl<'a> Loader<'a> {
                 &origin.keys(&["telegram", "chat_id"]),
                 "`chat_id` must not be empty",
                 None,
+            );
+        }
+    }
+
+    /// `[page]`: its URLs, a logo the page's content security policy will
+    /// load, order lists without repeats, and a time zone the bundled
+    /// database knows. The order lists' ids are checked with the other
+    /// references.
+    fn validate_page(&mut self, page: &Item<Page>) {
+        let (origin, value) = (&page.origin, &page.value);
+        if let Some(url) = &value.homepage_url {
+            self.url(&origin.key("homepage_url"), url);
+        }
+        if let Some(logo) = &value.logo
+            && let Err(message) = site_path(&logo.url)
+        {
+            self.report(
+                &origin.keys(&["logo", "url"]),
+                message,
+                Some(
+                    "the page loads images from its own origin only; serve the logo from the proxy in front of tocsin"
+                        .to_owned(),
+                ),
+            );
+        }
+        self.validate_links(origin, &value.links);
+        for (key, ids) in [("groups", &value.groups), ("components", &value.components)] {
+            let mut seen = HashSet::new();
+            for (index, id) in ids.iter().enumerate() {
+                if !seen.insert(id.as_str()) {
+                    self.report(
+                        &origin.key(key).index(index),
+                        format!("`{id}` is listed twice"),
+                        None,
+                    );
+                }
+            }
+        }
+        if jiff::tz::TimeZone::get(&value.timezone).is_err() {
+            self.report(
+                &origin.key("timezone"),
+                format!("unknown time zone `{}`", value.timezone),
+                Some("use an IANA name such as \"Europe/Berlin\", or \"UTC\"".to_owned()),
             );
         }
     }

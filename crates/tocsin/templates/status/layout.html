@@ -1,0 +1,50 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{#- The public status pages: the `[page]` header and footer around the
+    content, JSON-LD, and on `/` the htmx scripts. Every page here has
+    `layout: Layout` and `chrome: Chrome` (web/status.rs). -#}
+{% extends "base.html" %}
+{% block title %}{{ layout.title }}{% endblock %}
+{% block head %}
+{%- if let Some(description) = chrome.description %}
+<meta name="description" content="{{ description }}">
+{%- endif %}
+{%- if !chrome.scripts.is_empty() %}
+<meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false,"selfRequestsOnly":true,"historyCacheSize":0}'>
+{%- for script in chrome.scripts %}
+<script src="{{ script }}" defer></script>
+{%- endfor %}
+{%- endif %}
+<script type="application/ld+json">{{ chrome.json_ld|safe }}</script>
+{%- endblock %}
+{% block header %}
+<a class="skip" href="#main">Skip to content</a>
+<header class="site status">
+  <a class="home" href="{{ chrome.home }}">
+    {%- if let Some(logo) = chrome.logo %}<img class="logo" src="{{ logo.url }}" alt="{{ logo.alt }}">{% endif -%}
+    <span>{{ chrome.site }}</span>
+  </a>
+  {%- if !chrome.links.is_empty() %}
+  <nav aria-label="{{ chrome.site }} links">
+    <ul class="links">
+      {%- for link in chrome.links %}
+      <li><a href="{{ link.url }}">{{ link.name }}</a></li>
+      {%- endfor %}
+    </ul>
+  </nav>
+  {%- endif %}
+</header>
+{%- endblock %}
+{% block footer %}
+<footer class="site status">
+  <nav aria-label="More from this page">
+    <ul class="links">
+      <li><a href="/">Current status</a></li>
+      <li><a href="/history">Incident history</a></li>
+      <li><a href="/releases">Releases</a></li>
+      <li><a href="/releases.atom">Release feed</a></li>
+      <li><a href="/api/v1/status.json">Status API</a></li>
+    </ul>
+  </nav>
+  <p>Powered by <a href="https://github.com/closient/tocsin">tocsin</a>.</p>
+</footer>
+{%- endblock %}

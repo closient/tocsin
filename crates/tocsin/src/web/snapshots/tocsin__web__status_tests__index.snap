@@ -1,0 +1,519 @@
+---
+source: crates/tocsin/src/web/status_tests.rs
+expression: normalize(&page)
+---
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="same-origin">
+<title>Example status</title>
+<link rel="stylesheet" href="/static/<hash>/tocsin.css">
+<meta name="description" content="Live status of Example&#39;s services.">
+<meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false,"selfRequestsOnly":true,"historyCacheSize":0}'>
+<script src="/static/<hash>/htmx.min.js" defer></script>
+<script src="/static/<hash>/htmx-ext-sse.min.js" defer></script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebPage","description":"Live status of Example's services.","name":"Example status","url":"https://status.example.com/"},{"@type":"Event","description":"Looking into **Database upgrade**.","endDate":"<instant>","eventAttendanceMode":"https://schema.org/OnlineEventAttendanceMode","eventStatus":"https://schema.org/EventScheduled","location":{"@type":"VirtualLocation","url":"https://status.example.com/incidents/2"},"name":"Database upgrade","startDate":"<instant>","url":"https://status.example.com/incidents/2"},{"@type":"Event","description":"Looking into **Elevated API errors**.","eventAttendanceMode":"https://schema.org/OnlineEventAttendanceMode","eventStatus":"https://schema.org/EventScheduled","location":{"@type":"VirtualLocation","url":"https://status.example.com/incidents/1"},"name":"Elevated API errors","startDate":"<instant>","url":"https://status.example.com/incidents/1"}]}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site status">
+  <a class="home" href="https://example.com/"><img class="logo" src="/brand/logo.svg" alt="Example"><span>Example status</span>
+  </a>
+  <nav aria-label="Example status links">
+    <ul class="links">
+      <li><a href="https://example.com/support">Support</a></li>
+    </ul>
+  </nav>
+</header>
+<main id="main">
+
+<h1>Example status</h1>
+<p class="muted">Live status of Example&#39;s services.</p>
+<div class="live" hx-ext="sse" sse-connect="/api/v1/events">
+<div id="banner" role="status" hx-get="/fragments/banner" hx-trigger="sse:component_changed, sse:incident_created, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML"><p class="banner down"><span class="glyph" aria-hidden="true">✕</span> Some systems are down</p>
+</div>
+<section id="incidents" aria-labelledby="incidents-heading" hx-get="/fragments/incidents" hx-trigger="sse:incident_created, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML"><h2 id="incidents-heading">Active incidents and maintenance</h2>
+<ul class="items"><li>
+  <a class="item-title" href="/incidents/2">Database upgrade</a>
+  <div class="meta">
+    <span class="badge scheduled">scheduled</span>
+    <span class="badge maintenance">maintenance</span>
+    <span class="muted">scheduled <when> IST to <when> IST · Jobs</span>
+  </div>
+  <div class="markdown"><p>Looking into <strong>Database upgrade</strong>.</p>
+</div>
+</li><li>
+  <a class="item-title" href="/incidents/1">Elevated API errors</a>
+  <div class="meta">
+    <span class="badge investigating">investigating</span>
+    <span class="badge major">major impact</span>
+    <span class="muted">started <time datetime="<instant>"><when> IST</time> · API</span>
+  </div>
+  <div class="markdown"><p>Looking into <strong>Elevated API errors</strong>.</p>
+</div>
+</li>
+</ul>
+</section>
+<section id="components" aria-labelledby="components-heading" hx-get="/fragments/components" hx-trigger="sse:component_changed, sse:incident_created, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML"><h2 id="components-heading">Components</h2>
+<ul class="components">
+  <li>
+    <div class="component-line">
+      <a href="/components/docs">Docs</a>
+      <span class="status unknown"><span class="glyph" aria-hidden="true">?</span> Unknown</span>
+    </div>
+  </li>
+</ul>
+<h3>Edge</h3>
+<ul class="components">
+  <li>
+    <div class="component-line">
+      <a href="/components/web">Web</a>
+      <span class="status degraded"><span class="glyph" aria-hidden="true">▲</span> Degraded</span>
+    </div>
+  </li>
+</ul>
+<h3>Core</h3>
+<p class="muted">What everything else runs on</p>
+<ul class="components">
+  <li>
+    <div class="component-line">
+      <a href="/components/jobs">Jobs</a>
+      <span class="status operational"><span class="glyph" aria-hidden="true">✓</span> Operational</span>
+    </div>
+  </li>
+  <li>
+    <div class="component-line">
+      <a href="/components/api">API</a>
+      <span class="status down"><span class="glyph" aria-hidden="true">✕</span> Down</span>
+    </div>
+    <div class="muted">The public API</div>
+  </li>
+</ul>
+</section>
+<section id="uptime" aria-labelledby="uptime-heading" hx-get="/fragments/uptime" hx-trigger="sse:resync, every 600s" hx-swap="innerHTML"><h2 id="uptime-heading">Uptime, last 90 days</h2>
+<p class="muted">One mark per UTC day, today last; hover a day for its figure. Recomputed hourly.</p>
+<ul class="uptime">
+  <li>
+    <a class="uptime-name" href="/components/docs">Docs</a><ol class="bar">
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+</ol>
+<p class="bar-summary">No data in the last 90 days</p>
+  </li>
+  <li>
+    <a class="uptime-name" href="/components/web">Web</a><ol class="bar">
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+</ol>
+<p class="bar-summary">No data in the last 90 days</p>
+  </li>
+  <li>
+    <a class="uptime-name" href="/components/jobs">Jobs</a><ol class="bar">
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+</ol>
+<p class="bar-summary">No data in the last 90 days</p>
+  </li>
+  <li>
+    <a class="uptime-name" href="/components/api">API</a><ol class="bar">
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+  <li class="day none"><span class="tip"><day>: no data</span></li>
+</ol>
+<p class="bar-summary">No data in the last 90 days</p>
+  </li>
+</ul>
+</section>
+<section id="resolved" aria-labelledby="resolved-heading" hx-get="/fragments/resolved" hx-trigger="sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML"><h2 id="resolved-heading">Recently resolved</h2>
+<ul class="items"><li>
+  <a class="item-title" href="/incidents/3">Slow page loads</a>
+  <div class="meta">
+    <span class="badge resolved">resolved</span>
+    <span class="badge major">major impact</span>
+    <span class="muted">started <time datetime="<instant>"><when> IST</time> · ended <time datetime="<instant>"><when> IST</time> · Web</span>
+  </div>
+  <div class="markdown"><p>Fixed.</p>
+</div>
+</li>
+</ul>
+<p class="pager"><a href="/history">Incident history</a></p>
+</section>
+<section id="releases" aria-labelledby="releases-heading" hx-get="/fragments/releases" hx-trigger="sse:release_published, sse:release_deployed, sse:resync, every 60s" hx-swap="innerHTML"><h2 id="releases-heading">Latest releases</h2>
+<ul class="items">
+  <li>
+    <a class="item-title" href="/releases/app/1.2.0">Example app 1.2.0</a>
+    <div class="meta">Faster search · <time datetime="<instant>"><when> IST</time></div>
+  </li>
+</ul>
+<p class="pager"><a href="/releases">All releases</a></p>
+</section>
+</div>
+
+</main>
+<footer class="site status">
+  <nav aria-label="More from this page">
+    <ul class="links">
+      <li><a href="/">Current status</a></li>
+      <li><a href="/history">Incident history</a></li>
+      <li><a href="/releases">Releases</a></li>
+      <li><a href="/releases.atom">Release feed</a></li>
+      <li><a href="/api/v1/status.json">Status API</a></li>
+    </ul>
+  </nav>
+  <p>Powered by <a href="https://github.com/closient/tocsin">tocsin</a>.</p>
+</footer>
+</body>
+</html>

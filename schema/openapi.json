@@ -258,6 +258,43 @@
         ]
       }
     },
+    "/api/v1/events": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Every event from now on, as server-sent events: the event name is the\nevent's `type` and the data its JSON. The first event is `resync`, and\nso is the one after the stream fell behind and missed some; on either,\nre-read what you show. A comment line every 15 seconds keeps a quiet\nconnection open. Anyone sees incident, check and component events, and\nreleases of public projects; a `status:read` token sees every release.",
+        "operationId": "stream_events",
+        "responses": {
+          "200": {
+            "description": "An endless `text/event-stream`",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "An `Authorization` header with an unknown token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/heartbeat/{id}": {
       "get": {
         "tags": [
@@ -2797,6 +2834,10 @@
     {
       "name": "config",
       "description": "Whether the configuration reloaded"
+    },
+    {
+      "name": "events",
+      "description": "Changes as they happen, as server-sent events"
     }
   ]
 }

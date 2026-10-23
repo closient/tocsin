@@ -1,0 +1,15 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+<h2 id="releases-heading">Latest releases</h2>
+{%- if releases.is_empty() %}
+<p class="muted">No releases yet.</p>
+{%- else %}
+<ul class="items">
+  {%- for release in releases %}
+  <li>
+    <a class="item-title" href="{{ release.href }}">{{ release.project }} {{ release.version }}</a>
+    <div class="meta">{{ release.title }}{% if let Some(at) = release.released_at %} · <time datetime="{{ at.iso }}">{{ at.text }}</time>{% endif %}</div>
+  </li>
+  {%- endfor %}
+</ul>
+{%- endif %}
+<p class="pager"><a href="/releases">All releases</a></p>

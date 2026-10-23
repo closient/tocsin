@@ -5,15 +5,17 @@
 //! and create → update → resolve over a real socket.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::pin::pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::task::{Context, Poll, Waker};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Method, Request, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ring::rand::SystemRandom;
@@ -22,6 +24,7 @@ use serde_json::{Value, json};
 use tocsin_core::config::{Config, Environment, Source};
 use tocsin_core::incident::{Actor, Impact, IncidentKind, NewIncident, Timestamp};
 use tocsin_store::Store;
+use tokio::sync::watch;
 use tower::ServiceExt;
 
 use super::access::{Rejection, TOKEN_HEADER, Verifier};
@@ -225,38 +228,21 @@ fn rs256(kid: &str) -> Value {
 /// A local stand-in for `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`.
 struct KeyServer {
     url: String,
-    keys: Arc<Mutex<Vec<Value>>>,
     hits: Arc<AtomicUsize>,
-    /// Answer 500 instead of the keys.
-    failing: Arc<AtomicBool>,
-    /// Milliseconds to wait before answering.
-    delay: Arc<AtomicU64>,
 }
 
 impl KeyServer {
     async fn start(keys: Vec<Value>) -> Self {
         let keys = Arc::new(Mutex::new(keys));
         let hits = Arc::new(AtomicUsize::new(0));
-        let failing = Arc::new(AtomicBool::new(false));
-        let delay = Arc::new(AtomicU64::new(0));
         let app = {
             let (keys, hits) = (Arc::clone(&keys), Arc::clone(&hits));
-            let (failing, delay) = (Arc::clone(&failing), Arc::clone(&delay));
             Router::new().route(
                 "/cdn-cgi/access/certs",
                 axum::routing::get(move || {
                     hits.fetch_add(1, Ordering::SeqCst);
                     let body = json!({"keys": *keys.lock().unwrap()});
-                    let failing = failing.load(Ordering::SeqCst);
-                    let delay = Duration::from_millis(delay.load(Ordering::SeqCst));
-                    async move {
-                        tokio::time::sleep(delay).await;
-                        if failing {
-                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-                        } else {
-                            axum::Json(body).into_response()
-                        }
-                    }
+                    async move { axum::Json(body) }
                 }),
             )
         };
@@ -266,22 +252,7 @@ impl KeyServer {
             listener.local_addr().unwrap()
         );
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        KeyServer {
-            url,
-            keys,
-            hits,
-            failing,
-            delay,
-        }
-    }
-
-    fn fail(&self, failing: bool) {
-        self.failing.store(failing, Ordering::SeqCst);
-    }
-
-    fn delay(&self, delay: Duration) {
-        self.delay
-            .store(u64::try_from(delay.as_millis()).unwrap(), Ordering::SeqCst);
+        KeyServer { url, hits }
     }
 
     fn hits(&self) -> usize {
@@ -292,6 +263,61 @@ impl KeyServer {
         Verifier::new(TEAM, AUDIENCE)
             .unwrap()
             .with_certs_url(&self.url)
+    }
+}
+
+/// A certs endpoint in memory, for tests that run on paused time: a real
+/// socket would let the paused clock jump while it waits on I/O.
+struct FakeCerts {
+    keys: Mutex<Vec<Value>>,
+    /// Fetches started.
+    hits: watch::Sender<usize>,
+    /// Fetches answered.
+    answered: AtomicUsize,
+    /// Answer an error instead of the keys.
+    failing: AtomicBool,
+    /// While true, fetches wait before answering.
+    held: watch::Sender<bool>,
+}
+
+impl FakeCerts {
+    fn new(keys: &[Value]) -> Arc<Self> {
+        Arc::new(FakeCerts {
+            keys: Mutex::new(keys.to_vec()),
+            hits: watch::Sender::new(0),
+            answered: AtomicUsize::new(0),
+            failing: AtomicBool::new(false),
+            held: watch::Sender::new(false),
+        })
+    }
+
+    /// A verifier with the production timings that fetches from here.
+    fn verifier(self: &Arc<Self>) -> Verifier {
+        let certs = Arc::clone(self);
+        Verifier::new(TEAM, AUDIENCE)
+            .unwrap()
+            .with_certs(Arc::new(move || {
+                let certs = Arc::clone(&certs);
+                Box::pin(async move {
+                    certs.hits.send_modify(|hits| *hits += 1);
+                    let _ = certs.held.subscribe().wait_for(|held| !held).await;
+                    certs.answered.fetch_add(1, Ordering::SeqCst);
+                    if certs.failing.load(Ordering::SeqCst) {
+                        Err("HTTP 500".to_owned())
+                    } else {
+                        let keys = certs.keys.lock().unwrap();
+                        Ok(serde_json::to_vec(&json!({ "keys": *keys })).unwrap())
+                    }
+                })
+            }))
+    }
+
+    fn hits(&self) -> usize {
+        *self.hits.borrow()
+    }
+
+    fn fail(&self, failing: bool) {
+        self.failing.store(failing, Ordering::SeqCst);
     }
 }
 
@@ -443,22 +469,36 @@ async fn access_accepts_only_rs256() {
     assert_eq!(server.hits(), 0, "rejected before any key is fetched");
 }
 
-#[tokio::test]
+// The key-cache timings run on paused time with the production values:
+// keys are fresh for an hour, trusted for an hour more while refetches
+// fail, and refetched at most once a minute; before the first success,
+// fetches back off from one second, doubling, up to that minute.
+
+const HOUR: Duration = Duration::from_secs(3600);
+const MINUTE: Duration = Duration::from_secs(60);
+const TICK: Duration = Duration::from_millis(1);
+
+#[tokio::test(start_paused = true)]
 async fn access_refetches_keys_for_an_unknown_kid_at_most_once_per_cooldown() {
-    let server = KeyServer::start(vec![jwk("k1", SIGNING_KEY)]).await;
-    let cooldown = Duration::from_millis(300);
-    let verifier = server.verifier().with_cooldown(cooldown);
+    let certs = FakeCerts::new(&[jwk("k1", SIGNING_KEY)]);
+    let verifier = certs.verifier();
     let first = sign(SIGNING_KEY, &rs256("k1"), &claims(ALICE));
     assert_eq!(verify(&verifier, &first).await.unwrap(), ALICE);
-    assert_eq!(server.hits(), 1);
+    assert_eq!(certs.hits(), 1);
 
     // Access rotates in a new key: the unknown kid triggers a refetch once
     // the cooldown has passed, and the new key is picked up.
-    server.keys.lock().unwrap().push(jwk("k2", OTHER_KEY));
-    tokio::time::sleep(cooldown + Duration::from_millis(50)).await;
+    certs.keys.lock().unwrap().push(jwk("k2", OTHER_KEY));
     let rotated = sign(OTHER_KEY, &rs256("k2"), &claims(ALICE));
+    tokio::time::advance(MINUTE.saturating_sub(TICK)).await;
+    assert!(matches!(
+        verify(&verifier, &rotated).await,
+        Err(Rejection::UnknownKey(_))
+    ));
+    assert_eq!(certs.hits(), 1, "no refetch within the cooldown");
+    tokio::time::advance(TICK).await;
     assert_eq!(verify(&verifier, &rotated).await.unwrap(), ALICE);
-    assert_eq!(server.hits(), 2);
+    assert_eq!(certs.hits(), 2);
 
     // A kid Access never published: refused, and a burst of them within
     // the cooldown does not hammer the key server.
@@ -469,14 +509,14 @@ async fn access_refetches_keys_for_an_unknown_kid_at_most_once_per_cooldown() {
             Err(Rejection::UnknownKey(kid)) if kid == "forged"
         ));
     }
-    assert_eq!(server.hits(), 2, "rate-limited by the cooldown");
+    assert_eq!(certs.hits(), 2, "rate-limited by the cooldown");
     // After the cooldown it refetches once, and the kid is still unknown.
-    tokio::time::sleep(cooldown + Duration::from_millis(50)).await;
+    tokio::time::advance(MINUTE).await;
     assert!(matches!(
         verify(&verifier, &unknown).await,
         Err(Rejection::UnknownKey(_))
     ));
-    assert_eq!(server.hits(), 3);
+    assert_eq!(certs.hits(), 3);
 }
 
 #[tokio::test]
@@ -491,104 +531,129 @@ async fn access_refuses_everything_while_the_keys_are_unreachable() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn access_backs_off_from_one_second_until_keys_are_first_fetched() {
-    let server = KeyServer::start(vec![jwk("k1", SIGNING_KEY)]).await;
-    server.fail(true);
-    let backoff = Duration::from_millis(200);
-    let verifier = server
-        .verifier()
-        .with_backoff(backoff)
-        .with_cooldown(Duration::from_millis(500));
+    let certs = FakeCerts::new(&[jwk("k1", SIGNING_KEY)]);
+    certs.fail(true);
+    let verifier = certs.verifier();
     let token = sign(SIGNING_KEY, &rs256("k1"), &claims(ALICE));
     let unavailable = |result| matches!(result, Err(Rejection::KeysUnavailable));
-    let margin = Duration::from_millis(50);
 
     assert!(unavailable(verify(&verifier, &token).await));
-    assert!(unavailable(verify(&verifier, &token).await));
-    assert_eq!(server.hits(), 1, "no retry within the first backoff");
-    tokio::time::sleep(backoff + margin).await;
-    assert!(unavailable(verify(&verifier, &token).await));
-    assert_eq!(server.hits(), 2, "retried after the first backoff");
-    // The gap doubles: 400ms after the second failure.
-    tokio::time::sleep(backoff + margin).await;
-    assert!(unavailable(verify(&verifier, &token).await));
-    assert_eq!(server.hits(), 2, "the gap has doubled");
-    tokio::time::sleep(backoff).await;
-    assert!(unavailable(verify(&verifier, &token).await));
-    assert_eq!(server.hits(), 3);
-    // Doubled again it would be 800ms, but the cooldown caps it at 500ms.
-    tokio::time::sleep(Duration::from_millis(500) + margin).await;
-    server.fail(false);
+    assert_eq!(certs.hits(), 1);
+    let gaps = [1, 2, 4, 8, 16, 32, 60, 60].map(Duration::from_secs);
+    for (fetched, gap) in (1..).zip(gaps) {
+        tokio::time::advance(gap.saturating_sub(TICK)).await;
+        assert!(unavailable(verify(&verifier, &token).await));
+        assert_eq!(certs.hits(), fetched, "a fetch before {gap:?} had passed");
+        tokio::time::advance(TICK).await;
+        assert!(unavailable(verify(&verifier, &token).await));
+        assert_eq!(
+            certs.hits(),
+            fetched + 1,
+            "no fetch once {gap:?} had passed"
+        );
+    }
+
+    // Once Access answers, the next fetch admits the token.
+    certs.fail(false);
+    tokio::time::advance(MINUTE).await;
     assert_eq!(verify(&verifier, &token).await.unwrap(), ALICE);
-    assert_eq!(server.hits(), 4);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn access_uses_stale_keys_without_waiting_while_one_task_refetches() {
-    let server = KeyServer::start(vec![jwk("k1", SIGNING_KEY)]).await;
-    let max_age = Duration::from_millis(100);
-    let verifier = Arc::new(
-        server
-            .verifier()
-            .with_cooldown(Duration::ZERO)
-            .with_key_age(max_age, Duration::from_secs(60)),
-    );
+    let certs = FakeCerts::new(&[jwk("k1", SIGNING_KEY)]);
+    let verifier = certs.verifier();
     let token = sign(SIGNING_KEY, &rs256("k1"), &claims(ALICE));
     assert_eq!(verify(&verifier, &token).await.unwrap(), ALICE);
-    assert_eq!(server.hits(), 1);
+    assert_eq!(certs.hits(), 1);
 
-    // The keys are past their age and the key server is slow: requests
-    // keep using the cached key, and only one of them starts a fetch.
-    server.delay(Duration::from_secs(1));
-    tokio::time::sleep(max_age + Duration::from_millis(20)).await;
-    let started = Instant::now();
-    let requests: Vec<_> = (0..10)
-        .map(|_| {
-            let (verifier, token) = (Arc::clone(&verifier), token.clone());
-            tokio::spawn(async move { verify(&verifier, &token).await })
-        })
-        .collect();
-    for request in requests {
-        assert_eq!(request.await.unwrap().unwrap(), ALICE);
+    // The keys are past their age, and the refetch will not answer until
+    // released. Every request completes on its first poll: none waits.
+    tokio::time::advance(HOUR + TICK).await;
+    certs.held.send_replace(true);
+    for request in 0..10 {
+        let verification = pin!(verify(&verifier, &token));
+        match verification.poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(result) => assert_eq!(result.unwrap(), ALICE),
+            Poll::Pending => panic!("request {request} waited on the refetch"),
+        }
     }
-    assert!(
-        started.elapsed() < Duration::from_millis(500),
-        "verification waited {:?} on the fetch",
-        started.elapsed()
-    );
+
+    // One refetch started for all ten, and it has not answered yet.
+    let mut hits = certs.hits.subscribe();
+    let _ = hits.wait_for(|hits| *hits > 1).await;
+    tokio::task::yield_now().await;
+    assert_eq!(certs.hits(), 2, "one refetch for all ten requests");
+    assert_eq!(certs.answered.load(Ordering::SeqCst), 1, "only the first");
+
+    certs.held.send_replace(false);
     verifier.settle().await;
-    assert_eq!(server.hits(), 2, "one fetch for all ten requests");
+    assert_eq!(certs.answered.load(Ordering::SeqCst), 2);
+    assert_eq!(verify(&verifier, &token).await.unwrap(), ALICE);
+    assert_eq!(certs.hits(), 2, "fresh keys again: no fetch");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
+async fn access_starts_no_second_fetch_while_one_is_still_open() {
+    let certs = FakeCerts::new(&[jwk("k1", SIGNING_KEY)]);
+    let verifier = certs.verifier();
+    let token = sign(SIGNING_KEY, &rs256("k1"), &claims(ALICE));
+    let mut context = Context::from_waker(Waker::noop());
+
+    // The first fetch hangs. The startup backoff alone would allow another
+    // after a second, well inside the fetch timeout.
+    certs.held.send_replace(true);
+    let mut first = pin!(verify(&verifier, &token));
+    assert!(first.as_mut().poll(&mut context).is_pending());
+    tokio::task::yield_now().await;
+    assert_eq!(certs.hits(), 1);
+    for _ in 0..2 {
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let later = pin!(verify(&verifier, &token));
+        assert!(
+            later.poll(&mut context).is_pending(),
+            "waits on the open fetch"
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(certs.hits(), 1, "a second fetch while the first is open");
+    }
+
+    // When it answers, the request waiting on it goes through.
+    certs.held.send_replace(false);
+    assert_eq!(first.await.unwrap(), ALICE);
+    assert_eq!(certs.hits(), 1);
+}
+
+#[tokio::test(start_paused = true)]
 async fn access_refuses_keys_past_their_age_and_grace_when_refetches_fail() {
-    let server = KeyServer::start(vec![jwk("k1", SIGNING_KEY)]).await;
-    let (max_age, grace) = (Duration::from_millis(150), Duration::from_millis(300));
-    let verifier = server
-        .verifier()
-        .with_cooldown(Duration::ZERO)
-        .with_key_age(max_age, grace);
+    let certs = FakeCerts::new(&[jwk("k1", SIGNING_KEY)]);
+    let verifier = certs.verifier();
     let token = sign(SIGNING_KEY, &rs256("k1"), &claims(ALICE));
     assert_eq!(verify(&verifier, &token).await.unwrap(), ALICE);
 
     // Access is unreachable. Within the grace the cached key still works,
     // and a refetch is attempted.
-    server.fail(true);
-    tokio::time::sleep(max_age + Duration::from_millis(30)).await;
+    certs.fail(true);
+    tokio::time::advance(HOUR + TICK).await;
     assert_eq!(verify(&verifier, &token).await.unwrap(), ALICE);
     verifier.settle().await;
-    assert_eq!(server.hits(), 2);
+    assert_eq!(certs.hits(), 2);
 
-    // Past the grace nothing is trusted, however valid the token.
-    tokio::time::sleep(grace).await;
+    // Just inside the grace the key is still used; at its end, nothing is
+    // trusted, however valid the token.
+    tokio::time::advance(HOUR.saturating_sub(TICK * 2)).await;
+    assert_eq!(verify(&verifier, &token).await.unwrap(), ALICE);
+    tokio::time::advance(TICK).await;
     assert!(matches!(
         verify(&verifier, &token).await,
         Err(Rejection::KeysStale)
     ));
 
     // Once Access answers again, tokens are accepted again.
-    server.fail(false);
+    certs.fail(false);
+    tokio::time::advance(MINUTE).await;
     assert_eq!(verify(&verifier, &token).await.unwrap(), ALICE);
 }
 

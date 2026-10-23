@@ -45,3 +45,5 @@ insta = { workspace = true }
 tempfile = "3"
 tocsin-core.workspace = true
 tower = { version = "0.5", default-features = false, features = ["util"] }
+# Paused time for the key-cache tests.
+tokio = { workspace = true, features = ["test-util"] }

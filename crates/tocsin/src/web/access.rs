@@ -19,13 +19,15 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ring::signature::{RSA_PKCS1_2048_8192_SHA256, RsaPublicKeyComponents};
 use serde::Deserialize;
 use tokio::sync::watch;
+// tokio's clock, so tests can pause and advance it.
+use tokio::time::Instant;
 
 use crate::net::{http_client, since_epoch};
 
@@ -118,11 +120,12 @@ pub struct Verifier {
 struct KeyCache {
     certs_url: String,
     client: reqwest::Client,
+    #[cfg(test)]
+    certs: Option<CertsSource>,
     keys: RwLock<Keys>,
     fetches: Mutex<Fetches>,
     /// Bumped when a fetch finishes, successful or not.
     finished: watch::Sender<u64>,
-    limits: Limits,
 }
 
 #[derive(Default)]
@@ -131,6 +134,15 @@ struct Keys {
     fetched: Option<Instant>,
 }
 
+/// Answers in place of the certs URL: the response body, or why there is
+/// none. Tests only.
+#[cfg(test)]
+pub type CertsSource = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// Fetch bookkeeping; never held across an `await`.
 #[derive(Default)]
 struct Fetches {
@@ -138,15 +150,6 @@ struct Fetches {
     last_started: Option<Instant>,
     /// Failures in a row, for the backoff before the first success.
     failures: u32,
-}
-
-/// The timings, constants in production and shortened by tests.
-#[derive(Clone, Copy)]
-struct Limits {
-    cooldown: Duration,
-    max_age: Duration,
-    grace: Duration,
-    backoff: Duration,
 }
 
 #[derive(Deserialize)]
@@ -211,15 +214,11 @@ impl Verifier {
             keys: Arc::new(KeyCache {
                 certs_url,
                 client,
+                #[cfg(test)]
+                certs: None,
                 keys: RwLock::default(),
                 fetches: Mutex::default(),
                 finished: watch::Sender::new(0),
-                limits: Limits {
-                    cooldown: REFRESH_COOLDOWN,
-                    max_age: MAX_KEY_AGE,
-                    grace: KEY_GRACE,
-                    backoff: STARTUP_BACKOFF,
-                },
             }),
         })
     }
@@ -232,28 +231,11 @@ impl Verifier {
         self
     }
 
-    /// Changes the shortest gap between key fetches. Tests only.
+    /// Fetches keys by calling `certs` instead of the network; the response
+    /// is parsed exactly as one from Access would be. Tests only.
     #[cfg(test)]
-    pub fn with_cooldown(mut self, cooldown: Duration) -> Self {
-        self.cache().limits.cooldown = cooldown;
-        self
-    }
-
-    /// Changes how old keys may get before a refetch (`max_age`) and how
-    /// much longer they are used while refetches fail (`grace`). Tests only.
-    #[cfg(test)]
-    pub fn with_key_age(mut self, max_age: Duration, grace: Duration) -> Self {
-        let limits = &mut self.cache().limits;
-        limits.max_age = max_age;
-        limits.grace = grace;
-        self
-    }
-
-    /// Changes the first wait between fetches before any succeeds. Tests
-    /// only.
-    #[cfg(test)]
-    pub fn with_backoff(mut self, backoff: Duration) -> Self {
-        self.cache().limits.backoff = backoff;
+    pub fn with_certs(mut self, certs: CertsSource) -> Self {
+        self.cache().certs = Some(certs);
         self
     }
 
@@ -349,7 +331,6 @@ impl KeyCache {
         this: &Arc<Self>,
         kid: &str,
     ) -> Result<RsaPublicKeyComponents<Vec<u8>>, Rejection> {
-        let limits = this.limits;
         let mut finished = this.finished.subscribe();
         match this.lookup(kid) {
             Lookup::Fresh(key) => return Ok(key),
@@ -371,7 +352,7 @@ impl KeyCache {
                 let keys = this.read_keys();
                 match keys.fetched {
                     None => Err(Rejection::KeysUnavailable),
-                    Some(fetched) if fetched.elapsed() >= limits.max_age + limits.grace => {
+                    Some(fetched) if fetched.elapsed() >= MAX_KEY_AGE + KEY_GRACE => {
                         tracing::error!(
                             age_seconds = fetched.elapsed().as_secs(),
                             url = %this.certs_url,
@@ -392,9 +373,9 @@ impl KeyCache {
             return Lookup::Missing;
         };
         let age = fetched.elapsed();
-        if age < self.limits.max_age {
+        if age < MAX_KEY_AGE {
             Lookup::Fresh(key.clone())
-        } else if age < self.limits.max_age + self.limits.grace {
+        } else if age < MAX_KEY_AGE + KEY_GRACE {
             Lookup::Stale(key.clone())
         } else {
             Lookup::Missing
@@ -409,14 +390,13 @@ impl KeyCache {
         {
             let mut fetches = this.fetches();
             let gap = if have_keys {
-                this.limits.cooldown
+                REFRESH_COOLDOWN
             } else {
                 // 1s after the first failure, 2s after the second, ...
                 let doublings = fetches.failures.saturating_sub(1).min(16);
-                this.limits
-                    .backoff
+                STARTUP_BACKOFF
                     .saturating_mul(1 << doublings)
-                    .min(this.limits.cooldown)
+                    .min(REFRESH_COOLDOWN)
             };
             if fetches.in_flight || fetches.last_started.is_some_and(|at| at.elapsed() < gap) {
                 return;
@@ -455,7 +435,12 @@ impl KeyCache {
         self.fetches.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    async fn fetch(&self) -> Result<HashMap<String, RsaPublicKeyComponents<Vec<u8>>>, String> {
+    /// The certs response body, at most [`MAX_CERTS_LENGTH`] bytes.
+    async fn download(&self) -> Result<Vec<u8>, String> {
+        #[cfg(test)]
+        if let Some(certs) = &self.certs {
+            return certs().await;
+        }
         let mut response = self
             .client
             .get(&self.certs_url)
@@ -472,6 +457,11 @@ impl KeyCache {
             }
             body.extend_from_slice(&chunk);
         }
+        Ok(body)
+    }
+
+    async fn fetch(&self) -> Result<HashMap<String, RsaPublicKeyComponents<Vec<u8>>>, String> {
+        let body = self.download().await?;
         let set: KeySet = serde_json::from_slice(&body).map_err(|error| error.to_string())?;
         let mut by_id = HashMap::new();
         for jwk in set.keys {

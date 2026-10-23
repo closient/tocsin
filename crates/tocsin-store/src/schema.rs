@@ -20,7 +20,7 @@ static MIGRATIONS: &[M<'static>] = &[
 ];
 
 /// How long a connection waits for another process's lock before failing.
-const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The migrations, for running and validation.
 pub(crate) fn migrations() -> Migrations<'static> {

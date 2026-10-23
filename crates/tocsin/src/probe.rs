@@ -11,7 +11,7 @@ use std::path::Path;
 use serde_json::Value;
 use tocsin_core::Health;
 use tocsin_core::config::{CheckType, Config, closest};
-use tocsin_core::probe::{ProbeErrorKind, ProbeOutcome};
+use tocsin_core::probe::{CompiledCheck, ProbeErrorKind, ProbeOutcome};
 use tocsin_probe::ProbeContext;
 
 use crate::config::{self, Loaded};
@@ -48,7 +48,10 @@ pub fn run(check_id: &str, folder: &Path) -> Result<Report, Failure> {
         .enable_all()
         .build()
         .map_err(|error| Failure::new(Exit::Runtime, format!("cannot start runtime: {error}")))?;
-    let outcome = runtime.block_on(tocsin_probe::run(check, &context));
+    // The loader has already reported anything that would not compile.
+    let compiled =
+        CompiledCheck::new(check.clone()).map_err(|error| Failure::new(Exit::Runtime, error))?;
+    let outcome = runtime.block_on(tocsin_probe::run(&compiled, &context));
 
     // A setup error means the probe never reached the target, so it says
     // nothing about the target's health.

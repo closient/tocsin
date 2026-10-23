@@ -19,10 +19,11 @@ const BANNER_LIMIT: usize = 4096;
 /// arrived is taken as the whole of it.
 const BANNER_PAUSE: Duration = Duration::from_millis(250);
 
-/// Connects to the target. The banner is read only when `send` is set or
-/// an assertion asks about it: up to the first newline, [`BANNER_LIMIT`]
-/// bytes, the end of the stream or a [`BANNER_PAUSE`] after the first
-/// bytes, whichever comes first.
+/// Connects to the target and writes `send`, when set. The banner is read
+/// only when a `banner` assertion asks about it, so a server that answers
+/// nothing is up: up to the first newline, [`BANNER_LIMIT`] bytes, the end
+/// of the stream or a [`BANNER_PAUSE`] after the first bytes, whichever
+/// comes first.
 pub(crate) async fn probe(check: &Check) -> Result<TcpFacts, ProbeError> {
     let (host, port) = split_target(&check.target, 0)?;
     if port == 0 {
@@ -35,11 +36,10 @@ pub(crate) async fn probe(check: &Check) -> Result<TcpFacts, ProbeError> {
         ));
     }
     let send = check.tcp.as_ref().and_then(|tcp| tcp.send.as_deref());
-    let wants_banner = send.is_some()
-        || check
-            .assertions
-            .iter()
-            .any(|assertion| assertion.banner.is_some());
+    let wants_banner = check
+        .assertions
+        .iter()
+        .any(|assertion| assertion.banner.is_some());
 
     let start = Instant::now();
     let mut stream = TcpStream::connect((host, port))
@@ -50,13 +50,13 @@ pub(crate) async fn probe(check: &Check) -> Result<TcpFacts, ProbeError> {
         .peer_addr()
         .map_or_else(|_| format!("{host}:{port}"), |address| address.to_string());
 
+    if let Some(line) = send {
+        stream
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|error| protocol_error("could not send", &error))?;
+    }
     let banner = if wants_banner {
-        if let Some(line) = send {
-            stream
-                .write_all(line.as_bytes())
-                .await
-                .map_err(|error| protocol_error("could not send", &error))?;
-        }
         Some(read_banner(&mut stream).await?)
     } else {
         None

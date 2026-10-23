@@ -17,7 +17,7 @@ fn certificate(outcome: &ProbeOutcome) -> &CertificateFacts {
     }
 }
 
-fn tls_check(port: u16, server_name: &str, assertions: &str) -> tocsin_core::config::Check {
+fn tls_check(port: u16, server_name: &str, assertions: &str) -> tocsin_core::probe::CompiledCheck {
     check(&format!(
         r#"
 [[check]]
@@ -42,7 +42,7 @@ async fn a_valid_certificate_is_up() {
     assert!(certificate.chain_valid);
     assert!(certificate.hostname_valid);
     assert_eq!(certificate.chain_error, None);
-    assert_eq!(certificate.days_remaining, 30);
+    assert_eq!(certificate.days_remaining, Some(30));
     assert_eq!(certificate.chain[0].subject, "CN=probe test server");
     assert_eq!(certificate.chain[0].issuer, "CN=Probe Test CA");
     assert_eq!(
@@ -115,7 +115,7 @@ hostname_valid = true
         &context,
     )
     .await;
-    assert_eq!(certificate(&outcome).days_remaining, 10);
+    assert_eq!(certificate(&outcome).days_remaining, Some(10));
     let passed: Vec<bool> = outcome
         .assertions
         .iter()
@@ -144,7 +144,7 @@ certificate_days_remaining = { gte = 0 }
     .await;
     let certificate = certificate(&outcome);
     assert!(!certificate.chain_valid);
-    assert!(certificate.days_remaining < 0);
+    assert!(certificate.days_remaining.is_some_and(|days| days < 0));
     assert_eq!(outcome.health, Health::Down);
 }
 

@@ -1150,7 +1150,7 @@
     },
     "RecordsAssertion": {
       "additionalProperties": false,
-      "description": "A condition on the records a DNS lookup returns. Records are compared\nas text, ignoring a trailing `.` on names.",
+      "description": "A condition on the records a DNS lookup returns. Records are compared\nas text, ignoring a trailing `.` on names; CNAME, MX, NS and SRV\nrecords, which hold names, also ignore case.",
       "properties": {
         "contains": {
           "description": "One of the records equals this.",

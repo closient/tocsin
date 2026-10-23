@@ -112,7 +112,7 @@ Failures before the probe runs (exit 2 and 3) are the usual `{"error": {"kind", 
 | `dns` | `latency_ms`, `resolver` (`ip:port`, or `system`), `record_type`, `rcode` (such as `NOERROR` or `NXDOMAIN`), `answers` (the records of the type asked for, as text) |
 | `icmp` | `latency_ms` (the echo's round trip), `address` |
 
-`certificate` has `server_name` (sent as SNI and checked against), `chain` (each certificate's `subject`, `issuer`, `not_before`, `not_after` and `subject_alternative_names`, the server's own first), `expires_in_seconds`, `days_remaining` (whole days, rounded down, negative once expired), `chain_valid`, `chain_error` (why the chain does not verify, or `null`) and `hostname_valid`.
+`certificate` has `server_name` (sent as SNI and checked against), `chain` (each certificate's `subject`, `issuer`, `not_before`, `not_after` and `subject_alternative_names`, the server's own first), `expires_in_seconds`, `days_remaining` (whole days, rounded down, negative once expired; both `null` when the server's certificate cannot be parsed, which fails a `certificate_days_remaining` assertion as unavailable), `chain_valid`, `chain_error` (why the chain does not verify, or `null`) and `hostname_valid`.
 
 ## How each probe works
 
@@ -128,7 +128,7 @@ A handshake only: no request is sent. The certificate is reported whether or not
 
 ### tcp
 
-A connection, timed. With `[check.tcp] send`, that text is written once connected. <a id="tcp-banners"></a>The reply, or the server's greeting when nothing is sent, is read only when `send` is set or a `banner` assertion asks for it, so a plain port check never waits on a server that says nothing. Reading stops at the first newline (the newline, and a carriage return before it, are dropped), at 4 KiB, when the server closes the connection, or when nothing more arrives for 250 ms after the first bytes. Waiting for the first bytes counts against the check's `timeout`.
+A connection, timed. With `[check.tcp] send`, that text is written once connected. <a id="tcp-banners"></a>The reply, or the server's greeting when nothing is sent, is read only when a `banner` assertion asks for it, so a check without one never waits on a server that says nothing, even after `send`. Reading stops at the first newline (the newline, and a carriage return before it, are dropped), at 4 KiB, when the server closes the connection, or when nothing more arrives for 250 ms after the first bytes. Waiting for the first bytes counts against the check's `timeout`.
 
 ### dns
 

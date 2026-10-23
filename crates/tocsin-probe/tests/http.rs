@@ -5,6 +5,7 @@
 
 mod support;
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use axum::Router;
@@ -16,7 +17,7 @@ use tocsin_core::probe::{BODY_LIMIT, Facts, HttpFacts, ProbeErrorKind, ProbeOutc
 use tocsin_probe::{ProbeContext, run};
 use tokio::net::TcpListener;
 
-use support::{Authority, check, https_server};
+use support::{Authority, check, https_server, https_server_redirecting};
 
 const COMPONENTS: &str = r#"{
   "page": {"id": "kctbh9vrtdwd", "name": "GitHub"},
@@ -62,11 +63,31 @@ async fn server() -> u16 {
                 "late"
             }),
         )
-        .route("/whoami", get(whoami).post(echo));
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        .route("/whoami", get(whoami).post(echo))
+        .route("/host", get(host));
+    serve(app, TcpListener::bind("127.0.0.1:0").await.expect("bind"))
+}
+
+fn serve(app: Router, listener: TcpListener) -> u16 {
     let port = listener.local_addr().expect("address").port();
     tokio::spawn(async move { axum::serve(listener, app).await });
     port
+}
+
+/// A server answering `/host` with the request's `Host`, on one address.
+async fn host_server(address: SocketAddr) -> u16 {
+    let listener = TcpListener::bind(address)
+        .await
+        .unwrap_or_else(|error| panic!("cannot listen on {address}: {error}"));
+    serve(Router::new().route("/host", get(host)), listener)
+}
+
+async fn host(headers: HeaderMap) -> String {
+    headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("-")
+        .to_owned()
 }
 
 /// Echoes the request headers the probe controls.
@@ -191,6 +212,112 @@ follow_redirects = true
     assert_eq!(facts.status, 200);
     assert_eq!(facts.redirect_location, None);
     assert!(facts.url.ends_with("/components.json"));
+}
+
+#[tokio::test]
+async fn certificate_facts_follow_the_final_scheme() {
+    let authority = Authority::new("Probe Test CA");
+    let leaf = authority.leaf(&["localhost"], 30);
+    let trusted = ProbeContext::with_roots(authority.roots());
+    let plain = server().await;
+    let secure = https_server_redirecting(
+        &leaf,
+        Some(format!("http://127.0.0.1:{plain}/components.json")),
+    )
+    .await;
+    let followed = |target: String| {
+        check(&format!(
+            "[[check]]\nid = \"moved\"\ntype = \"http\"\ntarget = \"{target}\"\n\n[check.http]\nfollow_redirects = true\n"
+        ))
+    };
+
+    // https -> http: the response came over plain HTTP, so no certificate,
+    // although the first hop had one.
+    let outcome = run(
+        &followed(format!("https://localhost:{secure}/away")),
+        &trusted,
+    )
+    .await;
+    let facts = http(&outcome);
+    assert_eq!(facts.status, 200);
+    assert!(facts.url.starts_with("http://"), "{}", facts.url);
+    assert_eq!(facts.certificate, None);
+
+    // http -> https: the response came over TLS, so its certificate shows.
+    let plain_to_secure = Router::new().route(
+        "/up",
+        get(move || async move {
+            (
+                StatusCode::FOUND,
+                [(header::LOCATION, format!("https://localhost:{secure}/"))],
+            )
+        }),
+    );
+    let redirecting = serve(
+        plain_to_secure,
+        TcpListener::bind("127.0.0.1:0").await.expect("bind"),
+    );
+    let outcome = run(
+        &followed(format!("http://127.0.0.1:{redirecting}/up")),
+        &trusted,
+    )
+    .await;
+    let facts = http(&outcome);
+    assert_eq!(facts.status, 200);
+    assert!(facts.url.starts_with("https://"), "{}", facts.url);
+    let certificate = facts.certificate.as_ref().expect("certificate facts");
+    assert_eq!(certificate.days_remaining, Some(30));
+}
+
+#[tokio::test]
+async fn server_name_with_an_ipv6_literal_target() {
+    let port = host_server(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)).await;
+    let check = check(&format!(
+        r#"
+[[check]]
+id = "v6"
+type = "http"
+target = "http://[::1]:{port}/host"
+
+[check.http]
+server_name = "status.example.test"
+"#
+    ));
+    let outcome = run(&check, &context()).await;
+    assert_eq!(outcome.error, None);
+    assert_eq!(http(&outcome).body, format!("status.example.test:{port}"));
+}
+
+/// With `server_name`, a target name that resolves to several addresses
+/// is reached on any of them: here `localhost`, with a server on only its
+/// IPv4 address, then on only its IPv6 one.
+#[tokio::test]
+async fn server_name_tries_every_address_of_the_target() {
+    let families: Vec<bool> = tokio::net::lookup_host(("localhost", 80))
+        .await
+        .expect("localhost resolves")
+        .map(|address| address.is_ipv6())
+        .collect();
+    if !(families.contains(&true) && families.contains(&false)) {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI must resolve localhost to both 127.0.0.1 and ::1, but got {families:?}"
+        );
+        eprintln!("skipped: localhost does not resolve to both IPv4 and IPv6 here");
+        return;
+    }
+    for ip in [
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(Ipv6Addr::LOCALHOST),
+    ] {
+        let port = host_server(SocketAddr::new(ip, 0)).await;
+        let check = check(&format!(
+            "[[check]]\nid = \"any\"\ntype = \"http\"\ntarget = \"http://localhost:{port}/host\"\n\n[check.http]\nserver_name = \"status.example.test\"\n"
+        ));
+        let outcome = run(&check, &context()).await;
+        assert_eq!(outcome.error, None, "server on {ip} only");
+        assert_eq!(http(&outcome).body, format!("status.example.test:{port}"));
+    }
 }
 
 #[tokio::test]
@@ -369,7 +496,7 @@ certificate_days_remaining = {{ gte = 14 }}
     assert_eq!(certificate.server_name, "localhost");
     assert!(certificate.chain_valid);
     assert!(certificate.hostname_valid);
-    assert_eq!(certificate.days_remaining, 30);
+    assert_eq!(certificate.days_remaining, Some(30));
     assert_eq!(certificate.chain.len(), 2);
     assert_eq!(
         certificate.chain[0].subject_alternative_names,

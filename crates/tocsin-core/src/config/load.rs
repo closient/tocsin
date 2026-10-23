@@ -873,13 +873,16 @@ impl<'a> Loader<'a> {
                     None,
                 )
             }),
-            Condition::Json(json) => match serde_json_path::JsonPath::parse(&json.path) {
-                Err(error) => Some((
-                    format!("`{}` is not a JSONPath: {error}", json.path),
-                    Some(
-                        "such as \"$.status\", \"$.checks[0].ok\" or \"$.components[?@.name=='API'].status\""
-                            .to_owned(),
-                    ),
+            Condition::Json(json) => match crate::probe::json_path(&json.path) {
+                Err(message) => Some((
+                    message,
+                    Some(bracketed(&json.path).map_or_else(
+                        || {
+                            "such as \"$.status\", \"$.checks[0].ok\" or \"$.components[?@.name=='API'].status\""
+                                .to_owned()
+                        },
+                        |path| format!("use bracket notation: {path}"),
+                    )),
                 )),
                 Ok(_) => one_matcher(json.matcher_count(), "eq, ne, exists or contains"),
             },
@@ -989,6 +992,62 @@ impl<'a> Loader<'a> {
 
     // ---- secrets --------------------------------------------------------
 
+    /// Rejects an `http` check's header that could not be sent: a name that
+    /// is not an HTTP token, or a value (secrets included, once resolved)
+    /// holding a control character such as a newline. A secret's value is
+    /// never repeated; its variable is named instead.
+    fn validate_headers(&mut self, items: &Items) {
+        for check in &items.checks {
+            let Some(http) = &check.value.http else {
+                continue;
+            };
+            for (name, value) in &http.headers {
+                let origin = check.origin.keys(&["http", "headers", name]);
+                if http::HeaderName::from_bytes(name.as_bytes()).is_err() {
+                    self.report(
+                        &origin,
+                        format!("`{name}` is not an HTTP header name"),
+                        Some(
+                            "a header name is letters, digits and !#$%&'*+-.^_`|~, such as \"X-Request-Id\""
+                                .to_owned(),
+                        ),
+                    );
+                }
+                let (text, source) = match value {
+                    Text::Literal(text) => (Some(text.as_str()), None),
+                    Text::Secret(secret) => (secret.resolved(), Some(secret.variable())),
+                };
+                if let Some(text) = text {
+                    self.header_value(&origin, text, source);
+                }
+            }
+            if let Some(token) = &http.bearer_token
+                && let Some(text) = token.resolved()
+            {
+                self.header_value(
+                    &check.origin.keys(&["http", "bearer_token"]),
+                    &format!("Bearer {text}"),
+                    Some(token.variable()),
+                );
+            }
+        }
+    }
+
+    /// Reports `text` when it cannot be an HTTP header value, naming the
+    /// environment variable it came from rather than repeating it.
+    fn header_value(&mut self, origin: &Origin, text: &str, variable: Option<&str>) {
+        if http::HeaderValue::from_str(text).is_ok() {
+            return;
+        }
+        let message = match variable {
+            Some(variable) => format!(
+                "the value of environment variable `{variable}` cannot be sent in an HTTP header: it holds a control character, such as a newline, or a character outside ASCII"
+            ),
+            None => "this value cannot be sent in an HTTP header: it holds a control character, such as a newline, or a character outside ASCII".to_owned(),
+        };
+        self.report(origin, message, None);
+    }
+
     /// Resolves every secret from the environment, then rejects `${ENV:...}`
     /// anywhere that is not a secret field.
     fn resolve_secrets(&mut self, items: &mut Items, environment: &Environment<'_>) {
@@ -1058,6 +1117,7 @@ impl<'a> Loader<'a> {
 
         self.validate_smtp_url(items);
         self.reject_shared_token_secrets(items);
+        self.validate_headers(items);
 
         // Items that failed to deserialize are skipped: their secret fields
         // are unknown, and their error is already reported.
@@ -1252,12 +1312,44 @@ fn text_problem(text: &TextAssertion) -> Option<(String, Option<String>)> {
         ));
     }
     let pattern = text.regex.as_ref()?;
-    regex::Regex::new(pattern).err().map(|error| {
-        (
-            format!("`{pattern}` is not a regular expression: {error}"),
-            None,
-        )
-    })
+    crate::probe::regular_expression(pattern)
+        .err()
+        .map(|message| (message, None))
+}
+
+/// `path` with every dot step RFC 9535 rejects (a name holding `-` or
+/// starting with a digit, such as `.x-request-id`) in bracket notation,
+/// when it has one.
+fn bracketed(path: &str) -> Option<String> {
+    let mut fixed = String::with_capacity(path.len() + 8);
+    let mut changed = false;
+    let mut rest = path;
+    while let Some(dot) = rest.find('.') {
+        fixed.push_str(&rest[..dot]);
+        let after = &rest[dot + 1..];
+        let end = after
+            .find(|character: char| {
+                !(character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+            })
+            .unwrap_or(after.len());
+        let name = &after[..end];
+        if name.contains('-') || name.starts_with(|character: char| character.is_ascii_digit()) {
+            // A descendant step (`..name`) keeps its first dot.
+            if fixed.ends_with('.') {
+                fixed.push('.');
+            }
+            fixed.push_str("['");
+            fixed.push_str(name);
+            fixed.push_str("']");
+            changed = true;
+        } else {
+            fixed.push('.');
+            fixed.push_str(name);
+        }
+        rest = &after[end..];
+    }
+    fixed.push_str(rest);
+    changed.then_some(fixed)
 }
 
 /// The candidate nearest to `given` by edit distance, if any is close

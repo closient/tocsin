@@ -84,7 +84,7 @@ fn dns_check(
     name: &str,
     record_type: &str,
     assertions: &str,
-) -> tocsin_core::config::Check {
+) -> tocsin_core::probe::CompiledCheck {
     check(&format!(
         r#"
 [[check]]

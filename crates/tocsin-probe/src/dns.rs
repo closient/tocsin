@@ -12,7 +12,7 @@ use hickory_resolver::net::{DnsError, NetError};
 use hickory_resolver::proto::op::ResponseCode;
 use hickory_resolver::proto::rr::{Name, RecordType as WireType};
 use hickory_resolver::{Resolver, ResolverBuilder};
-use tocsin_core::config::{Check, DnsSettings, RecordType};
+use tocsin_core::config::{Check, DnsSettings, RecordType, host_and_port};
 use tocsin_core::probe::{DnsFacts, ProbeError, ProbeErrorKind};
 
 use crate::{error_chain, milliseconds};
@@ -112,14 +112,15 @@ fn system_builder() -> Result<ResolverBuilder<TokioRuntimeProvider>, ProbeError>
     })
 }
 
-/// `ip` or `ip:port` (`[ip]:port` for IPv6).
+/// A resolver written in any form the loader accepts: `ip`, `ip:port`,
+/// `ipv6`, `[ipv6]` or `[ipv6]:port`. The port defaults to 53.
 fn resolver_address(text: &str) -> Result<SocketAddr, ProbeError> {
-    text.parse::<SocketAddr>()
-        .or_else(|_| {
-            text.parse::<IpAddr>()
-                .map(|ip| SocketAddr::new(ip, DNS_PORT))
+    host_and_port(text)
+        .and_then(|(host, port)| {
+            let ip = host.parse::<IpAddr>().ok()?;
+            Some(SocketAddr::new(ip, port.unwrap_or(DNS_PORT)))
         })
-        .map_err(|_| {
+        .ok_or_else(|| {
             ProbeError::new(
                 ProbeErrorKind::Setup,
                 format!("resolver `{text}` is not ip or ip:port"),
@@ -151,5 +152,25 @@ fn mnemonic(code: ResponseCode) -> String {
         4 => "NOTIMP".to_owned(),
         5 => "REFUSED".to_owned(),
         other => format!("RCODE{other}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_resolver_form_the_loader_accepts_parses() {
+        for (text, address) in [
+            ("1.1.1.1", "1.1.1.1:53"),
+            ("192.0.2.53:5353", "192.0.2.53:5353"),
+            ("2001:db8::53", "[2001:db8::53]:53"),
+            ("[2001:db8::53]", "[2001:db8::53]:53"),
+            ("[2001:db8::53]:5353", "[2001:db8::53]:5353"),
+        ] {
+            let parsed = resolver_address(text).unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            assert_eq!(parsed.to_string(), address, "{text}");
+        }
+        assert!(resolver_address("dns.google").is_err());
     }
 }

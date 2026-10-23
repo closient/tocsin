@@ -11,7 +11,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, date_time_ymd};
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use tocsin_core::config::{Check, Environment, Source, load};
+use tocsin_core::config::{Environment, Source, load};
+use tocsin_core::probe::CompiledCheck;
 use tocsin_core::probe::rfc3339;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -26,8 +27,9 @@ fn variable(name: &str) -> Option<String> {
     }
 }
 
-/// The only check in `text`, loaded and validated like a real file.
-pub fn check(text: &str) -> Check {
+/// The only check in `text`, loaded, validated and compiled like a real
+/// file.
+pub fn check(text: &str) -> CompiledCheck {
     let environment = Environment {
         hostname: "probe-test".to_owned(),
         variable: &variable,
@@ -40,7 +42,7 @@ pub fn check(text: &str) -> Check {
         panic!("the test configuration is invalid: {diagnostics:#?}");
     });
     assert_eq!(config.checks.len(), 1, "one check per test configuration");
-    config.checks.remove(0)
+    CompiledCheck::new(config.checks.remove(0)).expect("a loaded check compiles")
 }
 
 /// A certificate authority for tests.
@@ -130,6 +132,11 @@ impl Leaf {
 /// Serves TLS on a local port, answering every request with a small HTTP
 /// response, and returns the port.
 pub async fn https_server(leaf: &Leaf) -> u16 {
+    https_server_redirecting(leaf, None).await
+}
+
+/// [`https_server`], but a request for `/away` is redirected to `location`.
+pub async fn https_server_redirecting(leaf: &Leaf, location: Option<String>) -> u16 {
     let acceptor = leaf.acceptor();
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().expect("address").port();
@@ -139,6 +146,7 @@ pub async fn https_server(leaf: &Leaf) -> u16 {
                 return;
             };
             let acceptor = acceptor.clone();
+            let location = location.clone();
             tokio::spawn(async move {
                 let Ok(mut tls) = acceptor.accept(stream).await else {
                     return;
@@ -156,11 +164,19 @@ pub async fn https_server(leaf: &Leaf) -> u16 {
                     .find_map(|line| line.strip_prefix("host: ").or(line.strip_prefix("Host: ")))
                     .unwrap_or_default()
                     .to_owned();
-                let body = format!("hello {host}");
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
+                let away = request.starts_with(b"GET /away ");
+                let response = match location {
+                    Some(location) if away => format!(
+                        "HTTP/1.1 302 Found\r\nlocation: {location}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                    ),
+                    _ => {
+                        let body = format!("hello {host}");
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                    }
+                };
                 let _ = tls.write_all(response.as_bytes()).await;
                 let _ = tls.shutdown().await;
             });

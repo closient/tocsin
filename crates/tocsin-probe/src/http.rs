@@ -4,12 +4,14 @@
 //! the response body.
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::time::Instant;
 
 use reqwest::redirect::Policy;
 use reqwest::{Method, Url};
 use tocsin_core::config::{Check, HttpMethod, HttpSettings};
 use tocsin_core::probe::{BODY_LIMIT, HttpFacts, ProbeError, ProbeErrorKind};
+use url::Host;
 
 use crate::tls::Recorder;
 use crate::{ProbeContext, error_chain, milliseconds};
@@ -26,7 +28,6 @@ pub(crate) async fn probe(check: &Check, context: &ProbeContext) -> Result<HttpF
             format!("`{}` is not a URL: {error}", check.target),
         )
     })?;
-    let https = url.scheme() == "https";
     let recorder = Recorder::new(context, settings.verify_certificate)?;
     let client = client(settings, &mut url, &recorder, context).await?;
 
@@ -50,6 +51,9 @@ pub(crate) async fn probe(check: &Check, context: &ProbeContext) -> Result<HttpF
         .await
         .map_err(|error| request_error(&error, &recorder))?;
     let status = response.status();
+    // Redirects can change the scheme, so the response's URL decides
+    // whether there is a certificate to report.
+    let https = response.url().scheme() == "https";
     let final_url = response.url().to_string();
     let mut headers: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (name, value) in response.headers() {
@@ -85,7 +89,8 @@ pub(crate) async fn probe(check: &Check, context: &ProbeContext) -> Result<HttpF
 
 /// A client for one probe. With `server_name` set, `url`'s host becomes
 /// that name (for SNI, `Host` and the certificate check) while the
-/// connection still goes to the target host's address.
+/// connection still goes to the target host: its IP literal, or every
+/// address its name resolves to.
 async fn client(
     settings: &HttpSettings,
     url: &mut Url,
@@ -102,27 +107,37 @@ async fn client(
         .no_proxy()
         .user_agent(&context.user_agent);
     if let Some(name) = &settings.server_name {
-        let host = url.host_str().unwrap_or_default().to_owned();
         let port = url.port_or_known_default().unwrap_or(80);
-        let address = tokio::net::lookup_host((host.as_str(), port))
-            .await
-            .map_err(|error| {
-                ProbeError::new(
-                    ProbeErrorKind::Connect,
-                    format!("could not resolve {host}: {error}"),
-                )
-            })?
-            .next()
-            .ok_or_else(|| {
-                ProbeError::new(ProbeErrorKind::Connect, format!("{host} has no addresses"))
-            })?;
+        let addresses: Vec<SocketAddr> = match url.host() {
+            Some(Host::Ipv4(ip)) => vec![SocketAddr::new(ip.into(), port)],
+            Some(Host::Ipv6(ip)) => vec![SocketAddr::new(ip.into(), port)],
+            Some(Host::Domain(domain)) => {
+                let domain = domain.to_owned();
+                tokio::net::lookup_host((domain.as_str(), port))
+                    .await
+                    .map_err(|error| {
+                        ProbeError::new(
+                            ProbeErrorKind::Connect,
+                            format!("could not resolve {domain}: {error}"),
+                        )
+                    })?
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+        if addresses.is_empty() {
+            return Err(ProbeError::new(
+                ProbeErrorKind::Connect,
+                format!("{} has no addresses", url.host_str().unwrap_or_default()),
+            ));
+        }
         url.set_host(Some(name)).map_err(|error| {
             ProbeError::new(
                 ProbeErrorKind::Setup,
                 format!("`{name}` cannot be a URL host: {error}"),
             )
         })?;
-        builder = builder.resolve(name, address);
+        builder = builder.resolve_to_addrs(name, &addresses);
     }
     builder.build().map_err(|error| {
         ProbeError::new(

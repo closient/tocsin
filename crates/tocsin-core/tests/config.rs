@@ -18,6 +18,7 @@ fn variable(name: &str) -> Option<String> {
         "EMPTY" => Some(String::new()),
         "API_AUTHORIZATION" => Some("Bearer HEADER-SECRET".to_owned()),
         "API_BODY" => Some("{\"key\":\"BODY-SECRET\"}".to_owned()),
+        "BROKEN_HEADER" => Some("Bearer LINE-SECRET\nX-Injected: yes".to_owned()),
         "TOKEN_A" | "TOKEN_B" => Some("SHARED-TOKEN-SECRET".to_owned()),
         "TOKEN_C" => Some("another-token-secret".to_owned()),
         "HTTPS_URL" => Some("https://user:HTTPS-SECRET@mail.example.com".to_owned()),
@@ -702,6 +703,71 @@ banner = { contains = "PONG", regex = "PONG" }
             "checks.toml:17:30: a `certificate_days_remaining` assertion needs an https:// target, and this one is http://",
             "checks.toml:25:10: give exactly one of contains, not_contains or regex",
         ]
+    );
+}
+
+#[test]
+fn a_dotted_name_rfc_9535_rejects_gets_a_bracket_hint() {
+    let check = |path: &str| {
+        format!(
+            "[[check]]\nid = \"api\"\ntype = \"http\"\ntarget = \"https://api.example.com\"\n\n[[check.assert]]\njson = {{ path = \"{path}\", exists = true }}\n"
+        )
+    };
+    let hint = |path: &str| only_error(&[("checks.toml", &check(path))]).hint;
+    assert_eq!(
+        hint("$.headers.x-request-id").as_deref(),
+        Some("use bracket notation: $.headers['x-request-id']")
+    );
+    assert_eq!(
+        hint("$.items.0.name").as_deref(),
+        Some("use bracket notation: $.items['0'].name")
+    );
+    assert_eq!(
+        hint("$..x-request-id").as_deref(),
+        Some("use bracket notation: $..['x-request-id']")
+    );
+    // Any other parse failure keeps the general examples.
+    assert_eq!(
+        hint("$.status[").as_deref(),
+        Some("such as \"$.status\", \"$.checks[0].ok\" or \"$.components[?@.name=='API'].status\"")
+    );
+    // Strict RFC 9535: the bracketed form the hint suggests loads.
+    run(&[("checks.toml", &check("$.headers['x-request-id']"))]).expect("valid");
+    run(&[("checks.toml", &check("$..['x-request-id']"))]).expect("valid");
+}
+
+#[test]
+fn headers_that_cannot_be_sent_are_rejected_without_echoing_secrets() {
+    let checks = r#"
+[[check]]
+id = "api"
+type = "http"
+target = "https://api.example.com/health"
+[check.http]
+headers = { "Bad Name" = "x", Authorization = "${ENV:BROKEN_HEADER}", Accept = "text/plain\u0007" }
+
+[[check]]
+id = "bearer"
+type = "http"
+target = "https://api.example.com/health"
+[check.http]
+bearer_token = "${ENV:BROKEN_HEADER}"
+"#;
+    let diagnostics = run(&[("checks.toml", checks)]).expect_err("invalid");
+    let shown: Vec<String> = diagnostics.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        shown,
+        [
+            "checks.toml:7:26: `Bad Name` is not an HTTP header name (check[0].http.headers.Bad Name)\n  hint: a header name is letters, digits and !#$%&'*+-.^_`|~, such as \"X-Request-Id\"",
+            "checks.toml:7:47: the value of environment variable `BROKEN_HEADER` cannot be sent in an HTTP header: it holds a control character, such as a newline, or a character outside ASCII (check[0].http.headers.Authorization)",
+            "checks.toml:7:80: this value cannot be sent in an HTTP header: it holds a control character, such as a newline, or a character outside ASCII (check[0].http.headers.Accept)",
+            "checks.toml:14:16: the value of environment variable `BROKEN_HEADER` cannot be sent in an HTTP header: it holds a control character, such as a newline, or a character outside ASCII (check[1].http.bearer_token)",
+        ]
+    );
+    let all = format!("{shown:?}{diagnostics:?}");
+    assert!(
+        !all.contains("LINE-SECRET") && !all.contains("Injected"),
+        "{all}"
     );
 }
 

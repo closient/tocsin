@@ -2146,6 +2146,7 @@ dependencies = [
 name = "tocsin-core"
 version = "0.1.0"
 dependencies = [
+ "http",
  "regex",
  "schemars",
  "serde",
@@ -2171,6 +2172,7 @@ dependencies = [
  "tocsin-core",
  "tokio",
  "tokio-rustls",
+ "url",
  "x509-parser",
 ]
 

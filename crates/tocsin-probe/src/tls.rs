@@ -212,14 +212,12 @@ fn certificate_facts(seen: &Recorded) -> CertificateFacts {
         .chain
         .first()
         .and_then(|der| x509_parser::parse_x509_certificate(der).ok())
-        .map_or(0, |(_, certificate)| {
-            certificate.validity().not_after.timestamp() - now
-        });
+        .map(|(_, certificate)| certificate.validity().not_after.timestamp() - now);
     CertificateFacts {
         server_name: seen.server_name.clone(),
         chain,
         expires_in_seconds,
-        days_remaining: expires_in_seconds.div_euclid(86_400),
+        days_remaining: expires_in_seconds.map(|seconds| seconds.div_euclid(86_400)),
         chain_valid: seen.chain_error.is_none(),
         chain_error: seen.chain_error.clone(),
         hostname_valid: seen.hostname_valid,
@@ -323,4 +321,23 @@ pub(crate) async fn probe(check: &Check, context: &ProbeContext) -> Result<TlsFa
         latency_ms,
         certificate,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unparsable_leaf_has_no_expiry() {
+        let seen = Recorded {
+            server_name: "example.com".to_owned(),
+            chain: vec![CertificateDer::from(vec![0x30, 0x03, 0x02, 0x01, 0x00])],
+            chain_error: Some("invalid certificate encoding".to_owned()),
+            hostname_valid: false,
+        };
+        let facts = certificate_facts(&seen);
+        assert_eq!(facts.expires_in_seconds, None);
+        assert_eq!(facts.days_remaining, None);
+        assert_eq!(facts.chain[0].subject, "(unparsable certificate)");
+    }
 }

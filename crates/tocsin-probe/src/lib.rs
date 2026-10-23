@@ -22,7 +22,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use rustls::RootCertStore;
 use tocsin_core::config::{Check, CheckType, host_and_port};
-use tocsin_core::probe::{Facts, ProbeError, ProbeErrorKind, ProbeOutcome};
+use tocsin_core::probe::{CompiledCheck, Facts, ProbeError, ProbeErrorKind, ProbeOutcome};
 
 pub use tocsin_core::probe;
 
@@ -72,13 +72,14 @@ impl ProbeContext {
     }
 }
 
-/// Runs `check` once, within its timeout.
+/// Runs `compiled`'s check once, within its timeout.
 ///
 /// A probe that cannot complete (a timeout, a refused connection, a
 /// certificate that does not verify) is down, with the reason in
 /// [`ProbeOutcome::error`]. A probe that completes is judged by the check's
 /// assertions.
-pub async fn run(check: &Check, context: &ProbeContext) -> ProbeOutcome {
+pub async fn run(compiled: &CompiledCheck, context: &ProbeContext) -> ProbeOutcome {
+    let check = compiled.check();
     let started_at_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| {
@@ -88,7 +89,7 @@ pub async fn run(check: &Check, context: &ProbeContext) -> ProbeOutcome {
     let result = tokio::time::timeout(check.timeout.get(), probe(check, context)).await;
     let duration_ms = milliseconds(start.elapsed());
     match result {
-        Ok(Ok(facts)) => ProbeOutcome::completed(check, started_at_ms, duration_ms, facts),
+        Ok(Ok(facts)) => ProbeOutcome::completed(compiled, started_at_ms, duration_ms, facts),
         Ok(Err(error)) => ProbeOutcome::failed(check, started_at_ms, duration_ms, error),
         Err(_) => ProbeOutcome::failed(
             check,

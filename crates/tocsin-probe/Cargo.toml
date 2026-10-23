@@ -18,6 +18,7 @@ rustls-webpki.workspace = true
 surge-ping.workspace = true
 tokio = { workspace = true, features = ["net", "time", "io-util"] }
 tokio-rustls.workspace = true
+url.workspace = true
 x509-parser.workspace = true
 
 [dev-dependencies]

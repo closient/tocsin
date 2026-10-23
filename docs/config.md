@@ -151,7 +151,7 @@ Type-specific settings go in a table named after the type; each is optional and 
 |-----|---------|-|
 | `method` | `"GET"` | `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE` or `OPTIONS`. |
 | `follow_redirects` | `false` | Follow 3xx responses. |
-| `headers` | `{}` | Request headers, as a table. Each value **may be secret**. |
+| `headers` | `{}` | Request headers, as a table. Each value **may be secret**. Loading rejects a name that is not an HTTP header name, and a value, a secret's included, that holds a control character such as a newline or a character outside ASCII; a secret's value is never shown, only its variable. |
 | `body` | none | Request body. **May be secret.** |
 | `verify_certificate` | `true` | Treat a certificate that does not verify as a failed probe (`down`). With `false` the request goes ahead and the certificate is still reported, so `chain_valid` and `hostname_valid` assertions can judge it. |
 | `server_name` | none | The hostname for SNI, the `Host` header and the certificate check, when it differs from the target host. The connection still goes to the target host's address. |
@@ -164,7 +164,7 @@ An `http` probe reads at most 64 KiB of the response body; assertions see that m
 
 `[check.tls]`: `server_name`, the SNI hostname to send, and to check the certificate against, when it differs from the target host.
 
-`[check.tcp]`: `send`, text to write once connected, such as `"PING\r\n"`. The reply, or the server's greeting when nothing is sent, is read only when `send` is set or a `banner` assertion asks for it; see [probes](probes.md#tcp-banners).
+`[check.tcp]`: `send`, text to write once connected, such as `"PING\r\n"`. The reply, or the server's greeting when nothing is sent, is read only when a `banner` assertion asks for it; see [probes](probes.md#tcp-banners).
 
 ### Assertions: `[[check.assert]]`
 
@@ -192,12 +192,12 @@ json = { path = "$.status", eq = "ok" }
 | `certificate_days_remaining` | http (https only), tls | Bounds, as `latency_ms`. |
 | `hostname_valid` | http (https only), tls | `true` or `false`: whether the certificate names the host. |
 | `chain_valid` | http (https only), tls | `true` or `false`: whether the chain verifies against the system's roots and is in date. |
-| `records` | dns | Exactly one of `contains` (one returned record equals this) and `eq` (a list: the returned records are exactly these, in any order). IP addresses compare in canonical form, and names without the trailing dot. |
+| `records` | dns | Exactly one of `contains` (one returned record equals this) and `eq` (a list: the returned records are exactly these, in any order). IP addresses compare in canonical form, and names without the trailing dot. CNAME, MX, NS and SRV records ignore case; TXT and CAA text does not. |
 | `banner` | tcp | Exactly one of `contains`, `not_contains`, `regex`, matched against the reply. |
 
 `regex` is [Rust `regex` syntax](https://docs.rs/regex/latest/regex/#syntax) and matches anywhere unless anchored with `^` and `$`. Patterns, like JSON paths, are checked when the configuration loads.
 
-A JSON `path` is an [RFC 9535](https://www.rfc-editor.org/rfc/rfc9535) JSONPath: `$.checks[0].status`, or with a filter, `$.components[?@.name=='API'].status`. The assertion compares the first node the path selects, so a filter that matches one item reads like gjson's `components.#(name=="API").status`. A path that selects nothing fails every matcher except `exists = false`.
+A JSON `path` is an [RFC 9535](https://www.rfc-editor.org/rfc/rfc9535) JSONPath: `$.checks[0].status`, or with a filter, `$.components[?@.name=='API'].status`. The assertion compares the first node the path selects, so a filter that matches one item reads like gjson's `components.#(name=="API").status`. A path that selects nothing fails every matcher except `exists = false`. RFC 9535 dot notation takes only names that start with a letter or `_` and hold letters, digits and `_`; any other name needs bracket notation, `$['x-request-id']`, and loading says so.
 
 ```toml
 # An Atlassian Statuspage component, as vendor status pages publish them.

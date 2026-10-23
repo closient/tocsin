@@ -189,3 +189,50 @@ banner = {{ contains = "hello" }}
         ProbeErrorKind::Timeout
     );
 }
+
+#[tokio::test]
+async fn send_without_a_banner_assertion_does_not_wait_for_a_reply() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("address").port();
+    let (report, reports) = std::sync::mpsc::channel();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let report = report.clone();
+            tokio::spawn(async move {
+                // Read what is sent, answer nothing, hold the connection.
+                let mut buffer = [0_u8; 64];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let _ = report.send(buffer[..read].to_vec());
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            });
+        }
+    });
+    let check = check(&format!(
+        r#"
+[[check]]
+id = "silent-sink"
+type = "tcp"
+target = "127.0.0.1:{port}"
+timeout = "1s"
+
+[check.tcp]
+send = "PING\r\n"
+"#
+    ));
+    let outcome = run(&check, &context()).await;
+    assert_eq!(outcome.error, None);
+    assert_eq!(tcp(&outcome).banner, None);
+    assert_eq!(outcome.health, Health::Up);
+    // The server task runs on this test's thread, so wait without blocking it.
+    let sent = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(sent) = reports.try_recv() {
+                return sent;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the server received the send");
+    assert_eq!(sent, b"PING\r\n");
+}

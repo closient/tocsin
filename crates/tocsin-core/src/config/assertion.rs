@@ -345,7 +345,8 @@ impl HeaderAssertion {
 }
 
 /// A condition on the records a DNS lookup returns. Records are compared
-/// as text, ignoring a trailing `.` on names.
+/// as text, ignoring a trailing `.` on names; CNAME, MX, NS and SRV
+/// records, which hold names, also ignore case.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecordsAssertion {

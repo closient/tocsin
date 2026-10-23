@@ -16,9 +16,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
 
 use crate::Health;
+use regex::Regex;
+use serde_json_path::JsonPath;
+
 use crate::config::{
-    Check, CheckType, Condition, FailureState, HeaderAssertion, JsonAssertion, RecordType,
-    RecordsAssertion, TextAssertion,
+    Assertion, Check, CheckType, Comparison, Condition, FailureState, HeaderAssertion,
+    JsonAssertion, RecordType, RecordsAssertion, TextAssertion,
 };
 
 /// The most response body a probe reads, in bytes. The rest is not read,
@@ -57,8 +60,14 @@ pub struct ProbeOutcome {
 impl ProbeOutcome {
     /// The outcome of a probe that completed with `facts`.
     #[must_use]
-    pub fn completed(check: &Check, started_at_ms: i64, duration_ms: u64, facts: Facts) -> Self {
-        let assertions = evaluate(check, &facts);
+    pub fn completed(
+        compiled: &CompiledCheck,
+        started_at_ms: i64,
+        duration_ms: u64,
+        facts: Facts,
+    ) -> Self {
+        let assertions = evaluate(compiled, &facts);
+        let check = compiled.check();
         ProbeOutcome {
             check: check.id.to_string(),
             check_type: check.check_type,
@@ -211,11 +220,13 @@ pub struct CertificateFacts {
     pub server_name: String,
     /// The chain as sent, the server's own certificate first.
     pub chain: Vec<CertificateSummary>,
-    /// Seconds until the server's certificate expires; negative once it has.
-    pub expires_in_seconds: i64,
+    /// Seconds until the server's certificate expires; negative once it
+    /// has. Absent when the server's certificate could not be parsed.
+    pub expires_in_seconds: Option<i64>,
     /// Whole days until the server's certificate expires, rounded down;
-    /// negative once it has.
-    pub days_remaining: i64,
+    /// negative once it has. Absent when the server's certificate could
+    /// not be parsed.
+    pub days_remaining: Option<i64>,
     /// Whether the chain leads to a trusted root and every certificate is
     /// within its validity period.
     pub chain_valid: bool,
@@ -309,32 +320,182 @@ pub fn health_of(verdicts: &[AssertionVerdict]) -> Health {
         .unwrap_or(Health::Up)
 }
 
+/// A check ready to evaluate. Each assertion is compiled once: its
+/// JSON path or regular expression parsed and its one matcher chosen, so
+/// evaluating never meets one that does not parse.
+#[derive(Debug, Clone)]
+pub struct CompiledCheck {
+    check: Check,
+    rules: Vec<Rule>,
+}
+
+impl CompiledCheck {
+    /// Compiles `check`'s assertions.
+    ///
+    /// # Errors
+    ///
+    /// Why an assertion does not compile: it does not hold exactly one
+    /// condition with exactly one matcher, or its JSON path or regular
+    /// expression does not parse. `config::load` reports each of these,
+    /// with its location, first, so every check of a loaded configuration
+    /// compiles.
+    pub fn new(check: Check) -> Result<Self, String> {
+        let rules = check
+            .assertions
+            .iter()
+            .enumerate()
+            .map(|(index, assertion)| {
+                Rule::new(assertion).map_err(|error| {
+                    format!("check `{}`, assertion {}: {error}", check.id, index + 1)
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(CompiledCheck { check, rules })
+    }
+
+    /// The check as configured.
+    #[must_use]
+    pub fn check(&self) -> &Check {
+        &self.check
+    }
+}
+
+/// Parses an RFC 9535 JSON path, explaining why it does not parse.
+pub(crate) fn json_path(path: &str) -> Result<JsonPath, String> {
+    JsonPath::parse(path).map_err(|error| format!("`{path}` is not a JSONPath: {error}"))
+}
+
+/// Compiles a regular expression, explaining why it does not compile.
+pub(crate) fn regular_expression(pattern: &str) -> Result<Regex, String> {
+    Regex::new(pattern).map_err(|error| format!("`{pattern}` is not a regular expression: {error}"))
+}
+
+/// One compiled assertion.
+#[derive(Debug, Clone)]
+struct Rule {
+    key: &'static str,
+    expected: Value,
+    on_fail: FailureState,
+    test: Test,
+}
+
+/// What a compiled assertion tests.
+#[derive(Debug, Clone)]
+enum Test {
+    Status(Vec<u16>),
+    LatencyMilliseconds(Comparison),
+    Json(JsonPath, JsonTest),
+    Body(TextTest),
+    Header(HeaderAssertion),
+    CertificateDaysRemaining(Comparison),
+    HostnameValid(bool),
+    ChainValid(bool),
+    Records(RecordsAssertion),
+    Banner(TextTest),
+}
+
+/// A `json` assertion's one matcher.
+#[derive(Debug, Clone)]
+enum JsonTest {
+    Eq(Value),
+    Ne(Value),
+    Exists(bool),
+    Contains(String),
+}
+
+/// A `body` or `banner` assertion's one matcher.
+#[derive(Debug, Clone)]
+enum TextTest {
+    Contains(String),
+    NotContains(String),
+    Regex(Regex),
+}
+
+impl Rule {
+    fn new(assertion: &Assertion) -> Result<Self, String> {
+        let conditions = assertion.conditions();
+        let [condition] = conditions.as_slice() else {
+            return Err(format!(
+                "an assertion holds one condition, and this one has {}",
+                conditions.len()
+            ));
+        };
+        let (expected, test) = match *condition {
+            Condition::Status(codes) => (json!(codes), Test::Status(codes.to_vec())),
+            Condition::LatencyMilliseconds(comparison) => {
+                (json!(comparison), Test::LatencyMilliseconds(*comparison))
+            }
+            Condition::Json(json) => (
+                json!(json),
+                Test::Json(json_path(&json.path)?, JsonTest::new(json)?),
+            ),
+            Condition::Body(text) => (json!(text), Test::Body(TextTest::new(text)?)),
+            Condition::Header(header) => (json!(header), Test::Header(header.clone())),
+            Condition::CertificateDaysRemaining(comparison) => (
+                json!(comparison),
+                Test::CertificateDaysRemaining(*comparison),
+            ),
+            Condition::HostnameValid(wanted) => (json!(wanted), Test::HostnameValid(wanted)),
+            Condition::ChainValid(wanted) => (json!(wanted), Test::ChainValid(wanted)),
+            Condition::Records(records) => (json!(records), Test::Records(records.clone())),
+            Condition::Banner(text) => (json!(text), Test::Banner(TextTest::new(text)?)),
+        };
+        Ok(Rule {
+            key: condition.key(),
+            expected,
+            on_fail: assertion.on_fail,
+            test,
+        })
+    }
+}
+
+impl JsonTest {
+    fn new(json: &JsonAssertion) -> Result<Self, String> {
+        match (&json.eq, &json.ne, json.exists, &json.contains) {
+            (Some(wanted), None, None, None) => Ok(JsonTest::Eq(wanted.clone())),
+            (None, Some(unwanted), None, None) => Ok(JsonTest::Ne(unwanted.clone())),
+            (None, None, Some(wanted), None) => Ok(JsonTest::Exists(wanted)),
+            (None, None, None, Some(needle)) => Ok(JsonTest::Contains(needle.clone())),
+            _ => Err("give exactly one of eq, ne, exists or contains".to_owned()),
+        }
+    }
+}
+
+impl TextTest {
+    fn new(text: &TextAssertion) -> Result<Self, String> {
+        match (&text.contains, &text.not_contains, &text.regex) {
+            (Some(needle), None, None) => Ok(TextTest::Contains(needle.clone())),
+            (None, Some(needle), None) => Ok(TextTest::NotContains(needle.clone())),
+            (None, None, Some(pattern)) => regular_expression(pattern).map(TextTest::Regex),
+            _ => Err("give exactly one of contains, not_contains or regex".to_owned()),
+        }
+    }
+}
+
 /// Every assertion's verdict on `facts`. A check with no assertions gets
 /// its type's implicit ones: a 2xx or 3xx status for `http`, `NOERROR` for
 /// `dns`, a certificate that verifies for the host for `tls`, and none
 /// (completing is enough) for `tcp` and `icmp`.
 #[must_use]
-pub fn evaluate(check: &Check, facts: &Facts) -> Vec<AssertionVerdict> {
-    if check.assertions.is_empty() {
+pub fn evaluate(check: &CompiledCheck, facts: &Facts) -> Vec<AssertionVerdict> {
+    if check.rules.is_empty() {
         return implicit(facts);
     }
     check
-        .assertions
+        .rules
         .iter()
-        .map(|assertion| {
-            let condition = assertion.condition();
+        .map(|rule| {
             let Evaluation {
-                expected,
                 actual,
                 passed,
                 message,
-            } = evaluate_condition(&condition, facts);
+            } = rule.test.evaluate(facts);
             AssertionVerdict {
-                condition: condition.key().to_owned(),
-                expected,
+                condition: rule.key.to_owned(),
+                expected: rule.expected.clone(),
                 actual,
                 passed,
-                on_fail: assertion.on_fail,
+                on_fail: rule.on_fail,
                 implicit: false,
                 message,
             }
@@ -343,25 +504,22 @@ pub fn evaluate(check: &Check, facts: &Facts) -> Vec<AssertionVerdict> {
 }
 
 struct Evaluation {
-    expected: Value,
     actual: Value,
     passed: bool,
     message: Option<String>,
 }
 
 impl Evaluation {
-    fn new(expected: Value, actual: Value, passed: bool) -> Self {
+    fn new(actual: Value, passed: bool) -> Self {
         Evaluation {
-            expected,
             actual,
             passed,
             message: None,
         }
     }
 
-    fn unavailable(expected: Value, message: impl Into<String>) -> Self {
+    fn unavailable(message: impl Into<String>) -> Self {
         Evaluation {
-            expected,
             actual: Value::Null,
             passed: false,
             message: Some(message.into()),
@@ -411,86 +569,77 @@ fn implicit(facts: &Facts) -> Vec<AssertionVerdict> {
     }
 }
 
-fn evaluate_condition(condition: &Condition<'_>, facts: &Facts) -> Evaluation {
-    match condition {
-        Condition::Status(codes) => match facts {
-            Facts::Http(http) => Evaluation::new(
-                json!(codes),
-                json!(http.status),
-                codes.contains(&http.status),
-            ),
-            _ => Evaluation::unavailable(json!(codes), "the result has no HTTP status"),
-        },
-        Condition::LatencyMilliseconds(comparison) => {
-            let latency = facts.latency_ms();
-            Evaluation::new(
-                json!(comparison),
-                json!(latency),
-                comparison.holds(i64::try_from(latency).unwrap_or(i64::MAX)),
-            )
-        }
-        Condition::Json(assertion) => match facts {
-            Facts::Http(http) => evaluate_json(assertion, http),
-            _ => Evaluation::unavailable(json!(assertion), "the result has no response body"),
-        },
-        Condition::Body(text) => match facts {
-            Facts::Http(http) => evaluate_text(text, Some(&http.body)),
-            _ => Evaluation::unavailable(json!(text), "the result has no response body"),
-        },
-        Condition::Banner(text) => match facts {
-            Facts::Tcp(tcp) => evaluate_text(text, tcp.banner.as_deref()),
-            _ => Evaluation::unavailable(json!(text), "the result has no banner"),
-        },
-        Condition::Header(header) => match facts {
-            Facts::Http(http) => evaluate_header(header, http),
-            _ => Evaluation::unavailable(json!(header), "the result has no headers"),
-        },
-        Condition::CertificateDaysRemaining(comparison) => {
-            certificate(json!(comparison), facts, |certificate| {
-                (
-                    json!(certificate.days_remaining),
-                    comparison.holds(certificate.days_remaining),
+impl Test {
+    fn evaluate(&self, facts: &Facts) -> Evaluation {
+        match self {
+            Test::Status(codes) => match facts {
+                Facts::Http(http) => {
+                    Evaluation::new(json!(http.status), codes.contains(&http.status))
+                }
+                _ => Evaluation::unavailable("the result has no HTTP status"),
+            },
+            Test::LatencyMilliseconds(comparison) => {
+                let latency = facts.latency_ms();
+                Evaluation::new(
+                    json!(latency),
+                    comparison.holds(i64::try_from(latency).unwrap_or(i64::MAX)),
                 )
-            })
+            }
+            Test::Json(path, test) => match facts {
+                Facts::Http(http) => evaluate_json(path, test, http),
+                _ => Evaluation::unavailable("the result has no response body"),
+            },
+            Test::Body(text) => match facts {
+                Facts::Http(http) => evaluate_text(text, Some(&http.body)),
+                _ => Evaluation::unavailable("the result has no response body"),
+            },
+            Test::Banner(text) => match facts {
+                Facts::Tcp(tcp) => evaluate_text(text, tcp.banner.as_deref()),
+                _ => Evaluation::unavailable("the result has no banner"),
+            },
+            Test::Header(header) => match facts {
+                Facts::Http(http) => evaluate_header(header, http),
+                _ => Evaluation::unavailable("the result has no headers"),
+            },
+            Test::CertificateDaysRemaining(comparison) => {
+                certificate(facts, |certificate| match certificate.days_remaining {
+                    Some(days) => Evaluation::new(json!(days), comparison.holds(days)),
+                    None => Evaluation::unavailable(
+                        "the certificate's expiry is unavailable: the server's certificate could not be parsed",
+                    ),
+                })
+            }
+            Test::HostnameValid(wanted) => certificate(facts, |certificate| {
+                Evaluation::new(
+                    json!(certificate.hostname_valid),
+                    certificate.hostname_valid == *wanted,
+                )
+            }),
+            Test::ChainValid(wanted) => certificate(facts, |certificate| {
+                Evaluation::new(
+                    json!(certificate.chain_valid),
+                    certificate.chain_valid == *wanted,
+                )
+            }),
+            Test::Records(records) => match facts {
+                Facts::Dns(dns) => evaluate_records(records, dns.record_type, &dns.answers),
+                _ => Evaluation::unavailable("the result has no DNS answers"),
+            },
         }
-        Condition::HostnameValid(wanted) => certificate(json!(wanted), facts, |certificate| {
-            (
-                json!(certificate.hostname_valid),
-                certificate.hostname_valid == *wanted,
-            )
-        }),
-        Condition::ChainValid(wanted) => certificate(json!(wanted), facts, |certificate| {
-            (
-                json!(certificate.chain_valid),
-                certificate.chain_valid == *wanted,
-            )
-        }),
-        Condition::Records(records) => match facts {
-            Facts::Dns(dns) => evaluate_records(records, &dns.answers),
-            _ => Evaluation::unavailable(json!(records), "the result has no DNS answers"),
-        },
     }
 }
 
-fn certificate(
-    expected: Value,
-    facts: &Facts,
-    test: impl FnOnce(&CertificateFacts) -> (Value, bool),
-) -> Evaluation {
+fn certificate(facts: &Facts, test: impl FnOnce(&CertificateFacts) -> Evaluation) -> Evaluation {
     match facts.certificate() {
-        Some(certificate) => {
-            let (actual, passed) = test(certificate);
-            Evaluation::new(expected, actual, passed)
-        }
-        None => Evaluation::unavailable(expected, "the result has no certificate"),
+        Some(certificate) => test(certificate),
+        None => Evaluation::unavailable("the result has no certificate"),
     }
 }
 
 /// `eq`, `ne` and `contains` test the first value the path selects, in
 /// document order; `exists` tests whether it selects any. A path that
 /// selects nothing fails every matcher but `exists = false`.
-fn evaluate_json(assertion: &JsonAssertion, http: &HttpFacts) -> Evaluation {
-    let expected = json!(assertion);
+fn evaluate_json(path: &JsonPath, test: &JsonTest, http: &HttpFacts) -> Evaluation {
     let document: Value = match serde_json::from_str(&http.body) {
         Ok(document) => document,
         Err(error) => {
@@ -499,64 +648,42 @@ fn evaluate_json(assertion: &JsonAssertion, http: &HttpFacts) -> Evaluation {
             } else {
                 String::new()
             };
-            return Evaluation::unavailable(
-                expected,
-                format!("the body is not JSON: {error}{truncated}"),
-            );
-        }
-    };
-    let path = match serde_json_path::JsonPath::parse(&assertion.path) {
-        Ok(path) => path,
-        Err(error) => {
-            return Evaluation::unavailable(expected, format!("not a JSONPath: {error}"));
+            return Evaluation::unavailable(format!("the body is not JSON: {error}{truncated}"));
         }
     };
     let nodes = path.query(&document);
-    if let Some(wanted) = assertion.exists {
-        let found = !nodes.is_empty();
-        return Evaluation::new(expected, json!(found), found == wanted);
+    match (test, nodes.first()) {
+        (JsonTest::Exists(wanted), first) => {
+            let found = first.is_some();
+            Evaluation::new(json!(found), found == *wanted)
+        }
+        (_, None) => Evaluation::unavailable("the path selects nothing"),
+        (JsonTest::Eq(wanted), Some(first)) => Evaluation::new((*first).clone(), *first == *wanted),
+        (JsonTest::Ne(unwanted), Some(first)) => {
+            Evaluation::new((*first).clone(), *first != *unwanted)
+        }
+        (JsonTest::Contains(needle), Some(first)) => Evaluation::new(
+            (*first).clone(),
+            first
+                .as_str()
+                .is_some_and(|text| text.contains(needle.as_str())),
+        ),
     }
-    let Some(first) = nodes.first() else {
-        return Evaluation::unavailable(expected, "the path selects nothing");
-    };
-    let passed = if let Some(wanted) = &assertion.eq {
-        first == wanted
-    } else if let Some(unwanted) = &assertion.ne {
-        first != unwanted
-    } else if let Some(needle) = &assertion.contains {
-        first
-            .as_str()
-            .is_some_and(|text| text.contains(needle.as_str()))
-    } else {
-        false
-    };
-    Evaluation::new(expected, first.clone(), passed)
 }
 
-fn evaluate_text(assertion: &TextAssertion, text: Option<&str>) -> Evaluation {
-    let expected = json!(assertion);
+fn evaluate_text(matcher: &TextTest, text: Option<&str>) -> Evaluation {
     let Some(text) = text else {
-        return Evaluation::unavailable(expected, "nothing was received");
+        return Evaluation::unavailable("nothing was received");
     };
-    let passed = if let Some(needle) = &assertion.contains {
-        text.contains(needle.as_str())
-    } else if let Some(needle) = &assertion.not_contains {
-        !text.contains(needle.as_str())
-    } else if let Some(pattern) = &assertion.regex {
-        match regex::Regex::new(pattern) {
-            Ok(regex) => regex.is_match(text),
-            Err(error) => {
-                return Evaluation::unavailable(expected, format!("not a regex: {error}"));
-            }
-        }
-    } else {
-        false
+    let passed = match matcher {
+        TextTest::Contains(needle) => text.contains(needle.as_str()),
+        TextTest::NotContains(needle) => !text.contains(needle.as_str()),
+        TextTest::Regex(regex) => regex.is_match(text),
     };
-    Evaluation::new(expected, json!(quote(text)), passed)
+    Evaluation::new(json!(quote(text)), passed)
 }
 
 fn evaluate_header(assertion: &HeaderAssertion, http: &HttpFacts) -> Evaluation {
-    let expected = json!(assertion);
     let values = http.headers.get(&assertion.name.to_ascii_lowercase());
     let actual = values.map_or(Value::Null, |values| json!(values));
     let any = |test: &dyn Fn(&str) -> bool| {
@@ -571,22 +698,20 @@ fn evaluate_header(assertion: &HeaderAssertion, http: &HttpFacts) -> Evaluation 
     } else {
         false
     };
-    Evaluation::new(expected, actual, passed)
+    Evaluation::new(actual, passed)
 }
 
-fn evaluate_records(assertion: &RecordsAssertion, answers: &[String]) -> Evaluation {
-    let expected = json!(assertion);
-    let found: Vec<String> = answers
-        .iter()
-        .map(|answer| normalize_record(answer))
-        .collect();
+fn evaluate_records(
+    assertion: &RecordsAssertion,
+    record_type: RecordType,
+    answers: &[String],
+) -> Evaluation {
+    let normalize = |record: &String| normalize_record(record, record_type);
+    let found: Vec<String> = answers.iter().map(normalize).collect();
     let passed = if let Some(wanted) = &assertion.contains {
-        found.contains(&normalize_record(wanted))
+        found.contains(&normalize(wanted))
     } else if let Some(wanted) = &assertion.eq {
-        let mut wanted: Vec<String> = wanted
-            .iter()
-            .map(|record| normalize_record(record))
-            .collect();
+        let mut wanted: Vec<String> = wanted.iter().map(normalize).collect();
         let mut found = found.clone();
         wanted.sort();
         wanted.dedup();
@@ -596,16 +721,24 @@ fn evaluate_records(assertion: &RecordsAssertion, answers: &[String]) -> Evaluat
     } else {
         false
     };
-    Evaluation::new(expected, json!(answers), passed)
+    Evaluation::new(json!(answers), passed)
 }
 
 /// A record as compared: an IP address in its canonical form, anything
-/// else without a trailing `.`.
-fn normalize_record(record: &str) -> String {
+/// else without a trailing `.`. Records that hold a domain name (CNAME,
+/// MX, NS and SRV) are lowercased, since names match without regard to
+/// case; TXT and CAA text keeps its case.
+fn normalize_record(record: &str, record_type: RecordType) -> String {
     let record = record.trim();
-    match record.parse::<std::net::IpAddr>() {
-        Ok(address) => address.to_string(),
-        Err(_) => record.strip_suffix('.').unwrap_or(record).to_owned(),
+    if let Ok(address) = record.parse::<std::net::IpAddr>() {
+        return address.to_string();
+    }
+    let record = record.strip_suffix('.').unwrap_or(record);
+    match record_type {
+        RecordType::Cname | RecordType::Mx | RecordType::Ns | RecordType::Srv => {
+            record.to_ascii_lowercase()
+        }
+        RecordType::A | RecordType::Aaaa | RecordType::Txt | RecordType::Caa => record.to_owned(),
     }
 }
 
@@ -675,10 +808,10 @@ mod health_serde {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Assertion;
 
-    fn check(toml: &str) -> Check {
-        toml::from_str(toml).expect("a valid check")
+    fn check(toml: &str) -> CompiledCheck {
+        CompiledCheck::new(toml::from_str(toml).expect("a valid check"))
+            .expect("a check that compiles")
     }
 
     fn http(status: u16, body: &str) -> Facts {
@@ -711,7 +844,7 @@ mod tests {
       ]
     }"#;
 
-    fn statuspage_check(component: &str, on_fail: &str) -> Check {
+    fn statuspage_check(component: &str, on_fail: &str) -> CompiledCheck {
         check(&format!(
             r#"
             id = "github"
@@ -907,8 +1040,8 @@ mod tests {
         let certificate = CertificateFacts {
             server_name: "a.example".into(),
             chain: Vec::new(),
-            expires_in_seconds: 10 * 86_400,
-            days_remaining: 10,
+            expires_in_seconds: Some(10 * 86_400),
+            days_remaining: Some(10),
             chain_valid: true,
             chain_error: None,
             hostname_valid: false,
@@ -930,6 +1063,132 @@ mod tests {
         assert_eq!(passed, [false, false, true]);
         assert_eq!(health_of(&verdicts), Health::Down);
         assert_eq!(health_of(&implicit(&tls)), Health::Down);
+    }
+
+    /// Names match without regard to case; TXT keeps its case.
+    #[test]
+    fn name_records_ignore_case() {
+        let answers = |record_type: RecordType, answers: &[&str]| {
+            Facts::Dns(DnsFacts {
+                latency_ms: 3,
+                resolver: "192.0.2.53:53".into(),
+                record_type,
+                rcode: "NOERROR".into(),
+                answers: answers.iter().map(|answer| (*answer).to_owned()).collect(),
+            })
+        };
+        let passes = |record_type: &str, assertion: &str, facts: &Facts| {
+            let check = check(&format!(
+                "id = \"a\"\ntype = \"dns\"\ntarget = \"a.example\"\n\
+                 [dns]\nrecord_type = \"{record_type}\"\n[[assert]]\n{assertion}"
+            ));
+            evaluate(&check, facts)[0].passed
+        };
+        let cname = answers(RecordType::Cname, &["Edge.Example.NET."]);
+        assert!(passes(
+            "CNAME",
+            r#"records = { contains = "edge.example.net" }"#,
+            &cname
+        ));
+        assert!(passes(
+            "CNAME",
+            r#"records = { eq = ["EDGE.example.net"] }"#,
+            &cname
+        ));
+        let mx = answers(RecordType::Mx, &["10 Mail.Example.com."]);
+        assert!(passes(
+            "MX",
+            r#"records = { contains = "10 mail.example.com" }"#,
+            &mx
+        ));
+        let ns = answers(RecordType::Ns, &["NS1.Example.com."]);
+        assert!(passes(
+            "NS",
+            r#"records = { contains = "ns1.example.com" }"#,
+            &ns
+        ));
+        let srv = answers(RecordType::Srv, &["10 5 5060 SIP.Example.com."]);
+        assert!(passes(
+            "SRV",
+            r#"records = { contains = "10 5 5060 sip.example.com" }"#,
+            &srv
+        ));
+        let txt = answers(RecordType::Txt, &["v=spf1 -ALL"]);
+        assert!(passes(
+            "TXT",
+            r#"records = { contains = "v=spf1 -ALL" }"#,
+            &txt
+        ));
+        assert!(!passes(
+            "TXT",
+            r#"records = { contains = "v=spf1 -all" }"#,
+            &txt
+        ));
+    }
+
+    /// A certificate whose expiry could not be read fails its
+    /// `certificate_days_remaining` assertion as unavailable, with its
+    /// `on_fail`, rather than reading as zero days.
+    #[test]
+    fn an_unreadable_expiry_is_unavailable() {
+        let tls = Facts::Tls(TlsFacts {
+            latency_ms: 5,
+            certificate: CertificateFacts {
+                server_name: "a.example".into(),
+                chain: Vec::new(),
+                expires_in_seconds: None,
+                days_remaining: None,
+                chain_valid: true,
+                chain_error: None,
+                hostname_valid: true,
+            },
+        });
+        let verdicts = evaluate(
+            &check(
+                "id = \"a\"\ntype = \"tls\"\ntarget = \"a.example\"\n\
+                 [[assert]]\ncertificate_days_remaining = { lt = 1 }\non_fail = \"degraded\"",
+            ),
+            &tls,
+        );
+        assert!(!verdicts[0].passed);
+        assert_eq!(verdicts[0].actual, Value::Null);
+        assert!(
+            verdicts[0]
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("unavailable"),
+            "{verdicts:?}"
+        );
+        assert_eq!(health_of(&verdicts), Health::Degraded);
+    }
+
+    /// Compiling reports what `config::load` would; a loaded check always
+    /// compiles.
+    #[test]
+    fn checks_that_do_not_compile() {
+        let compile = |assertion: &str| {
+            let check: Check = toml::from_str(&format!(
+                "id = \"a\"\ntype = \"http\"\ntarget = \"https://a.example\"\n[[assert]]\n{assertion}"
+            ))
+            .unwrap();
+            CompiledCheck::new(check).map(|_| ()).unwrap_err()
+        };
+        assert_eq!(
+            compile(r#"body = { regex = "(unclosed" }"#),
+            "check `a`, assertion 1: `(unclosed` is not a regular expression: regex parse error:\n    (unclosed\n    ^\nerror: unclosed group"
+        );
+        assert!(
+            compile(r#"json = { path = "$.a[", eq = 1 }"#).contains("`$.a[` is not a JSONPath")
+        );
+        assert_eq!(
+            compile(r#"json = { path = "$.a", eq = 1, ne = 2 }"#),
+            "check `a`, assertion 1: give exactly one of eq, ne, exists or contains"
+        );
+        assert_eq!(
+            compile(r#"banner = { contains = "a", regex = "a" }"#),
+            "check `a`, assertion 1: give exactly one of contains, not_contains or regex"
+        );
     }
 
     #[test]
@@ -956,7 +1215,7 @@ mod tests {
     fn outcomes_serialize() {
         let check = check("id = \"a\"\ntype = \"http\"\ntarget = \"https://a.example\"");
         let outcome = ProbeOutcome::failed(
-            &check,
+            check.check(),
             0,
             10_000,
             ProbeError::new(ProbeErrorKind::Timeout, "no response within 10s"),

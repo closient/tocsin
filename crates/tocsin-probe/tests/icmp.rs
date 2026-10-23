@@ -5,7 +5,9 @@
 //! An ICMP socket needs `net.ipv4.ping_group_range` to include the test's
 //! group, or `CAP_NET_RAW`. Where neither is available the probe returns a
 //! setup error; that error is asserted and the reply check is skipped with
-//! the reason logged, rather than passing silently.
+//! the reason logged, rather than passing silently. Under CI (`CI` set) the
+//! test fails instead of skipping, so a green CI run means the echo really
+//! went to 127.0.0.1 and came back.
 
 mod support;
 
@@ -44,6 +46,11 @@ latency_ms = { lt = 1000 }
         );
         assert!(error.message.contains("CAP_NET_RAW"), "{}", error.message);
         assert_eq!(outcome.health, Health::Down);
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI must be able to open an ICMP socket, but: {}",
+            error.message
+        );
         eprintln!(
             "SKIPPED icmp reply check: this sandbox cannot open an ICMP socket: {}",
             error.message

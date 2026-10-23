@@ -99,8 +99,8 @@ impl Server {
     fn start() -> Self {
         // The check must not run while the test reads: its first run is
         // its jitter after the start.
-        let jitter = tocsin_core::state::jitter("api-https", Duration::from_secs(86_400));
-        assert!(jitter > Duration::from_secs(600), "{jitter:?}");
+        let jitter = tocsin_core::state::jitter("api-https", Duration::from_hours(24));
+        assert!(jitter > Duration::from_mins(10), "{jitter:?}");
 
         let config = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
@@ -182,7 +182,7 @@ fn redact(value: &mut Value, url: &str) {
     match value {
         Value::String(text) => {
             if text.parse::<Timestamp>().is_ok() {
-                *text = "[time]".to_owned();
+                "[time]".clone_into(text);
             } else {
                 *text = text.replace(url, "[url]");
             }

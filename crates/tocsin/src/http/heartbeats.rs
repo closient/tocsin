@@ -221,6 +221,7 @@ async fn ping(
             PingError::Stopped => ApiError::unavailable("the server is shutting down"),
             PingError::NotStored => ApiError::internal(&error),
         })?;
+    state.metrics.checks.pinged(&id, received_at);
     tracing::debug!(heartbeat = %id, ?status, actor = %auth.actor, "heartbeat ping");
     Ok((
         StatusCode::ACCEPTED,

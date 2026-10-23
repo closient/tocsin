@@ -30,6 +30,8 @@
 - [HTTP API](api.md), described by the OpenAPI document
   [`schema/openapi.json`](../schema/openapi.json); a running server serves
   it at `/api/v1/openapi.json`, and `tocsin openapi` prints it.
+- [Prometheus metrics](metrics.md): `/metrics`, its labels, and alert
+  rules to start from.
 - [Operating tocsin with a coding agent](agent-guide.md): the JSON and
   exit-code contract, and the edit, check, probe loop.
 

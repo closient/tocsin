@@ -17,9 +17,7 @@ use hyper_util::rt::TokioIo;
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 use serde_json::json;
-use tocsin_alert::{
-    AlertMetrics, Alerter, AlertingHistory, HTTP_TIMEOUT, Notifiers, Router, WorkerSettings,
-};
+use tocsin_alert::{Alerter, AlertingHistory, HTTP_TIMEOUT, Notifiers, Router, WorkerSettings};
 use tocsin_core::config::Config;
 use tocsin_engine::ports::{Clock, History, ProbeRunner, SystemClock};
 use tocsin_engine::{Engine, HeartbeatHandle, Parts, Plan, StatusHandle};
@@ -36,7 +34,7 @@ use crate::exit::Exit;
 use crate::http::events::{EventBus, wake_on_incident_changes};
 use crate::http::{self, AppState};
 use crate::lock;
-use crate::metrics::Metrics;
+use crate::metrics::{Metered, Metrics};
 use crate::output::{Failure, Report};
 use crate::reload::{ConfigStatus, LiveRouter, Reloader, Reloading};
 use crate::web::identity::AdminAuth;
@@ -139,12 +137,12 @@ async fn serve(
         Failure::new(Exit::Runtime, format!("cannot listen on {listen}: {error}"))
     })?;
     let events = EventBus::new();
-    let metrics = Metrics::new();
+    let metrics = Arc::new(Metrics::new());
     let (monitor, maintenance) = match start_checks(
         config,
         &store,
         &events,
-        &metrics.alerting,
+        &metrics,
         Retention::days(retention_days),
     )
     .await
@@ -164,6 +162,7 @@ async fn serve(
         live: Arc::new(monitor.status_handle()),
         heartbeats: monitor.heartbeats(),
         config_status,
+        metrics: Arc::clone(&metrics),
     };
     let app = LiveRouter::new(http::router(state.clone()));
     let service = app.service();
@@ -241,7 +240,7 @@ impl Monitor {
         config: &Config,
         store: &Arc<Store>,
         events: &EventBus,
-        metrics: &AlertMetrics,
+        metrics: &Metrics,
     ) -> Result<Self, Failure> {
         Self::start_with(config, store, events, metrics, |history| history).await
     }
@@ -252,7 +251,7 @@ impl Monitor {
         config: &Config,
         store: &Arc<Store>,
         events: &EventBus,
-        metrics: &AlertMetrics,
+        metrics: &Metrics,
         wrap: impl FnOnce(Arc<dyn History>) -> Arc<dyn History>,
     ) -> Result<Self, Failure> {
         let plan = Plan::from_config(config).map_err(|error| {
@@ -291,7 +290,7 @@ impl Monitor {
             notifiers.clone(),
             Arc::clone(&router),
             Arc::clone(&clock),
-            metrics.clone(),
+            metrics.alerting.clone(),
             WorkerSettings::default(),
         );
         let history = Arc::new(AlertingHistory::new(
@@ -301,7 +300,11 @@ impl Monitor {
             clock,
         ));
         let parts = Parts {
-            runner: Arc::new(ProbeRunner::new(probe_context(config))),
+            runner: Arc::new(Metered::new(
+                ProbeRunner::new(probe_context(config)),
+                metrics.checks.clone(),
+                plan.node_id().to_owned(),
+            )),
             history: wrap(Arc::clone(&history) as _),
             notices: Arc::clone(store) as _,
             sink: Arc::new(events.clone()),
@@ -739,7 +742,7 @@ pub(crate) async fn start_checks(
     config: &Config,
     store: &Arc<Store>,
     events: &EventBus,
-    metrics: &AlertMetrics,
+    metrics: &Metrics,
     retention: Retention,
 ) -> Result<(Monitor, JoinHandle<()>), Failure> {
     maintenance_pass(store, retention).await;
@@ -846,7 +849,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        AlertMetrics, Connections, Grace, Monitor, ReloadError, close, spawn_server, start_checks,
+        Connections, Grace, Metrics, Monitor, ReloadError, close, spawn_server, start_checks,
         supervise,
     };
     use crate::exit::Exit;
@@ -967,6 +970,7 @@ mod tests {
             live: Arc::new(tocsin_engine::Snapshot::default()),
             heartbeats: tocsin_engine::HeartbeatHandle::default(),
             config_status: crate::reload::steady_status(),
+            metrics: Arc::new(crate::metrics::Metrics::new()),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1237,7 +1241,8 @@ mod tests {
         let config = Arc::new(config);
         let events = EventBus::new();
         let mut seen = events.subscribe();
-        let monitor = Monitor::start(&config, &store, &events, &AlertMetrics::default())
+        let metrics = Arc::new(Metrics::new());
+        let monitor = Monitor::start(&config, &store, &events, &metrics)
             .await
             .unwrap();
         let app = http::router(AppState {
@@ -1248,6 +1253,7 @@ mod tests {
             live: Arc::new(monitor.engine.status_handle()),
             heartbeats: monitor.heartbeats(),
             config_status: crate::reload::steady_status(),
+            metrics,
         });
 
         let body = json!({
@@ -1342,7 +1348,7 @@ mod tests {
             &config,
             &store,
             &EventBus::new(),
-            &AlertMetrics::default(),
+            &Metrics::new(),
             Retention::days(90),
         )
         .await
@@ -1420,7 +1426,7 @@ mod tests {
         ));
         let events = EventBus::new();
         let mut seen = events.subscribe();
-        let monitor = Monitor::start(&both, &store, &events, &AlertMetrics::default())
+        let monitor = Monitor::start(&both, &store, &events, &Metrics::new())
             .await
             .unwrap();
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -1438,7 +1444,7 @@ mod tests {
         assert_eq!(open_alerts().await, ["gone", "kept"]);
 
         let one = parse(&format!("{check}{}{}", notifier("kept"), route("\"kept\"")));
-        let mut monitor = Monitor::start(&one, &store, &events, &AlertMetrics::default())
+        let mut monitor = Monitor::start(&one, &store, &events, &Metrics::new())
             .await
             .unwrap();
         assert_eq!(open_alerts().await, ["kept"], "ended at startup");
@@ -1564,17 +1570,16 @@ mod tests {
         let events = EventBus::new();
         let mut seen = events.subscribe();
         let history = Arc::new(Mutex::new(None::<Arc<FailingReads>>));
-        let mut monitor =
-            Monitor::start_with(&old, &store, &events, &AlertMetrics::default(), |inner| {
-                let failing = Arc::new(FailingReads {
-                    history: inner,
-                    failing: AtomicUsize::new(0),
-                });
-                *history.lock().unwrap() = Some(Arc::clone(&failing));
-                failing
-            })
-            .await
-            .unwrap();
+        let mut monitor = Monitor::start_with(&old, &store, &events, &Metrics::new(), |inner| {
+            let failing = Arc::new(FailingReads {
+                history: inner,
+                failing: AtomicUsize::new(0),
+            });
+            *history.lock().unwrap() = Some(Arc::clone(&failing));
+            failing
+        })
+        .await
+        .unwrap();
         let mut reached = async |health: Health| {
             tokio::time::timeout(Duration::from_secs(10), async {
                 loop {

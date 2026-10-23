@@ -159,6 +159,7 @@ fn site(more: &str) -> Site {
         live: Arc::new(snapshot()),
         heartbeats: HeartbeatHandle::default(),
         config_status: crate::reload::steady_status(),
+        metrics: Arc::new(crate::metrics::Metrics::new()),
     };
     Site {
         _dir: dir,

@@ -19,11 +19,14 @@ pub mod heartbeats;
 pub mod history;
 pub mod incidents;
 pub mod llms;
+pub mod metrics;
 pub mod openapi;
 pub mod releases;
 pub mod status;
 pub mod timeline;
 
+#[cfg(test)]
+mod metrics_tests;
 #[cfg(test)]
 mod read_tests;
 #[cfg(test)]
@@ -46,6 +49,7 @@ use tokio::sync::watch;
 
 use self::error::ApiError;
 use self::events::EventBus;
+use crate::metrics::Metrics;
 use crate::reload::ConfigStatus;
 use crate::web::{self, identity::AdminAuth};
 
@@ -67,6 +71,8 @@ pub struct AppState {
     pub live: Arc<dyn LiveStatus>,
     /// How the configuration last reloaded.
     pub config_status: watch::Receiver<ConfigStatus>,
+    /// Every metric, served at `/metrics`.
+    pub metrics: Arc<Metrics>,
 }
 
 /// Where the read API gets the current state of every check and
@@ -148,6 +154,7 @@ pub fn router(state: AppState) -> Router {
             }),
         )
         .route(llms::PATH, get(llms::get_llms_txt))
+        .route(metrics::PATH, get(metrics::get_metrics))
         .fallback(|| async { ApiError::not_found("no such route") })
         .method_not_allowed_fallback(|| async { ApiError::method_not_allowed() })
         .layer(DefaultBodyLimit::max(BODY_LIMIT))

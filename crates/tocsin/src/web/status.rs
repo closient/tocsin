@@ -32,7 +32,7 @@ use axum::Router;
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use jiff::tz::TimeZone;
 use serde::Deserialize;
@@ -44,6 +44,7 @@ use tocsin_core::status::ComponentState;
 use tocsin_store::{Day, Order};
 
 use super::assets;
+use super::feeds;
 use super::markdown;
 use super::page::{HtmlError, Layout};
 use super::releases::{Stamp, href as release_href, project_name, versions};
@@ -373,7 +374,7 @@ impl FromStr for Fragment {
 /// The time zone the pages show times in. `[page] timezone` was checked
 /// when the configuration loaded; UTC if it has since gone from the
 /// system's database.
-fn zone(config: &Config) -> TimeZone {
+pub(super) fn zone(config: &Config) -> TimeZone {
     TimeZone::get(&config.page.timezone).unwrap_or(TimeZone::UTC)
 }
 
@@ -390,11 +391,21 @@ fn base(config: &Config) -> &str {
 /// `template` as a cacheable HTML response, or 304 if `request` already
 /// holds this body.
 fn respond(request: &HeaderMap, cache: &'static str, template: &impl Template) -> Response {
-    let html = match template.render() {
-        Ok(html) => html,
-        Err(error) => return HtmlError::internal(&error).into_response(),
-    };
-    let digest = ring::digest::digest(&ring::digest::SHA256, html.as_bytes());
+    match template.render() {
+        Ok(html) => cached(request, cache, "text/html; charset=utf-8", html),
+        Err(error) => HtmlError::internal(&error).into_response(),
+    }
+}
+
+/// `body` as a cacheable response of `content_type`, with a strong `ETag`
+/// of the body, or 304 if `request` already holds it.
+pub(super) fn cached(
+    request: &HeaderMap,
+    cache: &'static str,
+    content_type: &'static str,
+    body: String,
+) -> Response {
+    let digest = ring::digest::digest(&ring::digest::SHA256, body.as_bytes());
     let tag = format!("\"{}\"", assets::hex(&digest.as_ref()[..16]));
     let fresh = request
         .get_all(header::IF_NONE_MATCH)
@@ -413,7 +424,12 @@ fn respond(request: &HeaderMap, cache: &'static str, template: &impl Template) -
     if fresh {
         (StatusCode::NOT_MODIFIED, headers).into_response()
     } else {
-        (headers, Html(html)).into_response()
+        (
+            headers,
+            [(header::CONTENT_TYPE, HeaderValue::from_static(content_type))],
+            body,
+        )
+            .into_response()
     }
 }
 
@@ -510,7 +526,7 @@ async fn uptime_rows(state: &AppState) -> Result<Vec<UptimeRow>, HtmlError> {
 }
 
 /// `[[component]]` `id`'s name; the id if it is no longer configured.
-fn component_name(config: &Config, id: &str) -> String {
+pub(super) fn component_name(config: &Config, id: &str) -> String {
     config
         .components
         .iter()
@@ -519,7 +535,7 @@ fn component_name(config: &Config, id: &str) -> String {
 }
 
 /// An incident status in words.
-fn status_text(status: IncidentStatus) -> String {
+pub(super) fn status_text(status: IncidentStatus) -> String {
     status.as_str().replace('_', " ")
 }
 
@@ -651,7 +667,7 @@ async fn index(State(state): State<AppState>, request: HeaderMap) -> Result<Resp
             .map(|incident| event(config, incident)),
     );
     let page = IndexPage {
-        layout: Layout::public(config.page.title.clone()),
+        layout: Layout::public(config.page.title.clone()).with_feeds(feeds::site(config)),
         chrome: Chrome::new(config, &json_ld).live(),
         events: EVENTS,
         banner: StatusLabel::overall(document.status),
@@ -736,7 +752,8 @@ async fn incident(
     let mut updates: Vec<_> = incident.updates.iter().collect();
     updates.sort_by_key(|update| std::cmp::Reverse((update.created_at, update.id)));
     let page = IncidentPage {
-        layout: Layout::public(format!("{} · {}", incident.title, config.page.title)),
+        layout: Layout::public(format!("{} · {}", incident.title, config.page.title))
+            .with_feeds(feeds::site(config)),
         chrome: Chrome::new(config, &json_ld),
         updates: updates
             .into_iter()
@@ -784,7 +801,8 @@ async fn history(
     }
     let json_ld = graph(web_page(config, "Incident history", &path), []);
     let page = HistoryPage {
-        layout: Layout::public(format!("Incident history · {}", config.page.title)),
+        layout: Layout::public(format!("Incident history · {}", config.page.title))
+            .with_feeds(feeds::site(config)),
         chrome: Chrome::new(config, &json_ld),
         cards: incidents
             .iter()
@@ -838,7 +856,8 @@ async fn component(
         zone: &zone,
     };
     let page = ComponentPage {
-        layout: Layout::public(format!("{name} · {}", config.page.title)),
+        layout: Layout::public(format!("{name} · {}", config.page.title))
+            .with_feeds(feeds::for_component(config, &id, &name)),
         chrome: Chrome::new(config, &json_ld),
         description: detail.component.description.clone(),
         group: detail.component.group.as_deref().map(|group| {

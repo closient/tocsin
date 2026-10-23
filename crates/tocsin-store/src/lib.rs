@@ -764,6 +764,18 @@ impl Store {
             .await
     }
 
+    /// Up to `limit` incidents and maintenance naming `[[component]]`
+    /// `component`, newest first.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn incidents_naming(&self, component: &str, limit: u32) -> Result<Vec<Incident>> {
+        let component = component.to_owned();
+        self.read(move |conn| incident::naming(conn, &component, limit))
+            .await
+    }
+
     /// Every incident not yet resolved and every maintenance not yet
     /// completed, oldest first: what the engine needs to derive component
     /// status. The schema keeps `resolved_at` set exactly when the status is

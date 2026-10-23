@@ -339,7 +339,7 @@ Something whose releases and deploys the release log records. CI pushes them; to
 | `description` | string | Optional. |
 | `url` | URL | Optional. The homepage or repository. |
 | `components` | list of component ids | Optional. The components this project's deploys belong to: a timeline filtered to one of them shows them. |
-| `public` | bool | Default `true`. Whether `/releases`, `/releases.atom` and the read API without a token show its releases and deploys. A non-public project's releases are seen only with a `status:read` token or on `/admin/timeline`. See [releases.md](releases.md). |
+| `public` | bool | Default `true`. Whether `/releases`, its feeds and the read API without a token show its releases and deploys. A non-public project's releases are seen only with a `status:read` token or on `/admin/timeline`. See [releases.md](releases.md). |
 
 ## `[[notifier]]`
 

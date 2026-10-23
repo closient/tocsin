@@ -20,6 +20,15 @@ pub struct Layout {
     pub stylesheet: &'static str,
     /// The signed-in person, shown in the header.
     pub signed_in: Option<String>,
+    /// The Atom feeds the page advertises to feed readers, most specific
+    /// first.
+    pub feeds: Vec<FeedLink>,
+}
+
+/// An Atom feed named in a page's `<head>` for feed readers to find.
+pub struct FeedLink {
+    pub title: String,
+    pub href: String,
 }
 
 impl Layout {
@@ -29,7 +38,15 @@ impl Layout {
             title: title.into(),
             stylesheet: assets::url("tocsin.css"),
             signed_in: None,
+            feeds: Vec::new(),
         }
+    }
+
+    /// The same, advertising `feeds`.
+    #[must_use]
+    pub fn with_feeds(mut self, feeds: Vec<FeedLink>) -> Self {
+        self.feeds = feeds;
+        self
     }
 
     /// A page for a signed-in person, who is named in the header. Admin
@@ -39,6 +56,7 @@ impl Layout {
             title: title.into(),
             stylesheet: assets::url("tocsin.css"),
             signed_in: Some(admin.email.clone()),
+            feeds: Vec::new(),
         }
     }
 }

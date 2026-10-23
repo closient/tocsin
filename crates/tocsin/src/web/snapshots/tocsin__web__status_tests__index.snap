@@ -10,6 +10,8 @@ expression: normalize(&page)
 <meta name="referrer" content="same-origin">
 <title>Example status</title>
 <link rel="stylesheet" href="/static/<hash>/tocsin.css">
+<link rel="alternate" type="application/atom+xml" title="Example status incidents" href="/feeds/incidents.atom">
+<link rel="alternate" type="application/atom+xml" title="Example status releases" href="/feeds/releases.atom">
 <meta name="description" content="Live status of Example&#39;s services.">
 <meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false,"selfRequestsOnly":true,"historyCacheSize":0}'>
 <script src="/static/<hash>/htmx.min.js" defer></script>

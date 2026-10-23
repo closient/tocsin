@@ -1,0 +1,13 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{#- An incident's content in a feed (web/feeds.rs): its state, then every
+    update, newest first. Messages are sanitized Markdown. -#}
+<p><strong>{{ status }}</strong>
+{%- if let Some(impact) = impact %} · {{ impact }} impact{% endif %}
+{%- if !components.is_empty() %} · {{ components }}{% endif %}</p>
+{%- if let Some(window) = window %}
+<p>Scheduled {{ window }}</p>
+{%- endif %}
+{%- for update in updates %}
+<h3>{{ update.status }} · <time datetime="{{ update.at.iso }}">{{ update.at.text }}</time></h3>
+{{ update.message_html|safe }}
+{%- endfor %}

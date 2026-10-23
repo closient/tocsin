@@ -103,6 +103,13 @@ async fn render(state: &AppState) -> Result<String, ApiError> {
 - [Checks]({base}/api/v1/checks): every check and heartbeat with its current health
 - [API reference]({DOCS_URL}): endpoints, tokens and the `tocsin` CLI
 
+## Feeds
+
+- [Incidents]({base}/feeds/incidents.atom): Atom, the latest incidents and maintenance
+- [One component's incidents]({base}/feeds/components/ID.atom): Atom, those naming component ID
+- [Releases]({base}/feeds/releases.atom): Atom, the latest versions of public projects
+- [One project's releases]({base}/feeds/releases/ID.atom): Atom, one public project's versions
+
 ## History
 
 Times are RFC 3339. `since` defaults as noted and reaches back at most 366 days; `limit` is 1 to 500, default 100. A page with more after it carries `next_before` (`next_after` on the timeline): pass it back with the same `since`.

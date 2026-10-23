@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The public release log: `/releases`, one release at
-//! `/releases/{project}/{version}`, and the Atom feed at `/releases.atom`.
+//! The public release log: `/releases` and one release at
+//! `/releases/{project}/{version}`. Their Atom feeds are in [`super::feeds`].
 //!
 //! These pages show what an anonymous reader of the API sees: public
 //! projects only, through [`crate::http::releases::visible_projects`]. The
-//! list and the feed have one entry per version, dated at its first
+//! list has one entry per version, dated at its first
 //! publish; the version's page shows every environment it reached. They
 //! load no script. Notes are Markdown, shown only through
 //! [`markdown::render`]; titles and every other value are escaped by
@@ -15,30 +15,27 @@ use askama::Template;
 use axum::Router;
 use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderValue, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::http::StatusCode;
+use axum::response::Response;
 use axum::routing::get;
 use serde::Deserialize;
 use tocsin_core::incident::Timestamp;
 use tocsin_core::release::Release;
 use tocsin_store::ReleaseQuery;
 
-use super::markdown;
 use super::page::{HtmlError, Layout, render, when, when_in};
+use super::{feeds, markdown};
 use crate::http::AppState;
 use crate::http::auth::Viewer;
 use crate::http::releases::visible_projects;
 
 /// Releases on the list page.
 const PAGE_SIZE: u32 = 50;
-/// Entries in the feed.
-const FEED_SIZE: u32 = 20;
 
 /// The public release routes, always on.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/releases", get(list))
-        .route("/releases.atom", get(feed))
         .route("/releases/{project}/{version}", get(detail))
 }
 
@@ -113,37 +110,23 @@ struct DetailPage {
     deploys: Vec<Deploy>,
 }
 
-/// One entry in the feed.
-struct Entry {
-    id: String,
-    link: String,
-    title: String,
-    updated: String,
-    published: String,
-    notes_html: String,
-}
-
-#[derive(Template)]
-#[template(path = "releases/feed.xml")]
-struct Feed {
-    id: String,
-    title: String,
-    self_link: String,
-    alternate: String,
-    updated: String,
-    entries: Vec<Entry>,
-}
-
 /// `?project=` on the list and the feed; empty means every project.
 #[derive(Deserialize)]
-struct ProjectFilter {
+pub(super) struct ProjectFilter {
     project: Option<String>,
 }
 
 impl ProjectFilter {
+    /// Project `id`.
+    pub(super) fn new(id: &str) -> Self {
+        ProjectFilter {
+            project: Some(id.to_owned()),
+        }
+    }
+
     /// The project asked for, if any. One that is not configured and
     /// public is a 404, so a private project looks like no project.
-    fn project(self, state: &AppState) -> Result<Option<String>, HtmlError> {
+    pub(super) fn project(self, state: &AppState) -> Result<Option<String>, HtmlError> {
         let project = self.project.filter(|project| !project.is_empty());
         if project
             .as_deref()
@@ -191,10 +174,6 @@ pub(super) fn href(release: &Release) -> String {
     format!("/releases/{}/{}", release.project, release.version)
 }
 
-fn filter_query(project: Option<&str>) -> String {
-    project.map_or_else(String::new, |project| format!("?project={project}"))
-}
-
 async fn list(
     State(state): State<AppState>,
     query: Result<Query<ProjectFilter>, QueryRejection>,
@@ -207,6 +186,10 @@ async fn list(
         layout: Layout::public(project.as_deref().map_or_else(
             || "Releases".to_owned(),
             |id| format!("{} releases", project_name(&state, id)),
+        ))
+        .with_feeds(project.as_deref().map_or_else(
+            || feeds::site(&state.config),
+            |id| feeds::for_project(&state, id),
         )),
         projects: state
             .config
@@ -219,7 +202,9 @@ async fn list(
                 selected: project.as_deref() == Some(candidate.id.as_str()),
             })
             .collect(),
-        feed: format!("/releases.atom{}", filter_query(project.as_deref())),
+        feed: project
+            .as_deref()
+            .map_or_else(|| feeds::RELEASES.to_owned(), feeds::project_href),
         releases: releases
             .iter()
             .map(|release| Row {
@@ -272,7 +257,8 @@ async fn detail(
         .min();
     let name = project_name(&state, &project);
     let page = DetailPage {
-        layout: Layout::public(format!("{name} {version}")),
+        layout: Layout::public(format!("{name} {version}"))
+            .with_feeds(feeds::for_project(&state, &project)),
         project_href: format!("/releases?project={project}"),
         project: name,
         version: version.clone(),
@@ -289,75 +275,4 @@ async fn detail(
             .collect(),
     };
     Ok(render(StatusCode::OK, &page))
-}
-
-async fn feed(
-    State(state): State<AppState>,
-    query: Result<Query<ProjectFilter>, QueryRejection>,
-) -> Result<Response, HtmlError> {
-    let Query(filter) = query
-        .map_err(|_| HtmlError::new(StatusCode::BAD_REQUEST, "`project` must be one value."))?;
-    let project = filter.project(&state)?;
-    let (releases, _) = versions(&state, project.clone(), FEED_SIZE).await?;
-    // Links are absolute when `[server] public_url` says where the site
-    // is; feed readers resolve relative ones against the feed's URL.
-    let base = state
-        .config
-        .server
-        .public_url
-        .as_deref()
-        .map_or("", |url| url.trim_end_matches('/'));
-    let query = filter_query(project.as_deref());
-    let updated = releases
-        .iter()
-        .map(|release| release.updated_at)
-        .max()
-        .unwrap_or(Timestamp::from_millis(0));
-    let page = Feed {
-        id: format!(
-            "urn:tocsin:releases{}",
-            project
-                .as_deref()
-                .map_or_else(String::new, |p| format!(":{p}"))
-        ),
-        title: project.as_deref().map_or_else(
-            || "Releases".to_owned(),
-            |id| format!("{} releases", project_name(&state, id)),
-        ),
-        self_link: format!("{base}/releases.atom{query}"),
-        alternate: format!("{base}/releases{query}"),
-        updated: updated.to_string(),
-        entries: releases
-            .iter()
-            .map(|release| Entry {
-                // Per version, so a later environment's publish, which may
-                // change which release stands for it, is the same entry.
-                id: format!("urn:tocsin:release:{}:{}", release.project, release.version),
-                link: format!("{base}{}", href(release)),
-                title: format!(
-                    "{} {}: {}",
-                    project_name(&state, &release.project),
-                    release.version,
-                    release.display_title()
-                ),
-                updated: release.updated_at.to_string(),
-                published: release
-                    .released_at
-                    .unwrap_or(release.created_at)
-                    .to_string(),
-                notes_html: markdown::render(&release.notes),
-            })
-            .collect(),
-    };
-    match page.render() {
-        Ok(xml) => Ok((
-            [(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/atom+xml; charset=utf-8"),
-            )],
-            xml,
-        )
-            .into_response()),
-        Err(error) => Err(HtmlError::internal(&error)),
-    }
 }

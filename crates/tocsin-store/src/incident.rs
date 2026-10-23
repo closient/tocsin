@@ -192,6 +192,22 @@ pub(crate) fn list(conn: &Connection, before: Option<i64>, limit: u32) -> Result
     })
 }
 
+/// Up to `limit` incidents naming component `component`, newest first,
+/// complete.
+pub(crate) fn naming(conn: &Connection, component: &str, limit: u32) -> Result<Vec<Incident>> {
+    snapshot(conn, |conn| {
+        let incidents = conn
+            .prepare_cached(&format!(
+                "SELECT {INCIDENT_COLUMNS} FROM incident WHERE id IN \
+                 (SELECT incident_id FROM incident_component WHERE component_id = ?1) \
+                 ORDER BY id DESC LIMIT ?2"
+            ))?
+            .query_map(params![component, limit], incident_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        complete(conn, incidents)
+    })
+}
+
 /// Every incident not yet resolved and every maintenance not yet
 /// completed, scheduled ones included, newest first, complete.
 pub(crate) fn unresolved(conn: &Connection) -> Result<Vec<Incident>> {

@@ -412,6 +412,48 @@ async fn listing_a_page_does_not_query_per_incident() {
     store.close().await.unwrap();
 }
 
+/// Incidents naming a component are found however far back they are,
+/// newest first, limited, complete, and none that only name another.
+#[tokio::test]
+async fn incidents_naming_a_component_skip_the_others() {
+    let (_dir, store) = open();
+    let mut named = Vec::new();
+    for (title, components) in [
+        ("Old database outage", vec!["db"]),
+        ("API errors", vec!["web", "api"]),
+        ("Database and API", vec!["db", "api"]),
+        ("Web only", vec!["web"]),
+    ] {
+        let incident = store
+            .create_incident(
+                NewIncident {
+                    components: components.into_iter().map(Into::into).collect(),
+                    ..outage(title)
+                },
+                Actor::token("oncall"),
+                Timestamp::from_millis(1000),
+            )
+            .await
+            .unwrap();
+        if incident
+            .components
+            .iter()
+            .any(|component| component == "db")
+        {
+            named.push(incident.id);
+        }
+    }
+    let found = store.incidents_naming("db", 10).await.unwrap();
+    let ids: Vec<i64> = found.iter().map(|incident| incident.id).collect();
+    named.reverse();
+    assert_eq!(ids, named);
+    assert!(found.iter().all(|incident| incident.updates.len() == 1));
+    assert_eq!(found[0].components, ["api", "db"]);
+    assert_eq!(store.incidents_naming("db", 1).await.unwrap().len(), 1);
+    assert_eq!(store.incidents_naming("cache", 10).await.unwrap(), []);
+    store.close().await.unwrap();
+}
+
 /// Writes about 5 MB in one transaction: past the 1000 pages (4 MB) at which
 /// SQLite's automatic checkpoint would run inside the commit.
 async fn fill_log(writer: &Writer) {

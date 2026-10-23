@@ -13,6 +13,7 @@ same incidents, and releases of public projects only. Its look is set by
 | `/incidents/<id>` | One incident or maintenance window: its components, every update newest first, and when it started and ended. |
 | `/history` | Every incident and maintenance window, newest first, 25 to a page, with a link to older ones. |
 | `/components/<id>` | One component: its status, its uptime bar, what is open against it, and its outages, incidents and deploys of the last 30 days. |
+| `/feeds/…` | Atom feeds of incidents and releases: see [Feeds](#feeds). |
 
 Times are shown in `[page] timezone`. Update messages are Markdown,
 rendered by the same sanitizing renderer as the rest of tocsin. Every page
@@ -48,6 +49,42 @@ what a reload would show.
 The content security policy is unchanged: scripts and styles from the
 page's own origin only, no inline script, and htmx is configured not to
 evaluate any.
+
+## Feeds
+
+Atom feeds of the same incidents and releases, for a feed reader or
+anything else that polls:
+
+| Feed | Entries |
+|---|---|
+| `/feeds/incidents.atom` | The latest 20 incidents and maintenance windows. |
+| `/feeds/components/<id>.atom` | The latest 20 naming `[[component]]` `<id>`. |
+| `/feeds/releases.atom` | The latest 20 versions of public projects. |
+| `/feeds/releases/<project>.atom` | The latest 20 versions of one public project. |
+
+A component's feed is its `id` from the configuration with `.atom` after
+it, the same id as its page `/components/<id>`. An unknown component, and a
+project that is unknown or not `public`, is a 404 rather than an empty
+feed. Every page links the feeds it relates to with
+`<link rel="alternate" type="application/atom+xml">`, so a reader given
+the page finds them: the incident and release feeds everywhere, and a
+component's or a project's own feed first on its page.
+
+- **Ids never change.** An incident's entry is `urn:tocsin:incident:<id>`
+  and a version's `urn:tocsin:release:<project>:<version>`; an update or
+  an edit changes the entry's `<updated>`, never its id, so a reader shows
+  it as changed rather than new. The feeds' own ids are
+  `urn:tocsin:incidents`, `urn:tocsin:incidents:<component>`,
+  `urn:tocsin:releases` and `urn:tocsin:releases:<project>`. None depends
+  on configuration, so moving the site keeps every reader's history.
+- **Links are absolute**, from `[server] public_url`, or else from the
+  request's `Host`.
+- An incident's entry holds its status, impact and components, then every
+  update newest first, rendered like the page. A feed's `<updated>` is its
+  newest entry's, so an unchanged feed keeps its `ETag`.
+
+`/releases.atom`, with an optional `?project=`, serves the release feeds
+too; it was their address before `/feeds/`.
 
 ## Behind a CDN
 

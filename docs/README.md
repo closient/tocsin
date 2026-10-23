@@ -21,7 +21,7 @@
 ## Use
 
 - [The status page](status-page.md): what `/` shows, live updates, the
-  incident archive and caching behind a CDN.
+  incident archive, Atom feeds and caching behind a CDN.
 - [Incidents and maintenance](incidents.md).
 - [Releases and the timeline](releases.md), and
   [recording them from CI](release-ci.md).

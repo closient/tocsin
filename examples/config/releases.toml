@@ -1,0 +1,16 @@
+#:schema ../../schema/tocsin.schema.json
+# tocsin's own releases. Each `v*` tag of github.com/closient/tocsin
+# publishes itself here once its GitHub Release is out
+# (.github/workflows/record-release.yml, docs/release-ci.md), with
+# TOCSIN_TOKEN set to the release-ci secret.
+
+[[project]]
+id = "tocsin"
+name = "tocsin"
+url = "https://github.com/closient/tocsin"
+
+[[token]]
+id = "tocsin-release-ci"
+description = "tocsin's release workflow: records each tocsin release."
+secret = "${ENV:TOCSIN_RELEASE_TOKEN}"
+scopes = ["release"]

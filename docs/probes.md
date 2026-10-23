@@ -114,6 +114,25 @@ Failures before the probe runs (exit 2 and 3) are the usual `{"error": {"kind", 
 
 `certificate` has `server_name` (sent as SNI and checked against), `chain` (each certificate's `subject`, `issuer`, `not_before`, `not_after` and `subject_alternative_names`, the server's own first), `expires_in_seconds`, `days_remaining` (whole days, rounded down, negative once expired; both `null` when the server's certificate cannot be parsed, which fails a `certificate_days_remaining` assertion as unavailable), `chain_valid`, `chain_error` (why the chain does not verify, or `null`) and `hostname_valid`.
 
+### Assertions by type
+
+Each assertion reads one fact. An assertion that does not apply to a
+check's type is a configuration error, so `tocsin config check` catches it
+before a probe runs. The forms are in
+[config.md](config.md#assertions-checkassert).
+
+| `type` | Assertions, and the fact each reads | With no assertions |
+|--------|-------------------------------------|--------------------|
+| `http` | `status` (`status`), `latency_ms`, `json` and `body` (`body`, as far as it was read), `header` (`headers`); over https, `certificate_days_remaining`, `hostname_valid` and `chain_valid` (`certificate`) | `status` is 2xx or 3xx |
+| `tls` | `latency_ms`, `certificate_days_remaining`, `hostname_valid`, `chain_valid` | the chain is valid and names the host |
+| `tcp` | `latency_ms`, `banner` (`banner`; asking for it is what makes the probe read one) | the connection is made |
+| `dns` | `latency_ms`, `records` (`answers`) | `rcode` is `NOERROR` |
+| `icmp` | `latency_ms` | the echo is answered |
+
+A probe that cannot complete is `down` before any assertion runs, so
+assertions only ever judge an answer: a `status` assertion never sees a
+refused connection, and `records` never sees a resolver that timed out.
+
 ## How each probe works
 
 ### http

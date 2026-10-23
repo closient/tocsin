@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# tocsin under systemd. Install the binary at /usr/local/bin/tocsin, the
+# configuration in /etc/tocsin, and this file at
+# /etc/systemd/system/tocsin.service; docs/install.md#systemd.
+#
+# The service runs as a user systemd allocates when it starts (DynamicUser),
+# with a private, persistent /var/lib/tocsin for the database. Secrets the
+# configuration names as ${ENV:NAME} go in /etc/tocsin/tocsin.env (mode 0600,
+# owned by root): systemd reads it before dropping privileges.
+
+[Unit]
+Description=tocsin uptime monitor and status page
+Documentation=https://github.com/closient/tocsin/blob/main/docs/install.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/tocsin serve --config /etc/tocsin --data /var/lib/tocsin
+EnvironmentFile=-/etc/tocsin/tocsin.env
+# tocsin reloads nothing on SIGHUP: restart it to apply a configuration change.
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+DynamicUser=yes
+StateDirectory=tocsin
+StateDirectoryMode=0700
+ConfigurationDirectory=tocsin
+ConfigurationDirectoryMode=0755
+UMask=0077
+
+# ICMP checks: a raw socket. Without it, tocsin falls back to an unprivileged
+# ICMP socket, which the net.ipv4.ping_group_range sysctl must allow.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+DevicePolicy=closed
+
+[Install]
+WantedBy=multi-user.target

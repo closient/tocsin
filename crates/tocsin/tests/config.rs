@@ -15,6 +15,7 @@ const EXAMPLE_ENVIRONMENT: &[(&str, &str)] = &[
     ),
     ("TOCSIN_CI_TOKEN", "CI-TOKEN-VALUE"),
     ("TOCSIN_BACKUP_TOKEN", "BACKUP-TOKEN-VALUE"),
+    ("TOCSIN_RELEASE_TOKEN", "RELEASE-TOKEN-VALUE"),
     (
         "TOCSIN_SLACK_WEBHOOK_URL",
         "https://hooks.slack.com/services/SLACK-VALUE",
@@ -90,6 +91,7 @@ fn the_examples_are_a_valid_configuration() {
             "components.toml",
             "heartbeats.toml",
             "notifications.toml",
+            "releases.toml",
             "server.toml",
         ]
     );

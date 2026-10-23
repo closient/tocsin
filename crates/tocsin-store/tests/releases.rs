@@ -13,7 +13,8 @@ use tocsin_core::Health;
 use tocsin_core::incident::{Actor, Impact, IncidentKind, NewIncident, Timestamp};
 use tocsin_core::release::{DeployStamp, NewRelease, ReleaseCursor, TimelineCursor, TimelineEvent};
 use tocsin_store::{
-    ComponentScope, Error, NewOutage, Order, Projects, ReleaseQuery, Store, TimelineQuery, Written,
+    ComponentScope, Error, NewOutage, Order, Projects, ReleaseQuery, Store, SubjectKind,
+    TimelineQuery, Written,
 };
 
 struct Fixture {
@@ -599,6 +600,7 @@ async fn versions_list_once_dated_at_their_first_publish() {
 fn outage(check: &str, component: Option<&str>, started_at_ms: i64) -> NewOutage {
     NewOutage {
         node_id: "node-a".into(),
+        subject_kind: SubjectKind::Check,
         check_id: check.into(),
         component_id: component.map(Into::into),
         health: Health::Down,

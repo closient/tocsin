@@ -214,6 +214,174 @@ fn serve_survives_a_closed_result_pipe() {
     drain.join().unwrap();
 }
 
+/// Answers `count` HTTP requests with 200, one per connection, and returns
+/// their bodies.
+fn http_receiver(count: usize) -> (String, std::thread::JoinHandle<Vec<Value>>) {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/hook", listener.local_addr().unwrap());
+    let bodies = std::thread::spawn(move || {
+        (0..count)
+            .map(|_| {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                (&stream)
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    .unwrap();
+                serde_json::from_slice(&body).unwrap()
+            })
+            .collect()
+    });
+    (url, bodies)
+}
+
+#[test]
+fn notify_test_sends_a_fire_and_its_resolve() {
+    let (url, bodies) = http_receiver(2);
+    let config = tempfile::tempdir().unwrap();
+    std::fs::write(
+        config.path().join("server.toml"),
+        format!("{LISTEN_ANY_PORT}node_id = \"node-a\"\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        config.path().join("notifiers.toml"),
+        format!(
+            "[[notifier]]\nid = \"hook\"\ntype = \"webhook\"\n\n\
+             [notifier.webhook]\nurl = \"{url}\"\n\
+             signing_secret = \"${{ENV:TOCSIN_TEST_SIGNING_SECRET}}\"\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tocsin"))
+        .env("TOCSIN_TEST_SIGNING_SECRET", "whsec-test")
+        .args(["--json", "notify", "test", "hook", "--config"])
+        .arg(config.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        json_stdout(&output),
+        serde_json::json!({
+            "notifier": "hook",
+            "type": "webhook",
+            "fire": { "sent": true },
+            "resolve": { "sent": true },
+        })
+    );
+    let bodies = bodies.join().unwrap();
+    assert_eq!(bodies[0]["event"], "fire");
+    assert_eq!(bodies[1]["event"], "resolve");
+    assert_eq!(bodies[0]["identity"], "node-a/check/tocsin-test");
+    assert_eq!(bodies[1]["identity"], bodies[0]["identity"]);
+    assert_eq!(
+        (&bodies[0]["test"], &bodies[1]["test"]),
+        (&Value::Bool(true), &Value::Bool(true))
+    );
+}
+
+#[test]
+fn notify_test_names_the_notifier_it_meant() {
+    let config = config_folder();
+    std::fs::write(
+        config.path().join("notifiers.toml"),
+        "[[notifier]]\nid = \"ops-slack\"\ntype = \"slack\"\n\n\
+         [notifier.slack]\nwebhook_url = \"${ENV:TOCSIN_TEST_SLACK_URL}\"\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tocsin"))
+        .env("TOCSIN_TEST_SLACK_URL", "https://hooks.example.com/x")
+        .args(["--json", "notify", "test", "ops-slak", "--config"])
+        .arg(config.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        json_stdout(&output)["error"]["message"],
+        "no notifier `ops-slak`; did you mean `ops-slack`?"
+    );
+}
+
+/// Stopping while an alert is being sent abandons the send within a bound,
+/// closes the store cleanly, and leaves the alert queued for the next start.
+#[test]
+fn serve_stops_mid_delivery_and_keeps_the_alert_queued() {
+    // A check on a port nobody listens on, so it goes down at once.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let down_target = closed.local_addr().unwrap();
+    drop(closed);
+    // A webhook receiver that accepts the connection and never answers.
+    let receiver = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let webhook = format!("http://{}/hook", receiver.local_addr().unwrap());
+    let (accepted, connection) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        if let Ok((stream, _)) = receiver.accept() {
+            let _ = accepted.send(stream);
+        }
+    });
+
+    let config = config_folder();
+    std::fs::write(
+        config.path().join("alerting.toml"),
+        format!(
+            "[[check]]\nid = \"api\"\ntype = \"tcp\"\ntarget = \"{down_target}\"\n\
+             interval = \"1s\"\ntimeout = \"500ms\"\nconfirm = 1\n\n\
+             [[notifier]]\nid = \"hook\"\ntype = \"webhook\"\n\n\
+             [notifier.webhook]\nurl = \"{webhook}\"\n\
+             signing_secret = \"${{ENV:TOCSIN_TEST_SIGNING_SECRET}}\"\n\n\
+             [[route]]\nid = \"all\"\nnotifiers = [\"hook\"]\n"
+        ),
+    )
+    .unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let mut server = Server::start_with(
+        config.path(),
+        data.path(),
+        &[("TOCSIN_TEST_SIGNING_SECRET", Path::new("whsec-test"))],
+    );
+    let lines = wait_ready(&mut server);
+    let drain = std::thread::spawn(move || lines.map_while(Result::ok).collect::<Vec<_>>());
+
+    // The fire is in flight once the receiver has its connection.
+    let _held = connection
+        .recv_timeout(Duration::from_secs(10))
+        .expect("serve posts the alert");
+    server.signal("-TERM");
+    let status = server.wait_with_deadline();
+    let log = drain.join().unwrap().join("\n");
+    assert_eq!(status.code(), Some(0), "stderr:\n{log}");
+
+    let database = rusqlite::Connection::open(data.path().join("tocsin.db")).unwrap();
+    let deliveries: Vec<(String, String, i64)> = database
+        .prepare("SELECT kind, status, attempts FROM alert_delivery ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(deliveries, [("fire".to_owned(), "pending".to_owned(), 0)]);
+}
+
 #[test]
 fn serve_rejects_a_dangling_symlink_as_data_folder() {
     let config = config_folder();
@@ -350,7 +518,7 @@ fn db_info_reports_rows_and_the_oldest_result() {
     let info = json_stdout(&output);
     assert_eq!(info["rows"]["check_result"], 4);
     assert_eq!(info["rows"]["daily_rollup"], 0);
-    assert_eq!(info["schema_version"], 4);
+    assert_eq!(info["schema_version"], 5);
     assert!(info["size_bytes"].as_u64().unwrap() > 0);
     assert_eq!(
         info["oldest_result"],
@@ -454,13 +622,13 @@ fn db_info_reports_a_newer_schema_without_touching_it() {
     );
     let info = json_stdout(&output);
     assert_eq!(info["schema_version"], 99);
-    assert_eq!(info["supported_schema_version"], 4);
+    assert_eq!(info["supported_schema_version"], 5);
     assert_eq!(info["rows"]["check_result"], 4);
     assert_eq!(user_version(&data), 99);
 
     let text = tocsin(&["db", "info", "--data", data_arg(&data)]);
     assert!(
-        String::from_utf8_lossy(&text.stdout).contains("newer than this build's 4"),
+        String::from_utf8_lossy(&text.stdout).contains("newer than this build's 5"),
         "{}",
         String::from_utf8_lossy(&text.stdout)
     );

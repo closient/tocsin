@@ -8,6 +8,7 @@
 //! carries on: a bug in one write must not silently stop every later one.
 
 use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 
 use rusqlite::{Connection, TransactionBehavior, params};
@@ -40,6 +41,8 @@ enum Command {
 pub(crate) struct Writer {
     sender: mpsc::Sender<Command>,
     thread: JoinHandle<()>,
+    /// Writes queued so far.
+    queued: AtomicU64,
 }
 
 impl Writer {
@@ -48,7 +51,16 @@ impl Writer {
         let thread = std::thread::Builder::new()
             .name("tocsin-store-writer".into())
             .spawn(move || run(Session { conn, nudge }, receiver))?;
-        Ok(Writer { sender, thread })
+        Ok(Writer {
+            sender,
+            thread,
+            queued: AtomicU64::new(0),
+        })
+    }
+
+    /// How many inserts and jobs have been queued since the writer started.
+    pub(crate) fn queued(&self) -> u64 {
+        self.queued.load(Ordering::Relaxed)
     }
 
     /// Queues an insert; resolves with the new row id (for a
@@ -56,6 +68,7 @@ impl Writer {
     /// transaction has committed.
     pub(crate) async fn insert(&self, insert: Insert) -> Result<i64> {
         let (reply, receive) = oneshot::channel();
+        self.queued.fetch_add(1, Ordering::Relaxed);
         self.sender
             .send(Command::Insert(insert, reply))
             .await
@@ -75,6 +88,7 @@ impl Writer {
             // The caller may have stopped waiting; the write still happened.
             let _ = reply.send(outcome);
         });
+        self.queued.fetch_add(1, Ordering::Relaxed);
         self.sender
             .send(Command::Run(job))
             .await
@@ -233,33 +247,43 @@ fn apply(conn: &Connection, insert: &Insert) -> rusqlite::Result<i64> {
         }
         // Both halves run under the insert's savepoint: either fails and
         // neither is kept.
-        Insert::ChangeOutage(change) => {
-            let mut id = 0;
-            if let Some(end) = &change.end {
-                let changed = conn
-                    .prepare_cached("UPDATE outage SET ended_at = ?2 WHERE id = ?1")?
-                    .execute(params![end.id, end.ended_at_ms])?;
-                if changed == 0 {
-                    return Err(rusqlite::Error::QueryReturnedNoRows);
-                }
-                id = end.id;
-            }
-            if let Some(outage) = &change.open {
-                conn.prepare_cached(
-                    "INSERT INTO outage (node_id, check_id, component_id, health, started_at, alerted)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                )?
-                .execute(params![
-                    outage.node_id,
-                    outage.check_id,
-                    outage.component_id,
-                    outage.health.as_str(),
-                    outage.started_at_ms,
-                    outage.alerted,
-                ])?;
-                id = conn.last_insert_rowid();
-            }
-            Ok(id)
-        }
+        Insert::ChangeOutage(change) => apply_outage_change(conn, change),
     }
+}
+
+/// Ends and opens outages as `change` says, inside whatever transaction or
+/// savepoint `conn` is in. Returns the opened outage's id, or with none the
+/// ended one's.
+pub(crate) fn apply_outage_change(
+    conn: &Connection,
+    change: &OutageChange,
+) -> rusqlite::Result<i64> {
+    let mut id = 0;
+    if let Some(end) = &change.end {
+        let changed = conn
+            .prepare_cached("UPDATE outage SET ended_at = ?2 WHERE id = ?1")?
+            .execute(params![end.id, end.ended_at_ms])?;
+        if changed == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        id = end.id;
+    }
+    if let Some(outage) = &change.open {
+        conn.prepare_cached(
+            "INSERT INTO outage (node_id, subject_kind, check_id, component_id, health,
+                 started_at, alerted)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?
+        .execute(params![
+            outage.node_id,
+            outage.subject_kind.as_str(),
+            outage.check_id,
+            outage.component_id,
+            outage.health.as_str(),
+            outage.started_at_ms,
+            outage.alerted,
+        ])?;
+        id = conn.last_insert_rowid();
+    }
+    Ok(id)
 }

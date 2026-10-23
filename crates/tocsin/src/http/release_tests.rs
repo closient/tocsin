@@ -11,7 +11,7 @@ use axum::http::{Method, Request, StatusCode, header};
 use serde_json::{Value, json};
 use tocsin_core::Health;
 use tocsin_core::config::{Environment, Source};
-use tocsin_store::{NewOutage, Store};
+use tocsin_store::{NewOutage, Store, SubjectKind};
 use tower::ServiceExt;
 
 use super::events::{Event, EventBus};
@@ -433,6 +433,7 @@ async fn the_timeline_validates_its_window_and_filters_by_component() {
         .store
         .open_outage(NewOutage {
             node_id: "node-a".into(),
+            subject_kind: SubjectKind::Check,
             check_id: "api-port".into(),
             component_id: None,
             health: Health::Down,

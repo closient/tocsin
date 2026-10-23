@@ -24,6 +24,11 @@ pub struct Notifier {
     /// the same name.
     #[serde(rename = "type")]
     pub notifier_type: NotifierType,
+    /// The most deliveries this notifier sends at once. More wait for a
+    /// free slot, so a storm of alerts never floods the service.
+    #[serde(default = "default_max_in_flight")]
+    #[schemars(range(min = 1))]
+    pub max_in_flight: u32,
     /// `[notifier.slack]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slack: Option<SlackSettings>,
@@ -48,6 +53,10 @@ pub struct Notifier {
     /// `[notifier.alertmanager]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alertmanager: Option<AlertmanagerSettings>,
+}
+
+fn default_max_in_flight() -> u32 {
+    2
 }
 
 /// The service a notifier posts to.
@@ -181,10 +190,14 @@ impl Notifier {
         if let Some(telegram) = &mut self.telegram {
             secrets.push((vec!["telegram", "bot_token"], &mut telegram.bot_token));
         }
-        if let Some(webhook) = &mut self.webhook
-            && let Some(token) = &mut webhook.bearer_token
-        {
-            secrets.push((vec!["webhook", "bearer_token"], token));
+        if let Some(webhook) = &mut self.webhook {
+            secrets.push((
+                vec!["webhook", "signing_secret"],
+                &mut webhook.signing_secret,
+            ));
+            if let Some(token) = &mut webhook.bearer_token {
+                secrets.push((vec!["webhook", "bearer_token"], token));
+            }
         }
         if let Some(alertmanager) = &mut self.alertmanager
             && let Some(token) = &mut alertmanager.bearer_token
@@ -211,6 +224,20 @@ pub struct PushoverSettings {
     pub user_key: Secret,
     /// The application's API token. Secret.
     pub api_token: Secret,
+    /// The Pushover priority, -2 to 2, of an alert that is down. 2 is an
+    /// emergency, repeated until acknowledged and cancelled by the resolve.
+    #[serde(default = "default_down_priority")]
+    pub down_priority: i8,
+    /// The priority of an alert that is degraded.
+    #[serde(default)]
+    pub degraded_priority: i8,
+    /// The priority of a resolve.
+    #[serde(default)]
+    pub resolved_priority: i8,
+}
+
+fn default_down_priority() -> i8 {
+    1
 }
 
 /// `[notifier.email]`.
@@ -256,6 +283,9 @@ pub struct TelegramSettings {
 pub struct WebhookSettings {
     /// The URL alerts are posted to as JSON.
     pub url: String,
+    /// The key each body is signed with: HMAC-SHA256 over the timestamp and
+    /// the body, sent in `X-Tocsin-Signature`. Secret.
+    pub signing_secret: Secret,
     /// Sent as `Authorization: Bearer ...`. Secret.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bearer_token: Option<Secret>,

@@ -7,6 +7,7 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use tocsin_core::Health;
 
+use crate::alert::SubjectKind;
 use crate::error::Result;
 use crate::rollup::parse_column;
 
@@ -17,7 +18,9 @@ pub struct Outage {
     pub id: i64,
     /// The node whose check was out.
     pub node_id: String,
-    /// The check that was out.
+    /// Whether `check_id` names a check or a heartbeat.
+    pub subject_kind: SubjectKind,
+    /// The check (or heartbeat) that was out.
     pub check_id: String,
     /// The check's component when the outage opened.
     pub component_id: Option<String>,
@@ -47,13 +50,15 @@ pub struct LastUp {
 /// Every open outage recorded by `node_id`, ordered by check.
 pub(crate) fn open(conn: &Connection, node_id: &str) -> Result<Vec<Outage>> {
     let mut statement = conn.prepare_cached(
-        "SELECT id, node_id, check_id, component_id, health, started_at, ended_at, alerted
-         FROM outage WHERE node_id = ?1 AND ended_at IS NULL ORDER BY check_id",
+        "SELECT id, node_id, check_id, component_id, health, started_at, ended_at, alerted,
+             subject_kind
+         FROM outage WHERE node_id = ?1 AND ended_at IS NULL ORDER BY subject_kind, check_id",
     )?;
     let rows = statement.query_map(params![node_id], |row| {
         Ok(Outage {
             id: row.get(0)?,
             node_id: row.get(1)?,
+            subject_kind: parse_column(8, &row.get::<_, String>(8)?)?,
             check_id: row.get(2)?,
             component_id: row.get(3)?,
             health: parse_column(4, &row.get::<_, String>(4)?)?,
@@ -77,8 +82,10 @@ pub(crate) fn last_up(
          WHERE check_id = ?1 AND node_id = ?2 AND health = 'up'
          ORDER BY started_at DESC LIMIT 1",
     )?;
-    let mut ended = conn
-        .prepare_cached("SELECT max(ended_at) FROM outage WHERE check_id = ?1 AND node_id = ?2")?;
+    let mut ended = conn.prepare_cached(
+        "SELECT max(ended_at) FROM outage
+                         WHERE subject_kind = 'check' AND check_id = ?1 AND node_id = ?2",
+    )?;
     let mut oldest = conn.prepare_cached(
         "SELECT min(started_at) FROM check_result WHERE check_id = ?1 AND node_id = ?2",
     )?;

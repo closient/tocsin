@@ -18,7 +18,9 @@ mod export;
 mod http;
 mod incident;
 mod lock;
+mod metrics;
 mod net;
+mod notify;
 mod output;
 mod probe;
 mod release;
@@ -30,7 +32,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use crate::cli::{Cli, Command, ConfigCommand, ProbeCommand};
+use crate::cli::{Cli, Command, ConfigCommand, NotifyCommand, ProbeCommand};
 use crate::exit::Exit;
 use crate::output::{Failure, Report};
 
@@ -73,6 +75,9 @@ fn run(cli: Cli) -> Result<Report, Failure> {
         Some(Command::Incident { command }) => incident::run(command),
         Some(Command::Maintenance { command }) => incident::run_maintenance(command),
         Some(Command::Release { command }) => release::run(command),
+        Some(Command::Notify { command }) => match command {
+            NotifyCommand::Test { notifier, config } => notify::test(&notifier, &config),
+        },
         Some(Command::Openapi) => Ok(Report {
             exit: Exit::Ok,
             json: serde_json::to_value(http::openapi::spec())

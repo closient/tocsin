@@ -1,0 +1,738 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//! The delivery worker against a real store, on a paused clock: retries
+//! and their backoff, a resolve that waits for its fire, repeats, failed
+//! deliveries, a notifier that hangs, and a restart with a delivery still
+//! queued.
+//!
+//! Tests wait on the fakes' channel, never on a tokio timeout: while the
+//! store's writer thread works, a paused clock jumps to the next timer, and
+//! a test's own timeout would be that timer. [`paused`] bounds each one by
+//! the real clock instead.
+
+mod common;
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use common::{
+    Answer, Attempt, Fake, Fixture, T0, config, down, failing, monitored, monitored_by, next_from,
+    paused, pushover, turns, up,
+};
+use tocsin_alert::{
+    AlertEvent, AlertMetrics, Alerter, AlertingHistory, Backoff, Jitter, Notifier, Notifiers,
+    Router, WorkerSettings,
+};
+use tocsin_core::Health;
+use tocsin_core::config::Config;
+use tocsin_engine::ports::{Clock, History, TokioClock};
+use tocsin_store::{DeliveryKind, OutageChange};
+use tokio::sync::mpsc;
+
+const HOUR_MS: i64 = 3_600_000;
+
+/// Retries at exactly 5s, 10s, 20s ...; four attempts. The idle wake and the send
+/// timeout are an hour, so a clock that jumps while the store works never
+/// crosses them; stopping abandons sends after a tenth of a second.
+fn settings() -> WorkerSettings {
+    WorkerSettings {
+        backoff: Backoff {
+            base: Duration::from_secs(5),
+            cap: Duration::from_secs(60),
+            jitter: Jitter::None,
+        },
+        max_attempts: 4,
+        send_timeout: Duration::from_hours(1),
+        idle: Duration::from_hours(1),
+        stop_grace: Duration::from_millis(100),
+        ..WorkerSettings::default()
+    }
+}
+
+/// An alerter and the engine's history, wired as `serve` wires them.
+struct Running {
+    alerter: Alerter,
+    history: Arc<AlertingHistory>,
+}
+
+impl Running {
+    /// Applies an outage change as the engine would, and resolves with the
+    /// opened outage's id. The paused clock stands still meanwhile: run as
+    /// a blocking task, the store write no longer looks idle, so the clock
+    /// cannot leap to the worker's next wake before the write lands.
+    async fn change(&self, change: OutageChange) -> Option<i64> {
+        let history = Arc::clone(&self.history);
+        let runtime = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || runtime.block_on(history.change_outage(change)))
+            .await
+            .unwrap()
+            .unwrap()
+    }
+}
+
+fn start(
+    fixture: &Fixture,
+    config: &Config,
+    notifiers: &[(&str, Arc<dyn Notifier>)],
+    metrics: &AlertMetrics,
+) -> Running {
+    start_with(fixture, config, notifiers, metrics, settings())
+}
+
+fn start_with(
+    fixture: &Fixture,
+    config: &Config,
+    notifiers: &[(&str, Arc<dyn Notifier>)],
+    metrics: &AlertMetrics,
+    settings: WorkerSettings,
+) -> Running {
+    let notifiers: Notifiers = notifiers
+        .iter()
+        .map(|(id, notifier)| ((*id).to_owned(), Arc::clone(notifier)))
+        .collect();
+    let router = Arc::new(Router::new(config));
+    let clock: Arc<dyn Clock> = Arc::new(TokioClock::starting_at(T0));
+    let alerter = Alerter::start(
+        Arc::clone(&fixture.store),
+        notifiers,
+        Arc::clone(&router),
+        Arc::clone(&clock),
+        metrics.clone(),
+        settings,
+    );
+    let history = Arc::new(AlertingHistory::new(
+        Arc::clone(&fixture.store),
+        router,
+        alerter.waker(),
+        clock,
+    ));
+    Running { alerter, history }
+}
+
+fn channel() -> (
+    mpsc::UnboundedSender<Attempt>,
+    mpsc::UnboundedReceiver<Attempt>,
+) {
+    mpsc::unbounded_channel()
+}
+
+#[test]
+fn a_resolve_carries_its_fire_s_identity_and_the_outage_s_duration() {
+    paused(async {
+        let fixture = Fixture::new();
+        let config = config(&monitored(&["slack"], ""));
+        let (sender, mut receiver) = channel();
+        let slack: Arc<dyn Notifier> = Fake::accepting("slack", &sender);
+        let running = start(
+            &fixture,
+            &config,
+            &[("slack", slack)],
+            &AlertMetrics::default(),
+        );
+
+        let id = running.change(down(T0)).await.unwrap();
+        let fire = next_from(&mut receiver, "slack").await.alert;
+        running.change(up(id, T0 + 90_000)).await;
+        let resolve = next_from(&mut receiver, "slack").await.alert;
+
+        assert_eq!(fire.event, AlertEvent::Fire);
+        assert_eq!(resolve.event, AlertEvent::Resolve);
+        assert_eq!(fire.identity(), "node-a/check/api");
+        assert_eq!(resolve.identity(), fire.identity());
+        assert_eq!(resolve.started_at_ms, fire.started_at_ms);
+        assert_eq!(resolve.duration_ms(), Some(90_000));
+        assert_eq!(fire.subject_name, "Public API");
+        assert_eq!(fire.component_name.as_deref(), Some("Website"));
+        running.alerter.stop().await;
+    });
+}
+
+#[test]
+fn failures_back_off_and_the_resolve_waits_for_its_fire() {
+    paused(async {
+        let fixture = Fixture::new();
+        let config = config(&monitored(&["slack"], ""));
+        let (sender, mut receiver) = channel();
+        // The fire fails three times; everything after is accepted.
+        let slack: Arc<dyn Notifier> = Fake::new("slack", &sender, |_, attempt| {
+            if attempt < 3 {
+                Answer::Fail
+            } else {
+                Answer::Accept
+            }
+        });
+        let metrics = AlertMetrics::default();
+        let running = start(&fixture, &config, &[("slack", slack)], &metrics);
+
+        let id = running.change(down(T0)).await.unwrap();
+        let first = next_from(&mut receiver, "slack").await;
+        // The recovery comes while the fire is still failing.
+        running.change(up(id, T0 + 1_000)).await;
+        let mut attempts = vec![first];
+        while attempts.last().unwrap().event() != AlertEvent::Resolve {
+            attempts.push(next_from(&mut receiver, "slack").await);
+        }
+
+        let seen: Vec<(AlertEvent, i64, Answer)> = attempts
+            .iter()
+            .map(|attempt| {
+                (
+                    attempt.event(),
+                    attempt.alert.sent_at_ms - T0,
+                    attempt.answer,
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (AlertEvent::Fire, 0, Answer::Fail),
+                (AlertEvent::Fire, 5_000, Answer::Fail),
+                (AlertEvent::Fire, 15_000, Answer::Fail),
+                (AlertEvent::Fire, 35_000, Answer::Accept),
+                (AlertEvent::Resolve, 35_000, Answer::Accept),
+            ]
+        );
+        assert_eq!(
+            (
+                metrics.attempt_failures("slack"),
+                metrics.abandonments("slack")
+            ),
+            (3, 0)
+        );
+        running.alerter.stop().await;
+        assert_eq!(fixture.store.failed_deliveries(10).await.unwrap(), []);
+    });
+}
+
+/// Every failed delivery as (notifier, kind, attempts, error), sorted.
+async fn failed_deliveries(fixture: &Fixture) -> Vec<(String, &'static str, u32, Option<String>)> {
+    let mut failed: Vec<_> = fixture
+        .store
+        .failed_deliveries(10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|failed| {
+            (
+                failed.alert.notifier_id,
+                failed.kind.as_str(),
+                failed.attempts,
+                failed.error,
+            )
+        })
+        .collect();
+    failed.sort();
+    failed
+}
+
+#[test]
+fn a_delivery_that_keeps_failing_is_recorded_and_counted() {
+    paused(async {
+        let fixture = Fixture::new();
+        let config = config(&monitored(&["flaky", "strict", "gone"], ""));
+        let (sender, mut receiver) = channel();
+        let flaky: Arc<dyn Notifier> = Fake::new("flaky", &sender, |alert, _| {
+            if alert.event == AlertEvent::Fire {
+                Answer::Fail
+            } else {
+                Answer::Accept
+            }
+        });
+        let strict: Arc<dyn Notifier> = Fake::new("strict", &sender, |_, _| Answer::Refuse);
+        // `gone` is routed to but has no notifier, as after a bad reload.
+        let metrics = AlertMetrics::default();
+        let running = start(
+            &fixture,
+            &config,
+            &[("flaky", flaky), ("strict", strict)],
+            &metrics,
+        );
+
+        let id = running.change(down(T0)).await.unwrap();
+        running.change(up(id, T0 + 1_000)).await;
+        // Four failed fires, then the resolve: a fire that failed for good no
+        // longer holds its resolve back.
+        let mut flaky_seen = Vec::new();
+        loop {
+            let attempt = next_from(&mut receiver, "flaky").await;
+            flaky_seen.push((attempt.event(), attempt.alert.sent_at_ms - T0));
+            if attempt.event() == AlertEvent::Resolve {
+                break;
+            }
+        }
+        assert_eq!(
+            flaky_seen,
+            [
+                (AlertEvent::Fire, 0),
+                (AlertEvent::Fire, 5_000),
+                (AlertEvent::Fire, 15_000),
+                (AlertEvent::Fire, 35_000),
+                (AlertEvent::Resolve, 35_000),
+            ]
+        );
+        running.alerter.stop().await;
+
+        assert_eq!(
+            failed_deliveries(&fixture).await,
+            [
+                (
+                    "flaky".into(),
+                    "fire",
+                    4,
+                    Some("HTTP 503: try later".into())
+                ),
+                (
+                    "gone".into(),
+                    "fire",
+                    1,
+                    Some("notifier `gone` is no longer configured".into())
+                ),
+                (
+                    "gone".into(),
+                    "resolve",
+                    1,
+                    Some("notifier `gone` is no longer configured".into())
+                ),
+                (
+                    "strict".into(),
+                    "fire",
+                    1,
+                    Some("HTTP 400: bad request".into())
+                ),
+                (
+                    "strict".into(),
+                    "resolve",
+                    1,
+                    Some("HTTP 400: bad request".into())
+                ),
+            ]
+        );
+        // Every failed attempt counts; only the messages given up on count
+        // as abandoned: flaky's fire after four tries, and each of the
+        // others' fire and resolve at the first.
+        let counted: Vec<_> = ["flaky", "strict", "gone"]
+            .into_iter()
+            .map(|notifier| {
+                (
+                    notifier,
+                    metrics.attempt_failures(notifier),
+                    metrics.abandonments(notifier),
+                )
+            })
+            .collect();
+        assert_eq!(counted, [("flaky", 4, 1), ("strict", 2, 2), ("gone", 2, 2)]);
+    });
+}
+
+#[test]
+fn a_firing_alert_repeats_on_its_route_s_interval_until_it_resolves() {
+    paused(async {
+        let fixture = Fixture::new();
+        let config = config(&monitored(&["slack"], "repeat = \"1h\""));
+        let (sender, mut receiver) = channel();
+        let slack = Fake::accepting("slack", &sender);
+        let running = start(
+            &fixture,
+            &config,
+            &[("slack", Arc::clone(&slack) as Arc<dyn Notifier>)],
+            &AlertMetrics::default(),
+        );
+
+        let id = running.change(down(T0)).await.unwrap();
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let attempt = next_from(&mut receiver, "slack").await;
+            seen.push((attempt.event(), attempt.alert.sent_at_ms - T0));
+        }
+        running.change(up(id, T0 + 2 * HOUR_MS + 1_000)).await;
+        let resolve = next_from(&mut receiver, "slack").await;
+        seen.push((resolve.event(), resolve.alert.sent_at_ms - T0));
+        // A day later, nothing more has been sent.
+        tokio::time::sleep(Duration::from_hours(24)).await;
+        running.alerter.stop().await;
+
+        assert_eq!(
+            seen,
+            [
+                (AlertEvent::Fire, 0),
+                (AlertEvent::Repeat, HOUR_MS),
+                (AlertEvent::Repeat, 2 * HOUR_MS),
+                (AlertEvent::Resolve, 2 * HOUR_MS),
+            ]
+        );
+        assert_eq!(slack.seen().len(), 4, "{:?}", slack.seen());
+        assert!(receiver.try_recv().is_err());
+    });
+}
+
+// Real time: on a paused clock, every store write would let the clock jump
+// to the stuck send's timeout, and Slack would look held up when it is not.
+#[tokio::test]
+async fn a_hanging_notifier_holds_up_only_its_own_alerts() {
+    let fixture = Fixture::new();
+    let config = config(&monitored(&["stuck", "slack"], ""));
+    let (sender, mut receiver) = channel();
+    let stuck: Arc<dyn Notifier> = Fake::new("stuck", &sender, |_, _| Answer::Hang);
+    let slack: Arc<dyn Notifier> = Fake::accepting("slack", &sender);
+    let running = start(
+        &fixture,
+        &config,
+        &[("stuck", stuck), ("slack", slack)],
+        &AlertMetrics::default(),
+    );
+
+    let id = running.change(down(T0)).await.unwrap();
+    running.change(up(id, T0 + 1_000)).await;
+    // The stuck send is in flight under its hour-long send timeout; Slack
+    // answers at once, so ten seconds only bounds a broken run.
+    let slack_seen = tokio::time::timeout(Duration::from_secs(10), async {
+        let fire = next_from(&mut receiver, "slack").await;
+        let resolve = next_from(&mut receiver, "slack").await;
+        (fire.event(), resolve.event())
+    })
+    .await
+    .expect("Slack is held up by the stuck notifier");
+    assert_eq!(slack_seen, (AlertEvent::Fire, AlertEvent::Resolve));
+    running.alerter.stop().await;
+
+    // Abandoned at stop, the stuck fire is still queued, untried.
+    let outbox = fixture.store.outbox().await.unwrap();
+    let pending: Vec<_> = outbox
+        .pending
+        .iter()
+        .map(|delivery| {
+            (
+                delivery.alert.notifier_id.as_str(),
+                delivery.kind,
+                delivery.attempts,
+            )
+        })
+        .collect();
+    assert_eq!(pending, [("stuck", DeliveryKind::Fire, 0)]);
+}
+
+#[test]
+fn a_delivery_pending_at_shutdown_is_sent_after_the_restart() {
+    paused(async {
+        let fixture = Fixture::new();
+        let config = config(&monitored(&["slack"], ""));
+        let (sender, mut receiver) = channel();
+        let hanging: Arc<dyn Notifier> = Fake::new("slack", &sender, |_, _| Answer::Hang);
+        let running = start(
+            &fixture,
+            &config,
+            &[("slack", hanging)],
+            &AlertMetrics::default(),
+        );
+
+        let id = running.change(down(T0)).await.unwrap();
+        let abandoned = next_from(&mut receiver, "slack").await.alert;
+        let Running { alerter, history } = running;
+        alerter.stop().await;
+        drop(history);
+        let fixture = fixture.restart().await;
+
+        let slack: Arc<dyn Notifier> = Fake::accepting("slack", &sender);
+        let running = start(
+            &fixture,
+            &config,
+            &[("slack", slack)],
+            &AlertMetrics::default(),
+        );
+        let fire = next_from(&mut receiver, "slack").await.alert;
+        assert_eq!(fire.event, AlertEvent::Fire);
+        assert_eq!(fire.delivery_id, abandoned.delivery_id);
+        assert_eq!(fire.identity(), abandoned.identity());
+
+        running.change(up(id, T0 + 1_000)).await;
+        let resolve = next_from(&mut receiver, "slack").await.alert;
+        assert_eq!(resolve.event, AlertEvent::Resolve);
+        assert_eq!(resolve.identity(), fire.identity());
+        running.alerter.stop().await;
+    });
+}
+
+/// Whether an emergency is still ringing after `attempts`, in order: a
+/// fire or repeat while down rings (the `pager` fixture's priority 2), and
+/// a cancel stops it.
+fn ringing_after(attempts: &[Attempt]) -> bool {
+    attempts.iter().fold(false, |ringing, attempt| {
+        if attempt.cancel {
+            false
+        } else if attempt.event() == AlertEvent::Resolve {
+            ringing
+        } else {
+            attempt.alert.health == Health::Down
+        }
+    })
+}
+
+#[test]
+fn an_emergency_is_cancelled_when_its_alert_drops_below_emergency() {
+    paused(async {
+        let fixture = Fixture::new();
+        let config = config(&monitored_by(&pushover("pager"), &["pager"], ""));
+        let (sender, mut receiver) = channel();
+        let pager = Fake::accepting("pager", &sender);
+        let running = start(
+            &fixture,
+            &config,
+            &[("pager", Arc::clone(&pager) as Arc<dyn Notifier>)],
+            &AlertMetrics::default(),
+        );
+
+        let down = running.change(down(T0)).await.unwrap();
+        let fire = next_from(&mut receiver, "pager").await;
+        assert_eq!((fire.event(), fire.cancel), (AlertEvent::Fire, false));
+        assert!(ringing_after(&pager.seen()));
+
+        // Down (priority 2) to degraded (priority 0): the emergency is
+        // cancelled now, beside the re-fire, not left ringing until the
+        // resolve.
+        let degraded = running
+            .change(turns(down, Health::Degraded, T0 + 60_000))
+            .await
+            .unwrap();
+        let mut downgrade = [
+            next_from(&mut receiver, "pager").await,
+            next_from(&mut receiver, "pager").await,
+        ];
+        downgrade.sort_by_key(|attempt| attempt.cancel);
+        let [refire, cancel] = downgrade;
+        assert_eq!(
+            (refire.event(), refire.alert.health, refire.cancel),
+            (AlertEvent::Fire, Health::Degraded, false)
+        );
+        assert!(cancel.cancel);
+        // The cancel names the message that rang.
+        assert_eq!(cancel.alert.health, Health::Down);
+        assert_eq!(cancel.alert.identity(), fire.alert.identity());
+        assert!(!ringing_after(&pager.seen()));
+
+        running.change(up(degraded, T0 + 120_000)).await;
+        let resolve = next_from(&mut receiver, "pager").await;
+        assert_eq!(
+            (resolve.event(), resolve.cancel),
+            (AlertEvent::Resolve, false)
+        );
+        tokio::time::sleep(Duration::from_hours(1)).await;
+        running.alerter.stop().await;
+
+        // One cancel, at the downgrade; nothing was ringing at the resolve
+        // and nothing rings now.
+        let seen = pager.seen();
+        assert_eq!(seen.iter().filter(|attempt| attempt.cancel).count(), 1);
+        assert!(!ringing_after(&seen));
+        assert!(receiver.try_recv().is_err());
+    });
+}
+
+#[test]
+fn a_failing_cancel_never_holds_up_the_resolve() {
+    paused(async {
+        let fixture = Fixture::new();
+        let config = config(&monitored_by(&pushover("pager"), &["pager"], ""));
+        let (sender, mut receiver) = channel();
+        // The fire is the first attempt; every later fire-shaped attempt
+        // is the cancel, and it always fails.
+        let pager = Fake::new("pager", &sender, |alert, index| {
+            if index > 0 && alert.event == AlertEvent::Fire {
+                Answer::Fail
+            } else {
+                Answer::Accept
+            }
+        });
+        let metrics = AlertMetrics::default();
+        let running = start(
+            &fixture,
+            &config,
+            &[("pager", Arc::clone(&pager) as Arc<dyn Notifier>)],
+            &metrics,
+        );
+
+        let id = running.change(down(T0)).await.unwrap();
+        next_from(&mut receiver, "pager").await;
+        running.change(up(id, T0 + 60_000)).await;
+        let mut resolve = None;
+        let mut cancels = Vec::new();
+        while resolve.is_none() || cancels.len() < 4 {
+            let attempt = next_from(&mut receiver, "pager").await;
+            if attempt.cancel {
+                cancels.push(attempt.alert.sent_at_ms - T0);
+            } else {
+                resolve = Some(attempt);
+            }
+        }
+        running.alerter.stop().await;
+
+        let resolve = resolve.unwrap();
+        assert_eq!(resolve.event(), AlertEvent::Resolve);
+        // Sent at once, beside the first cancel, not after the cancel gave
+        // up 35 seconds later.
+        assert_eq!(resolve.alert.sent_at_ms - T0, 0);
+        // The cancel retries on its own backoff and then fails for good.
+        assert_eq!(cancels, [0, 5_000, 15_000, 35_000]);
+        assert_eq!(metrics.attempt_failures("pager"), 4);
+        assert_eq!(metrics.abandonments("pager"), 1);
+    });
+}
+
+#[test]
+fn a_storm_of_alerts_queues_behind_the_notifier_s_cap_and_its_retry_after() {
+    paused(async {
+        const ALERTS: usize = 100;
+        const LATENCY_MS: i64 = 1_000;
+        const RETRY_AFTER_MS: i64 = 30_000;
+        let fixture = Fixture::new();
+        // The default cap: two sends at once.
+        let config = config(&monitored(&["slack"], ""));
+        let (sender, mut receiver) = channel();
+        // Answers in a second; the first three attempts get a 429 asking
+        // for thirty seconds' peace.
+        let slack = Fake::slow(
+            "slack",
+            &sender,
+            Duration::from_millis(LATENCY_MS.unsigned_abs()),
+            |_, index| {
+                if index < 3 {
+                    Answer::Busy(Duration::from_millis(RETRY_AFTER_MS.unsigned_abs()))
+                } else {
+                    Answer::Accept
+                }
+            },
+        );
+        let metrics = AlertMetrics::default();
+        let running = start(
+            &fixture,
+            &config,
+            &[("slack", Arc::clone(&slack) as Arc<dyn Notifier>)],
+            &metrics,
+        );
+
+        for n in 0..ALERTS {
+            running
+                .change(failing(&format!("api-{n}"), Health::Down, T0))
+                .await
+                .unwrap();
+        }
+        let mut delivered = std::collections::HashSet::new();
+        while delivered.len() < ALERTS {
+            let attempt = next_from(&mut receiver, "slack").await;
+            if attempt.answer == Answer::Accept {
+                assert!(delivered.insert(attempt.alert.subject_id.clone()));
+            }
+        }
+        running.alerter.stop().await;
+
+        let seen = slack.seen();
+        assert_eq!(slack.peak(), 2, "the cap holds, and is reached");
+        assert_eq!(metrics.attempt_failures("slack"), 3);
+        assert_eq!(metrics.abandonments("slack"), 0);
+        // Once a 429 is answered, nothing more goes to the notifier until
+        // its Retry-After has passed.
+        for busy in seen
+            .iter()
+            .filter(|attempt| attempt.answer != Answer::Accept)
+        {
+            let answered = busy.alert.sent_at_ms + LATENCY_MS;
+            let early: Vec<i64> = seen
+                .iter()
+                .map(|attempt| attempt.alert.sent_at_ms)
+                .filter(|&at| at > answered && at < answered + RETRY_AFTER_MS)
+                .map(|at| at - T0)
+                .collect();
+            assert!(
+                early.is_empty(),
+                "sent at {early:?} ms, inside the Retry-After from {} ms",
+                answered - T0
+            );
+        }
+        assert_eq!(seen.len(), ALERTS + 3);
+    });
+}
+
+#[test]
+fn a_send_that_panics_is_retried_and_never_freezes_its_alert() {
+    paused(async {
+        let fixture = Fixture::new();
+        let config = config(&monitored(&["slack"], ""));
+        let (sender, mut receiver) = channel();
+        let slack = Fake::new("slack", &sender, |_, index| {
+            if index == 0 {
+                Answer::Panic
+            } else {
+                Answer::Accept
+            }
+        });
+        let metrics = AlertMetrics::default();
+        let running = start(
+            &fixture,
+            &config,
+            &[("slack", Arc::clone(&slack) as Arc<dyn Notifier>)],
+            &metrics,
+        );
+
+        let id = running.change(down(T0)).await.unwrap();
+        let panicked = next_from(&mut receiver, "slack").await;
+        let retried = next_from(&mut receiver, "slack").await;
+        running.change(up(id, T0 + 60_000)).await;
+        let resolve = next_from(&mut receiver, "slack").await;
+        running.alerter.stop().await;
+
+        assert_eq!(panicked.answer, Answer::Panic);
+        // Retried after the first backoff, like any failed attempt.
+        assert_eq!(
+            (retried.event(), retried.alert.sent_at_ms - T0),
+            (AlertEvent::Fire, 5_000)
+        );
+        assert_eq!(resolve.event(), AlertEvent::Resolve);
+        assert_eq!(metrics.attempt_failures("slack"), 1);
+        assert_eq!(metrics.abandonments("slack"), 0);
+    });
+}
+
+#[test]
+fn an_idle_worker_writes_nothing_until_a_repeat_is_due() {
+    paused(async {
+        let fixture = Fixture::new();
+        let config = config(&monitored(&["slack"], "repeat = \"1d\""));
+        let (sender, mut receiver) = channel();
+        let slack: Arc<dyn Notifier> = Fake::accepting("slack", &sender);
+        let running = start_with(
+            &fixture,
+            &config,
+            &[("slack", slack)],
+            &AlertMetrics::default(),
+            WorkerSettings {
+                prune_every: Duration::from_hours(1000),
+                ..settings()
+            },
+        );
+
+        running.change(down(T0)).await.unwrap();
+        next_from(&mut receiver, "slack").await;
+        tokio::time::sleep(Duration::from_mins(1)).await;
+        // The worker's last write after the fire runs on the store's writer
+        // thread, which the paused clock cannot see: left alone, the clock
+        // would race through both sleeps while the worker waits on it, and
+        // no idle wake would land inside the window. A blocking task holds
+        // the clock while the worker finishes and goes back to sleep.
+        tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(50)))
+            .await
+            .unwrap();
+        let settled = fixture.store.writes_queued();
+        // Ten idle wakes, an hour apart, with an alert open but no repeat
+        // due: reads only.
+        tokio::time::sleep(Duration::from_hours(10)).await;
+        assert_eq!(fixture.store.writes_queued(), settled);
+
+        let repeat = next_from(&mut receiver, "slack").await;
+        assert_eq!(
+            (repeat.event(), repeat.alert.sent_at_ms - T0),
+            (AlertEvent::Repeat, 24 * HOUR_MS)
+        );
+        assert!(fixture.store.writes_queued() > settled);
+        running.alerter.stop().await;
+    });
+}

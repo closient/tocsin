@@ -69,6 +69,11 @@ pub enum Command {
         #[command(subcommand)]
         command: ReleaseCommand,
     },
+    /// Try the alert notifiers.
+    Notify {
+        #[command(subcommand)]
+        command: NotifyCommand,
+    },
     /// Print the OpenAPI document for the HTTP API.
     Openapi,
 }
@@ -371,6 +376,22 @@ pub enum ProbeCommand {
         /// The `id` of the check to run.
         #[arg(value_name = "CHECK_ID")]
         check: String,
+
+        /// Folder of `*.toml` configuration files.
+        #[arg(long, value_name = "DIR", default_value = DEFAULT_CONFIG)]
+        config: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NotifyCommand {
+    /// Send one notifier a test alert, then its resolve, with no server
+    /// and no database. Both are marked as tests. Exits 0 when both were
+    /// accepted, 3 otherwise.
+    Test {
+        /// The `id` of the notifier to try.
+        #[arg(value_name = "NOTIFIER_ID")]
+        notifier: String,
 
         /// Folder of `*.toml` configuration files.
         #[arg(long, value_name = "DIR", default_value = DEFAULT_CONFIG)]

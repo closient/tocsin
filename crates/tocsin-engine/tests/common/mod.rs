@@ -330,6 +330,7 @@ fn apply_change(outages: &mut Vec<Outage>, change: OutageChange) -> Result<Optio
     outages.push(Outage {
         id,
         node_id: outage.node_id,
+        subject_kind: outage.subject_kind,
         check_id: outage.check_id,
         component_id: outage.component_id,
         health: outage.health,

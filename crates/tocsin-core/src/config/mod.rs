@@ -422,6 +422,15 @@ pub struct Route {
     /// down, `down` on down only.
     #[serde(default)]
     pub notify_on: FailureState,
+    /// How often to send an alert again while it is still firing; `"0s"`
+    /// never repeats. Alertmanager notifiers re-post every minute whatever
+    /// this says, so Alertmanager never times the alert out.
+    #[serde(default = "default_repeat")]
+    pub repeat: Duration,
+}
+
+fn default_repeat() -> Duration {
+    Duration::from_secs(4 * 60 * 60)
 }
 
 /// `[[token]]`: a bearer token for the write API.

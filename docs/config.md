@@ -295,15 +295,17 @@ Every notifier has an `id`, an optional display `name`, and a `type`.
 | `type` | Settings |
 |--------|----------|
 | `slack` | `webhook_url` (secret) |
-| `pushover` | `user_key` (secret), `api_token` (secret) |
-| `email` | `to`: a list of addresses. Sender settings come from `[server.email]`. |
+| `pushover` | `user_key` (secret), `api_token` (secret), and the priorities `down_priority` (default 1), `degraded_priority` (0) and `resolved_priority` (0), each -2 to 2. 2 is an emergency, repeated until acknowledged, and cancelled when the alert resolves or drops to a priority below 2. |
+| `email` | `to`: a list of addresses. Sender settings come from `[server.email]`; `smtp_url` is `smtps://` for TLS, or `smtp://`, which requires STARTTLS unless it ends `?tls=none`. |
 | `ntfy` | `url` (the topic URL), `token` (secret, optional) |
 | `discord` | `webhook_url` (secret) |
 | `telegram` | `bot_token` (secret), `chat_id` |
-| `webhook` | `url`, `bearer_token` (secret, optional) |
+| `webhook` | `url`, `signing_secret` (secret, required: each body is signed with HMAC-SHA256; generate one with `openssl rand -hex 32`), `bearer_token` (secret, optional) |
 | `alertmanager` | `url` (the Alertmanager base URL), `bearer_token` (secret, optional) |
 
-The settings table for the notifier's type is required, and a table for any other type is an error.
+`max_in_flight` (default 2, at least 1) is the most deliveries the notifier sends at once; the rest wait their turn.
+
+The settings table for the notifier's type is required, and a table for any other type is an error. What each type sends, and how to verify a webhook's signature, is in [alerting.md](alerting.md). `tocsin notify test <id>` sends a notifier a test alert and its resolve.
 
 ## `[[route]]`
 
@@ -318,6 +320,9 @@ Sends alerts matching its filters to its notifiers. An empty filter matches ever
 | `checks` | check ids | `[]` | Only alerts for these checks. |
 | `heartbeats` | heartbeat ids | `[]` | Only alerts for these heartbeats. |
 | `notify_on` | `degraded` or `down` | `down` | The least severe state that alerts. |
+| `repeat` | duration | `"4h"` | Re-send while the alert is still firing. At least `"1m"`, or `"0s"` to never repeat. |
+
+When several routes send one alert to the same notifier, it is sent once and repeats on the shortest of their intervals. Every alert is resolved; there is no `resolve` key, and a route that sets one is an error.
 
 ## `[[token]]`
 

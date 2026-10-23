@@ -23,12 +23,26 @@ type = "pushover"
 [notifier.pushover]
 user_key = "${ENV:TOCSIN_PUSHOVER_USER_KEY}"
 api_token = "${ENV:TOCSIN_PUSHOVER_API_TOKEN}"
+# 2 is an emergency: Pushover repeats it until acknowledged, and the
+# resolve cancels it.
+down_priority = 2
+
+# Signed JSON for your own tooling; docs/alerting.md shows how to verify it.
+[[notifier]]
+id = "incident-bot"
+type = "webhook"
+
+[notifier.webhook]
+url = "https://incidents.example.com/hooks/tocsin"
+signing_secret = "${ENV:TOCSIN_WEBHOOK_SIGNING_SECRET}"
 
 # Everything degraded or worse goes to Slack and email.
 [[route]]
 id = "everything"
-notifiers = ["ops-slack", "ops-email"]
+notifiers = ["ops-slack", "ops-email", "incident-bot"]
 notify_on = "degraded"
+# Re-sent every 4 hours while still failing; a resolve follows the recovery.
+repeat = "4h"
 
 # Only customer-facing outages page someone.
 [[route]]

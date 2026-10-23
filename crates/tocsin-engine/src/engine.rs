@@ -17,7 +17,9 @@ use tocsin_core::state::{
     ComponentStatus, Confirmation, Confirmed, JITTER_DIVISOR, Transition, component_health,
     component_status, jitter,
 };
-use tocsin_store::{LastUp, NewCheckResult, NewOutage, Outage, OutageChange, OutageEnd};
+use tocsin_store::{
+    LastUp, NewCheckResult, NewOutage, Outage, OutageChange, OutageEnd, SubjectKind,
+};
 use tokio::sync::{Notify, Semaphore, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
@@ -366,8 +368,10 @@ async fn seed_checks(
         .open_outages(&plan.node_id)
         .await
         .map_err(StartError::Outages)?;
+    // Heartbeat outages share the table but not the id space.
     let mut open: HashMap<String, Outage> = open
         .into_iter()
+        .filter(|outage| outage.subject_kind == SubjectKind::Check)
         .map(|outage| (outage.check_id.clone(), outage))
         .collect();
     let without_outage = plan
@@ -662,6 +666,7 @@ async fn write_change(
         }),
         open: (transition.to != Health::Up).then(|| NewOutage {
             node_id: shared.node_id.clone(),
+            subject_kind: SubjectKind::Check,
             check_id: check_id.to_owned(),
             component_id: run.component.clone(),
             health: transition.to,

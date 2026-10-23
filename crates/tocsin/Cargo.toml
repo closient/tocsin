@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+tocsin-alert.workspace = true
 tocsin-core.workspace = true
 tocsin-engine.workspace = true
 tocsin-probe.workspace = true
@@ -19,6 +20,7 @@ base64.workspace = true
 clap.workspace = true
 gethostname.workspace = true
 jiff.workspace = true
+prometheus-client.workspace = true
 pulldown-cmark.workspace = true
 reqwest.workspace = true
 ring.workspace = true

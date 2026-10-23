@@ -584,6 +584,14 @@ impl<'a> Loader<'a> {
                     None,
                 );
             }
+            let repeat = route.value.repeat.get();
+            if !repeat.is_zero() && repeat < std::time::Duration::from_mins(1) {
+                self.report(
+                    &route.origin.key("repeat"),
+                    "`repeat` must be at least 1m, or \"0s\" to never repeat",
+                    None,
+                );
+            }
         }
         for token in &items.tokens {
             if token.value.scopes.is_empty() {
@@ -1138,6 +1146,29 @@ impl<'a> Loader<'a> {
                 self.url(&origin.keys(&[table, "url"]), url);
             }
         }
+        if value.max_in_flight == 0 {
+            self.report(
+                &origin.key("max_in_flight"),
+                "`max_in_flight` must be at least 1",
+                None,
+            );
+        }
+        if let Some(pushover) = &value.pushover {
+            let priorities = [
+                ("down_priority", pushover.down_priority),
+                ("degraded_priority", pushover.degraded_priority),
+                ("resolved_priority", pushover.resolved_priority),
+            ];
+            for (key, priority) in priorities {
+                if !(-2..=2).contains(&priority) {
+                    self.report(
+                        &origin.keys(&["pushover", key]),
+                        "a Pushover priority is -2, -1, 0, 1 or 2",
+                        None,
+                    );
+                }
+            }
+        }
         if let Some(telegram) = &value.telegram
             && telegram.chat_id.is_empty()
         {
@@ -1464,8 +1495,15 @@ fn interpolations(value: &Spanned<DeValue<'_>>, origin: &Origin, found: &mut Vec
 }
 
 /// A hint for a deserialization error: the nearest valid name for an
-/// unknown field or variant.
+/// unknown field or variant, or how to make a required secret.
 fn hint_for(message: &str) -> Option<String> {
+    if message.starts_with("missing field `signing_secret`") {
+        return Some(
+            "generate one with `openssl rand -hex 32`, put it in an environment \
+             variable and write `signing_secret = \"${ENV:NAME}\"`"
+                .to_owned(),
+        );
+    }
     if !(message.starts_with("unknown field") || message.starts_with("unknown variant")) {
         return None;
     }

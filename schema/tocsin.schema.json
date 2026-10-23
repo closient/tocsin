@@ -956,6 +956,13 @@
           ],
           "description": "Unique among notifiers in every file."
         },
+        "max_in_flight": {
+          "default": 2,
+          "description": "The most deliveries this notifier sends at once. More wait for a\nfree slot, so a storm of alerts never floods the service.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
         "name": {
           "description": "Display name; the id is used when it is absent.",
           "type": [
@@ -1190,6 +1197,30 @@
           ],
           "description": "The application's API token. Secret."
         },
+        "degraded_priority": {
+          "default": 0,
+          "description": "The priority of an alert that is degraded.",
+          "format": "int8",
+          "maximum": 127,
+          "minimum": -128,
+          "type": "integer"
+        },
+        "down_priority": {
+          "default": 1,
+          "description": "The Pushover priority, -2 to 2, of an alert that is down. 2 is an\nemergency, repeated until acknowledged and cancelled by the resolve.",
+          "format": "int8",
+          "maximum": 127,
+          "minimum": -128,
+          "type": "integer"
+        },
+        "resolved_priority": {
+          "default": 0,
+          "description": "The priority of a resolve.",
+          "format": "int8",
+          "maximum": 127,
+          "minimum": -128,
+          "type": "integer"
+        },
         "user_key": {
           "allOf": [
             {
@@ -1329,6 +1360,15 @@
           ],
           "default": "down",
           "description": "The least severe state that alerts: `degraded` alerts on degraded and\ndown, `down` on down only."
+        },
+        "repeat": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Duration"
+            }
+          ],
+          "default": "4h",
+          "description": "How often to send an alert again while it is still firing; `\"0s\"`\nnever repeats. Alertmanager notifiers re-post every minute whatever\nthis says, so Alertmanager never times the alert out."
         }
       },
       "required": [
@@ -1626,13 +1666,22 @@
           ],
           "description": "Sent as `Authorization: Bearer ...`. Secret."
         },
+        "signing_secret": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            }
+          ],
+          "description": "The key each body is signed with: HMAC-SHA256 over the timestamp and\nthe body, sent in `X-Tocsin-Signature`. Secret."
+        },
         "url": {
           "description": "The URL alerts are posted to as JSON.",
           "type": "string"
         }
       },
       "required": [
-        "url"
+        "url",
+        "signing_secret"
       ],
       "type": "object"
     }

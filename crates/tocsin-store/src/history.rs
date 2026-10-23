@@ -5,8 +5,9 @@
 
 use rusqlite::{Connection, named_params};
 use tocsin_core::incident::Timestamp;
-use tocsin_core::status::{CheckResult, OutageRecord};
+use tocsin_core::status::{CheckKind, CheckResult, OutageRecord};
 
+use crate::alert::SubjectKind;
 use crate::error::Result;
 use crate::rollup::parse_column;
 
@@ -79,7 +80,7 @@ pub(crate) fn results(
 /// ties by id.
 pub(crate) fn outages(conn: &Connection, page: HistoryPage) -> Result<Vec<OutageRecord>> {
     let mut statement = conn.prepare_cached(
-        "SELECT id, node_id, check_id, component_id, health, started_at, ended_at
+        "SELECT id, node_id, check_id, component_id, health, started_at, ended_at, subject_kind
          FROM outage
          WHERE (ended_at IS NULL OR ended_at >= :since)
            AND (:before IS NULL OR (started_at, id) <
@@ -101,6 +102,10 @@ pub(crate) fn outages(conn: &Connection, page: HistoryPage) -> Result<Vec<Outage
                 health: parse_column(4, &row.get::<_, String>(4)?)?,
                 started_at: Timestamp::from_millis(row.get(5)?),
                 ended_at: row.get::<_, Option<i64>>(6)?.map(Timestamp::from_millis),
+                kind: match parse_column(7, &row.get::<_, String>(7)?)? {
+                    SubjectKind::Check => CheckKind::Check,
+                    SubjectKind::Heartbeat => CheckKind::Heartbeat,
+                },
             })
         },
     )?;

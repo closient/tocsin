@@ -185,8 +185,10 @@ pub struct OutageRecord {
     pub id: i64,
     /// The node that saw it.
     pub node_id: String,
-    /// The failing check.
+    /// The failing check or heartbeat.
     pub check_id: String,
+    /// Whether `check_id` is a check or a heartbeat.
+    pub kind: CheckKind,
     /// The check's component when the outage opened, if any.
     pub component_id: Option<String>,
     /// `degraded` or `down`.

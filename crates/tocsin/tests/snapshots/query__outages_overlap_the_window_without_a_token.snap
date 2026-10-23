@@ -11,6 +11,7 @@ expression: list
       "ended_at": null,
       "health": "down",
       "id": 4,
+      "kind": "check",
       "node_id": "node-a",
       "started_at": "[time]"
     },
@@ -20,6 +21,7 @@ expression: list
       "ended_at": "[time]",
       "health": "degraded",
       "id": 3,
+      "kind": "check",
       "node_id": "node-a",
       "started_at": "[time]"
     },
@@ -29,6 +31,7 @@ expression: list
       "ended_at": "[time]",
       "health": "down",
       "id": 2,
+      "kind": "check",
       "node_id": "node-a",
       "started_at": "[time]"
     }

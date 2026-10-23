@@ -15,7 +15,7 @@ use tocsin_core::config::{Environment, Source};
 use tocsin_core::incident::Timestamp;
 use tocsin_core::state::{ComponentStatus, Confirmed};
 use tocsin_engine::{CheckSnapshot, ComponentSnapshot, LastResult, Snapshot};
-use tocsin_store::{NewCheckResult, NewOutage, Store};
+use tocsin_store::{NewCheckResult, NewOutage, Store, SubjectKind};
 use tower::ServiceExt;
 
 use super::events::EventBus;
@@ -510,6 +510,11 @@ async fn outages_are_public_and_overlap_the_window() {
     let store = &api.state.store;
     let outage = |check: &str, minutes: i64| NewOutage {
         node_id: "node-a".into(),
+        subject_kind: if check == "backup" {
+            SubjectKind::Heartbeat
+        } else {
+            SubjectKind::Check
+        },
         check_id: check.into(),
         component_id: Some("api".into()),
         health: Down,
@@ -518,7 +523,7 @@ async fn outages_are_public_and_overlap_the_window() {
     };
     let ancient = store.open_outage(outage("db", 40 * 24 * 60)).await.unwrap();
     store.end_outage(ancient, at(39 * 24 * 60)).await.unwrap();
-    let ended = store.open_outage(outage("db", 60)).await.unwrap();
+    let ended = store.open_outage(outage("backup", 60)).await.unwrap();
     store.end_outage(ended, at(50)).await.unwrap();
     let open = store.open_outage(outage("api-https", 10)).await.unwrap();
 
@@ -533,6 +538,11 @@ async fn outages_are_public_and_overlap_the_window() {
     assert_eq!(ids, [open, ended], "30 days by default, newest first");
     assert_eq!(list["outages"][0]["ended_at"], Value::Null);
     assert_eq!(list["outages"][0]["check_id"], "api-https");
+    assert_eq!(list["outages"][0]["kind"], "check");
+    assert_eq!(
+        (&list["outages"][1]["check_id"], &list["outages"][1]["kind"]),
+        (&json!("backup"), &json!("heartbeat"))
+    );
     assert_eq!(list["next_before"], Value::Null);
 
     let (_, page) = api.get("/api/v1/outages?limit=1", None).await;

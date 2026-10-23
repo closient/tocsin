@@ -5,7 +5,8 @@
 
 use tocsin_core::Health::{self, Degraded, Down, Up};
 use tocsin_core::incident::Timestamp;
-use tocsin_store::{HistoryPage, NewCheckResult, NewOutage, Store};
+use tocsin_core::status::CheckKind;
+use tocsin_store::{HistoryPage, NewCheckResult, NewOutage, Store, SubjectKind};
 
 fn result(check: &str, started_at_ms: i64, health: Health) -> NewCheckResult {
     NewCheckResult {
@@ -23,6 +24,11 @@ fn result(check: &str, started_at_ms: i64, health: Health) -> NewCheckResult {
 fn outage(check: &str, started_at_ms: i64, health: Health) -> NewOutage {
     NewOutage {
         node_id: "node-a".into(),
+        subject_kind: if check == "c" {
+            SubjectKind::Heartbeat
+        } else {
+            SubjectKind::Check
+        },
         check_id: check.into(),
         component_id: Some("api".into()),
         health,
@@ -132,11 +138,13 @@ async fn outages_overlapping_the_window_page_newest_first() {
     assert_eq!(
         (
             all[1].check_id.as_str(),
+            all[1].kind,
             all[1].health,
             all[1].component_id.as_deref()
         ),
-        ("c", Degraded, Some("api"))
+        ("c", CheckKind::Heartbeat, Degraded, Some("api"))
     );
+    assert_eq!(all[0].kind, CheckKind::Check);
 
     let one = store.outages(page(1_000, None, 2)).await.unwrap();
     assert_eq!(ids(&one), [open, inside]);

@@ -85,7 +85,8 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
   stored.
 - **`outages`** lists every outage open at any moment in the window: one
   that started before `since` but ended after it is included, as is one
-  still open (`ended_at: null`).
+  still open (`ended_at: null`). `kind` says whether `check_id` is a
+  check or a heartbeat.
 - **`timeline`** merges outages, incidents, deploys and releases; see
   [releases.md](releases.md#http-api). `component=` narrows it to one
   component's checks, incidents and projects.

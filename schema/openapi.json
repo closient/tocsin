@@ -1881,13 +1881,14 @@
           "id",
           "node_id",
           "check_id",
+          "kind",
           "health",
           "started_at"
         ],
         "properties": {
           "check_id": {
             "type": "string",
-            "description": "The failing check."
+            "description": "The failing check or heartbeat."
           },
           "component_id": {
             "type": [
@@ -1915,6 +1916,10 @@
             "type": "integer",
             "format": "int64",
             "description": "Its id."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CheckKind",
+            "description": "Whether `check_id` is a check or a heartbeat."
           },
           "node_id": {
             "type": "string",

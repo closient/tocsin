@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use tocsin_core::Health::{self, Degraded, Down, Up};
 use tocsin_core::incident::Timestamp;
-use tocsin_store::{NewCheckResult, NewOutage, Store};
+use tocsin_store::{NewCheckResult, NewOutage, Store, SubjectKind};
 
 const CONFIG: &str = r#"
 [server]
@@ -226,6 +226,7 @@ fn seed(path: &Path) {
     fn outage(started_at_ms: i64, health: Health) -> NewOutage {
         NewOutage {
             node_id: "node-a".into(),
+            subject_kind: SubjectKind::Check,
             check_id: "api-https".into(),
             component_id: Some("api".into()),
             health,

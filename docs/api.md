@@ -106,7 +106,10 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
 - **`outages`** lists every outage open at any moment in the window: one
   that started before `since` but ended after it is included, as is one
   still open (`ended_at: null`). `subject_kind` says whether `check_id`
-  is a check or a heartbeat, as on the timeline's outage events.
+  is a check or a heartbeat, as on the timeline's outage events. An
+  outage whose check was removed from the configuration while it was open
+  ends at that reload; its `ended_at` is when tocsin stopped watching, not
+  a recovery (see [config.md](config.md#reloading)).
   `node_id` is public here, as it is on the timeline: it is the
   `[server] node_id` setting, which defaults to the host name, so set it
   in config if the host name is sensitive.

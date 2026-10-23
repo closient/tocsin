@@ -409,7 +409,7 @@ async fn a_probe_that_never_returns_is_abandoned_as_down() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_open_outage_resumes_after_a_restart() {
+async fn an_open_outage_resumes_after_a_restart_and_a_removed_checks_is_withdrawn() {
     let history = FakeHistory::new();
     let open = |id, check: &str| Outage {
         id,
@@ -451,8 +451,13 @@ async fn an_open_outage_resumes_after_a_restart() {
         history.outages(),
         [
             ("api".to_owned(), Down, T0 - 60_000, Some(ended)),
-            ("removed".to_owned(), Down, T0 - 60_000, None),
+            ("removed".to_owned(), Down, T0 - 60_000, Some(T0)),
         ]
+    );
+    assert_eq!(
+        history.withdrawals(),
+        [("removed".to_owned(), T0)],
+        "withdrawn, not resolved: no change is emitted for it"
     );
 }
 

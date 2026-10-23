@@ -9,6 +9,7 @@ expression: trusted
       "check_id": "api-https",
       "component_id": "api",
       "ended_at": null,
+      "ending": null,
       "health": "down",
       "id": 4,
       "kind": "outage",

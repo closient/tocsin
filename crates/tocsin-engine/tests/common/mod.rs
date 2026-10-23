@@ -216,6 +216,10 @@ pub struct FakeHistory {
     pub failing_changes: AtomicUsize,
     /// How long each write takes to resolve, in milliseconds of tokio time.
     pub write_delay_ms: AtomicU64,
+    /// How many of the next reads of open outages fail.
+    pub failing_reads: AtomicUsize,
+    /// `(outage, at_ms)` for every withdrawal, in order.
+    pub withdrawn: Mutex<Vec<(i64, i64)>>,
 }
 
 impl FakeHistory {
@@ -236,6 +240,25 @@ impl FakeHistory {
     /// Makes the next `count` results that carry an outage change fail.
     pub fn fail_changes(&self, count: usize) {
         self.failing_changes.store(count, Ordering::SeqCst);
+    }
+
+    /// Makes the next `count` reads of open outages fail.
+    pub fn fail_reads(&self, count: usize) {
+        self.failing_reads.store(count, Ordering::SeqCst);
+    }
+
+    /// `(check, at_ms)` for every outage withdrawn, in order.
+    pub fn withdrawals(&self) -> Vec<(String, i64)> {
+        let outages = self.outages.lock().unwrap();
+        self.withdrawn
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, at_ms)| {
+                let outage = outages.iter().find(|outage| outage.id == *id).unwrap();
+                (outage.check_id.clone(), *at_ms)
+            })
+            .collect()
     }
 
     /// Makes every write take `by` to resolve.
@@ -314,6 +337,15 @@ impl History for FakeHistory {
     }
 
     fn open_outages<'a>(&'a self, node_id: &'a str) -> BoxFuture<'a, Result<Vec<Outage>>> {
+        if self
+            .failing_reads
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Box::pin(async { Err(Error::Batch("scripted read failure".to_owned())) });
+        }
         let open = self
             .outages
             .lock()
@@ -381,6 +413,20 @@ impl History for FakeHistory {
             })
             .collect();
         Box::pin(async move { Ok(found) })
+    }
+
+    fn withdraw(&self, outage: i64, at_ms: i64) -> BoxFuture<'_, Result<()>> {
+        if let Some(open) = self
+            .outages
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|open| open.id == outage && open.ended_at_ms.is_none())
+        {
+            open.ended_at_ms = Some(at_ms.max(open.started_at_ms));
+            self.withdrawn.lock().unwrap().push((outage, at_ms));
+        }
+        Box::pin(async { Ok(()) })
     }
 }
 

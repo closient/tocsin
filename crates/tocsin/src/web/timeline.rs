@@ -13,6 +13,7 @@ use axum::response::Response;
 use axum::routing::get;
 use serde::Deserialize;
 use tocsin_core::release::{Release, TimelineEvent};
+use tocsin_core::status::OutageEnding;
 use tocsin_store::Order;
 
 use super::identity::Admin;
@@ -108,6 +109,7 @@ fn row(event: &TimelineEvent) -> Row {
             component_id,
             health,
             ended_at,
+            ending,
             ..
         } => Row {
             at: Stamp::new(*at),
@@ -120,10 +122,15 @@ fn row(event: &TimelineEvent) -> Row {
                 component_id
                     .as_deref()
                     .map_or_else(String::new, |component| format!(" · {component}")),
-                ended_at.map_or_else(
-                    || " · ongoing".to_owned(),
-                    |ended| format!(" · ended {}", super::page::when(ended))
-                ),
+                match (ended_at, ending) {
+                    (None, _) => " · ongoing".to_owned(),
+                    // Removed from the configuration while out: nobody saw
+                    // it recover.
+                    (Some(ended), Some(OutageEnding::Withdrawn)) => {
+                        format!(" · withdrawn {}", super::page::when(*ended))
+                    }
+                    (Some(ended), _) => format!(" · ended {}", super::page::when(*ended)),
+                },
             ),
         },
         TimelineEvent::Incident {

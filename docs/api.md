@@ -22,6 +22,7 @@ the `status:read` scope to read the rest:
 | Checks and heartbeats: id, kind, name, interval, health | yes | yes |
 | A check's `target` (its URL or host, which can name an internal host) | no | yes |
 | A check's raw results (`/checks/{id}/results`) | no, 401 | yes |
+| How the configuration last reloaded (`/config/status`), whose errors name files and environment variables | no, 401 | yes |
 | Outages and incidents | yes | yes |
 | Releases and deploys of a project with `public = true` | yes | yes |
 | Releases and deploys of a project with `public = false` | no | yes |
@@ -36,8 +37,9 @@ One rule holds on every read, `/llms.txt` included:
 - A header that is malformed or names no `[[token]]`: 401, so a typo is
   loud rather than quietly anonymous.
 
-Raw check results are the one read with nothing public to show: no token is
-401 and a token without `status:read` is 403.
+Raw check results and the configuration status are the two reads with
+nothing public to show: no token is 401 and a token without `status:read`
+is 403.
 
 Only a `[[project]]` can be non-public; components, checks and their
 outages have no visibility setting and are on the public page. A
@@ -68,6 +70,7 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
 | `GET /api/v1/incidents/{id}` | none | 200, the incident |
 | `GET /api/v1/releases?project=&since=&before=&limit=` | none, or `status:read` | 200, `{releases, truncated, next_before}`, newest first |
 | `GET /api/v1/timeline?component=&since=&after=&limit=` | none, or `status:read` | 200, `{since, events, truncated, next_after}`, oldest first |
+| `GET /api/v1/config/status` | `status:read` | 200, `{loaded_at, last_attempt_at, ok, errors}`; see [config.md](config.md#reloading) |
 | `GET /api/v1/openapi.json` | none | 200, the OpenAPI document |
 | `GET /llms.txt` | none | 200, `text/plain` |
 
@@ -104,6 +107,16 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
   that started before `since` but ended after it is included, as is one
   still open (`ended_at: null`). `subject_kind` says whether `check_id`
   is a check or a heartbeat, as on the timeline's outage events.
+  `ending` says how an outage ended, and is `null` while it is open:
+  - `recovered`: tocsin saw the check leave this outage's health. That is
+    a return to up, or a move between degraded and down, which ends one
+    outage and opens the next at the new health.
+  - `withdrawn`: the check or heartbeat was removed from the configuration
+    while out, so tocsin stopped watching it at that reload (see
+    [config.md](config.md#reloading)). Its `ended_at` is when tocsin
+    stopped watching, not a recovery; nobody saw it come back.
+
+  Outages that ended before `ending` existed (schema 8) read `recovered`.
   `node_id` is public here, as it is on the timeline: it is the
   `[server] node_id` setting, which defaults to the host name, so set it
   in config if the host name is sensitive.
@@ -143,8 +156,8 @@ Errors are the same JSON every endpoint returns; the full table is in
 
 | Status | `error` | When |
 |---|---|---|
-| 401 | `unauthorized` | A malformed header or unknown token on any read, or no token on check results. Carries `WWW-Authenticate: Bearer`. |
-| 403 | `forbidden` | Check results with a token that lacks `status:read`. |
+| 401 | `unauthorized` | A malformed header or unknown token on any read, or no token on check results or the configuration status. Carries `WWW-Authenticate: Bearer`. |
+| 403 | `forbidden` | Check results or the configuration status with a token that lacks `status:read`. |
 | 404 | `not_found` | No component, check or incident with that id. |
 | 422 | `invalid` | A query value breaks a rule. `fields[].path` is the parameter (`since`, `limit`); `""` when the query does not parse at all (`limit=x`, an unknown parameter). |
 

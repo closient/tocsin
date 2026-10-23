@@ -163,8 +163,9 @@ pub struct ServerArgs {
 
     /// A `[[token]]` secret with the scope the command needs: `incident`
     /// for incidents and maintenance, `release` for releases, `heartbeat`
-    /// for pings, `status:read` to read what is not public. Prefer the
-    /// environment variable: arguments show in `ps`.
+    /// for pings, `status:read` to read what is not public and for
+    /// `config status`. Prefer the environment variable: arguments show in
+    /// `ps`.
     #[arg(
         long,
         env = "TOCSIN_TOKEN",
@@ -520,6 +521,13 @@ pub enum ConfigCommand {
     },
     /// Print the JSON Schema that every configuration file follows.
     Schema,
+    /// Ask a running server whether its configuration last reloaded. Exits
+    /// 1 when the last reload failed and an older configuration is still
+    /// running.
+    Status {
+        #[command(flatten)]
+        server: ServerArgs,
+    },
 }
 
 /// Where `tocsin` looks for configuration when `--config` is not given.

@@ -189,6 +189,35 @@ fn serve_stops_cleanly_on_sigint() {
     stops_cleanly_on("-INT", "SIGINT");
 }
 
+#[test]
+fn serve_reloads_on_sighup_and_keeps_running() {
+    let config = config_folder();
+    let parent = tempfile::tempdir().unwrap();
+    let data = parent.path().join("data");
+    let mut server = Server::start(config.path(), &data);
+    let lines = wait_ready(&mut server);
+    // Read on a thread, so a server that never logs the reload fails the
+    // test instead of hanging it.
+    let (sender, received) = std::sync::mpsc::channel();
+    let drain = std::thread::spawn(move || {
+        for line in lines.map_while(Result::ok) {
+            let _ = sender.send(line);
+        }
+    });
+
+    server.signal("-HUP");
+    let reloaded = std::iter::from_fn(|| received.recv_timeout(Duration::from_secs(10)).ok())
+        .find(|line| line.contains("configuration reloaded"))
+        .expect("serve reloads on SIGHUP instead of exiting");
+    assert!(reloaded.contains("SIGHUP"), "{reloaded}");
+
+    server.signal("-TERM");
+    let status = server.wait_with_deadline();
+    drain.join().unwrap();
+    let log = received.try_iter().collect::<Vec<_>>().join("\n");
+    assert_eq!(status.code(), Some(0), "stderr:\n{log}");
+}
+
 /// A monitor must not die because whatever reads its logs went away.
 #[test]
 fn serve_survives_a_closed_log_pipe() {
@@ -518,7 +547,7 @@ fn db_info_reports_rows_and_the_oldest_result() {
     let info = json_stdout(&output);
     assert_eq!(info["rows"]["check_result"], 4);
     assert_eq!(info["rows"]["daily_rollup"], 0);
-    assert_eq!(info["schema_version"], 7);
+    assert_eq!(info["schema_version"], 8);
     assert!(info["size_bytes"].as_u64().unwrap() > 0);
     assert_eq!(
         info["oldest_result"],
@@ -622,13 +651,13 @@ fn db_info_reports_a_newer_schema_without_touching_it() {
     );
     let info = json_stdout(&output);
     assert_eq!(info["schema_version"], 99);
-    assert_eq!(info["supported_schema_version"], 7);
+    assert_eq!(info["supported_schema_version"], 8);
     assert_eq!(info["rows"]["check_result"], 4);
     assert_eq!(user_version(&data), 99);
 
     let text = tocsin(&["db", "info", "--data", data_arg(&data)]);
     assert!(
-        String::from_utf8_lossy(&text.stdout).contains("newer than this build's 7"),
+        String::from_utf8_lossy(&text.stdout).contains("newer than this build's 8"),
         "{}",
         String::from_utf8_lossy(&text.stdout)
     );

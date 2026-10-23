@@ -237,12 +237,30 @@ async fn an_outage_only_ever_gets_ended_once() {
         .execute("UPDATE outage SET health = 'degraded' WHERE id = ?1", [id])
         .expect_err("changed an outage's health")
         .to_string();
-    assert!(error.contains("ended_at set, once"), "{error}");
+    assert!(error.contains("ended_at and ending set, once"), "{error}");
     let error = conn
         .execute("UPDATE outage SET alerted = 0 WHERE id = ?1", [id])
         .expect_err("changed whether an outage alerted")
         .to_string();
-    assert!(error.contains("ended_at set, once"), "{error}");
+    assert!(error.contains("ended_at and ending set, once"), "{error}");
+    assert!(
+        conn.execute("UPDATE outage SET ended_at = 9000 WHERE id = ?1", [id])
+            .is_err(),
+        "ended without saying how"
+    );
+    assert!(
+        conn.execute("UPDATE outage SET ending = 'withdrawn' WHERE id = ?1", [id])
+            .is_err(),
+        "said how without ending"
+    );
+    assert!(
+        conn.execute(
+            "UPDATE outage SET ended_at = 9000, ending = 'gone' WHERE id = ?1",
+            [id]
+        )
+        .is_err(),
+        "ended some other way"
+    );
     assert!(
         fixture.store.end_outage(id, 1_000).await.is_err(),
         "ended before it started"

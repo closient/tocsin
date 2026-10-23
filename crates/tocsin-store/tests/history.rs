@@ -5,8 +5,11 @@
 
 use tocsin_core::Health::{self, Degraded, Down, Up};
 use tocsin_core::incident::Timestamp;
-use tocsin_core::status::CheckKind;
-use tocsin_store::{HistoryPage, NewCheckResult, NewOutage, Store, SubjectKind};
+use tocsin_core::release::TimelineEvent;
+use tocsin_core::status::{CheckKind, OutageEnding};
+use tocsin_store::{
+    HistoryPage, NewCheckResult, NewOutage, Order, Projects, Store, SubjectKind, TimelineQuery,
+};
 
 fn result(check: &str, started_at_ms: i64, health: Health) -> NewCheckResult {
     NewCheckResult {
@@ -150,6 +153,68 @@ async fn outages_overlapping_the_window_page_newest_first() {
     assert_eq!(ids(&one), [open, inside]);
     let two = store.outages(page(1_000, Some(inside), 2)).await.unwrap();
     assert_eq!(ids(&two), [straddles]);
+}
+
+/// A recovery and a withdrawal both end an outage, and every read says
+/// which: a removed check's outage must never read as recovered.
+#[tokio::test]
+async fn an_outage_reads_back_how_it_ended() {
+    let (_dir, store) = open();
+    let recovered = store.open_outage(outage("a", 1_000, Down)).await.unwrap();
+    store.end_outage(recovered, 2_000).await.unwrap();
+    let withdrawn = store.open_outage(outage("b", 1_100, Down)).await.unwrap();
+    store.withdraw_outage(withdrawn, 3_000).await.unwrap();
+    let open = store.open_outage(outage("d", 1_200, Down)).await.unwrap();
+
+    let endings: Vec<_> = store
+        .outages(page(0, None, 10))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|outage| {
+            (
+                outage.id,
+                outage.ended_at.map(Timestamp::as_millis),
+                outage.ending,
+            )
+        })
+        .collect();
+    assert_eq!(
+        endings,
+        [
+            (open, None, None),
+            (withdrawn, Some(3_000), Some(OutageEnding::Withdrawn)),
+            (recovered, Some(2_000), Some(OutageEnding::Recovered)),
+        ]
+    );
+
+    let timeline = store
+        .timeline(TimelineQuery {
+            visible: Projects::All,
+            since: Timestamp::from_millis(0),
+            after: None,
+            order: Order::OldestFirst,
+            limit: 10,
+            component: None,
+        })
+        .await
+        .unwrap();
+    let endings: Vec<_> = timeline
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            TimelineEvent::Outage { id, ending, .. } => Some((*id, *ending)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        endings,
+        [
+            (recovered, Some(OutageEnding::Recovered)),
+            (withdrawn, Some(OutageEnding::Withdrawn)),
+            (open, None),
+        ]
+    );
 }
 
 #[tokio::test]

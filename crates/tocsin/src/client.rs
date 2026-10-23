@@ -68,6 +68,12 @@ impl Client {
         self.request(&Method::GET, path, &[], None::<&()>, false)
     }
 
+    /// `GET path` with the token, for a read the server never answers
+    /// without one.
+    pub fn get_with_token<T: DeserializeOwned>(&self, path: &str) -> Result<T, Failure> {
+        self.request(&Method::GET, path, &[], None::<&()>, true)
+    }
+
     /// `GET path`, with the token when one is set: the server answers
     /// without one as it does the public. The answer comes back as the
     /// server sent it, any JSON at all; a body that is not JSON is a
@@ -135,7 +141,7 @@ impl Client {
             let Some(token) = &self.token else {
                 return Err(Failure::new(
                     Exit::InvalidInput,
-                    "writing needs a token: set TOCSIN_TOKEN or pass --token",
+                    "this needs a token: set TOCSIN_TOKEN or pass --token",
                 ));
             };
             request = request.bearer_auth(token);

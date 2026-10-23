@@ -19,7 +19,9 @@ After=network-online.target
 Type=exec
 ExecStart=/usr/local/bin/tocsin serve --config /etc/tocsin --data /var/lib/tocsin
 EnvironmentFile=-/etc/tocsin/tocsin.env
-# tocsin reloads nothing on SIGHUP: restart it to apply a configuration change.
+# tocsin reloads /etc/tocsin by itself when a file changes, and on SIGHUP.
+# A change to tocsin.env, or to [server], still needs a restart.
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s

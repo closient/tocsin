@@ -12,6 +12,7 @@
 //! - **Events**: emit on [`AppState::events`] after a write commits.
 
 pub mod auth;
+pub mod config_status;
 pub mod error;
 pub mod events;
 pub mod heartbeats;
@@ -41,9 +42,11 @@ use tocsin_core::config::Config;
 use tocsin_core::incident::Timestamp;
 use tocsin_engine::{HeartbeatHandle, Snapshot, StatusHandle};
 use tocsin_store::Store;
+use tokio::sync::watch;
 
 use self::error::ApiError;
 use self::events::EventBus;
+use crate::reload::ConfigStatus;
 use crate::web::{self, identity::AdminAuth};
 
 /// What every handler can reach.
@@ -51,7 +54,8 @@ use crate::web::{self, identity::AdminAuth};
 pub struct AppState {
     /// History: results, incidents, releases.
     pub store: Arc<Store>,
-    /// The configuration loaded at startup.
+    /// The running configuration. A reload serves the requests that
+    /// arrive after it from a new state; one under way keeps this one.
     pub config: Arc<Config>,
     /// Where writes announce what changed.
     pub events: EventBus,
@@ -61,6 +65,8 @@ pub struct AppState {
     pub heartbeats: HeartbeatHandle,
     /// The checks' and components' current state.
     pub live: Arc<dyn LiveStatus>,
+    /// How the configuration last reloaded.
+    pub config_status: watch::Receiver<ConfigStatus>,
 }
 
 /// Where the read API gets the current state of every check and

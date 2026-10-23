@@ -396,6 +396,41 @@ impl Store {
             .await
     }
 
+    /// Withdraws outage `id`, whose check or heartbeat is no longer
+    /// configured: ends it at `now_ms` (or its start, if later) and, in the
+    /// same transaction, ends every alert firing for its identity without a
+    /// resolve, since nobody saw it recover. An alert that rang gets a
+    /// cancel, so it stops ringing. Withdrawing an outage that is not open
+    /// does nothing. Resolves with the deliveries queued.
+    ///
+    /// # Errors
+    ///
+    /// The write fails; nothing is written then.
+    pub async fn withdraw_outage(&self, id: i64, now_ms: i64) -> Result<usize> {
+        self.writer
+            .run(move |conn| alert::withdraw_outage(conn, id, now_ms))
+            .await
+    }
+
+    /// Ends every open alert whose notifier is not among `notifiers` at
+    /// `now_ms`, queueing nothing, since no notifier is left to send
+    /// through. Deliveries already queued for those alerts are abandoned
+    /// by the worker as they come due, so they still count in its metrics.
+    /// Resolves with how many alerts it ended.
+    ///
+    /// # Errors
+    ///
+    /// The write fails; nothing is written then.
+    pub async fn end_alerts_without_notifier(
+        &self,
+        notifiers: Vec<String>,
+        now_ms: i64,
+    ) -> Result<usize> {
+        self.writer
+            .run(move |conn| alert::end_alerts_without_notifier(conn, &notifiers, now_ms))
+            .await
+    }
+
     /// The head of every alert's pending deliveries, and the next repeat
     /// due.
     ///

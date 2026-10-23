@@ -137,8 +137,12 @@ journalctl -u tocsin -f
   `AmbientCapabilities=` and `CapabilityBoundingSet=` and set
   `net.ipv4.ping_group_range = 0 2147483647` instead: the full range,
   because a dynamic user's gid is not known in advance.
-- **Configuration changes** need `systemctl restart tocsin`; there is no
-  reload.
+- **Configuration changes** apply by themselves: tocsin reloads
+  `/etc/tocsin` half a second after the last file changes, and
+  `systemctl reload tocsin` (a SIGHUP) reloads it at once. A change to
+  `tocsin.env` or to `[server]` needs `systemctl restart tocsin`, since
+  the environment is read once at start. See
+  [config.md](config.md#reloading).
 
 The unit is hardened: a read-only file system except its state directory,
 no home directories, private `/tmp` and devices, no kernel tunables,

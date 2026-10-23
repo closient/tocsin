@@ -90,7 +90,6 @@ pub struct ListQuery {
     responses(
         (status = 200, description = "Newest `released_at` first", body = ReleaseList),
         (status = 401, description = "An `Authorization` header with an unknown token", body = ErrorBody),
-        (status = 403, description = "A token without the `status:read` scope", body = ErrorBody),
         (status = 422, description = "A bad `since`, `before` or `limit`", body = ErrorBody),
     ),
 )]

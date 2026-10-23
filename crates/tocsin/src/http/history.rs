@@ -18,7 +18,7 @@ use utoipa::IntoParams;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use super::auth::{Authorized, scope};
+use super::auth::{Authorized, Viewer, scope};
 use super::error::{ApiError, ErrorBody};
 use super::status::knows_check;
 use super::timeline::{DAY_MS, DEFAULT_LIMIT, DEFAULT_WINDOW_MS, check_window};
@@ -113,13 +113,16 @@ pub async fn get_results(
     path = "/api/v1/outages",
     tag = TAG,
     params(OutageParams),
+    security((), ("bearer" = [])),
     responses(
         (status = 200, description = "One page, newest first", body = OutageList),
+        (status = 401, description = "An `Authorization` header with an unknown token", body = ErrorBody),
         (status = 422, description = "A bad `since`, `before` or `limit`", body = ErrorBody),
     ),
 )]
 pub async fn list_outages(
     State(state): State<AppState>,
+    _viewer: Viewer,
     query: Result<Query<OutageParams>, QueryRejection>,
 ) -> Result<Json<OutageList>, ApiError> {
     let Query(query) = query.map_err(|rejection| rejected(&rejection))?;

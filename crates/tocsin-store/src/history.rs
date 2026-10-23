@@ -75,6 +75,14 @@ pub(crate) fn results(
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// Column `index`, an outage's `subject_kind`, as the API spells it.
+pub(crate) fn check_kind(index: usize, row: &rusqlite::Row<'_>) -> rusqlite::Result<CheckKind> {
+    Ok(match parse_column(index, &row.get::<_, String>(index)?)? {
+        SubjectKind::Check => CheckKind::Check,
+        SubjectKind::Heartbeat => CheckKind::Heartbeat,
+    })
+}
+
 /// Outages open at any moment at or after `page.since`: started since,
 /// or started before and ended since or not at all. Newest start first,
 /// ties by id.
@@ -102,10 +110,7 @@ pub(crate) fn outages(conn: &Connection, page: HistoryPage) -> Result<Vec<Outage
                 health: parse_column(4, &row.get::<_, String>(4)?)?,
                 started_at: Timestamp::from_millis(row.get(5)?),
                 ended_at: row.get::<_, Option<i64>>(6)?.map(Timestamp::from_millis),
-                kind: match parse_column(7, &row.get::<_, String>(7)?)? {
-                    SubjectKind::Check => CheckKind::Check,
-                    SubjectKind::Heartbeat => CheckKind::Heartbeat,
-                },
+                check_kind: check_kind(7, row)?,
             })
         },
     )?;

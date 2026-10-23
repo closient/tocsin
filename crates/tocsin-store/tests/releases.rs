@@ -12,6 +12,7 @@ use rusqlite::Connection;
 use tocsin_core::Health;
 use tocsin_core::incident::{Actor, Impact, IncidentKind, NewIncident, Timestamp};
 use tocsin_core::release::{DeployStamp, NewRelease, ReleaseCursor, TimelineCursor, TimelineEvent};
+use tocsin_core::status::CheckKind;
 use tocsin_store::{
     ComponentScope, Error, NewOutage, Order, Projects, ReleaseQuery, Store, SubjectKind,
     TimelineQuery, Written,
@@ -666,11 +667,10 @@ async fn history(fixture: &Fixture) {
         .publish_release(release("web", "w1"), ci(), at(3_000))
         .await
         .unwrap();
-    // Recorded without a component; the check belongs to api now.
-    store
-        .open_outage(outage("api-latency", None, 4_000))
-        .await
-        .unwrap();
+    // A heartbeat's, recorded without a component; it belongs to api now.
+    let mut missed = outage("api-cron", None, 4_000);
+    missed.subject_kind = SubjectKind::Heartbeat;
+    store.open_outage(missed).await.unwrap();
     // Deployed before it was published: a deploy at the stamp.
     store
         .stamp_deploy(
@@ -718,6 +718,25 @@ async fn the_timeline_interleaves_every_kind_in_time_order() {
         ]
     );
     assert!(!timeline.truncated);
+    let check_kinds: Vec<_> = timeline
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            TimelineEvent::Outage {
+                check_id,
+                check_kind,
+                ..
+            } => Some((check_id.as_str(), *check_kind)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        check_kinds,
+        [
+            ("web-health", CheckKind::Check),
+            ("api-cron", CheckKind::Heartbeat)
+        ]
+    );
     let TimelineEvent::Deploy { release, .. } = &timeline.events[5] else {
         panic!("a deploy");
     };
@@ -778,7 +797,7 @@ async fn the_timeline_filters_to_one_component() {
         .timeline(TimelineQuery {
             component: Some(ComponentScope {
                 id: "api".into(),
-                checks: vec!["api-health".into(), "api-latency".into()],
+                checks: vec!["api-health".into(), "api-cron".into()],
                 projects: vec!["api".into()],
             }),
             ..window(1_000, 100)

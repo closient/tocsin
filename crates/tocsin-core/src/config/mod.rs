@@ -460,7 +460,8 @@ pub enum TokenScope {
     Release,
     /// Reading what is not public in the read API: non-public projects'
     /// releases and deploys, check targets, and raw check results.
-    // TODO(TOC-48): the private status page reads with this scope too.
+    // TODO(TOC-56): the internal check board behind proxy auth reads with
+    // this scope too.
     #[serde(rename = "status:read")]
     StatusRead,
 }

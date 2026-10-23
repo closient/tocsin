@@ -138,13 +138,13 @@ async fn outages_overlapping_the_window_page_newest_first() {
     assert_eq!(
         (
             all[1].check_id.as_str(),
-            all[1].kind,
+            all[1].check_kind,
             all[1].health,
             all[1].component_id.as_deref()
         ),
         ("c", CheckKind::Heartbeat, Degraded, Some("api"))
     );
-    assert_eq!(all[0].kind, CheckKind::Check);
+    assert_eq!(all[0].check_kind, CheckKind::Check);
 
     let one = store.outages(page(1_000, None, 2)).await.unwrap();
     assert_eq!(ids(&one), [open, inside]);

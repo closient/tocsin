@@ -26,15 +26,24 @@ the `status:read` scope to read the rest:
 | Releases and deploys of a project with `public = true` | yes | yes |
 | Releases and deploys of a project with `public = false` | no | yes |
 
-On the endpoints that show a reader more (components, checks, check
-results, releases and the timeline), an `Authorization` header is always
-checked: an unknown token is 401 and a token without `status:read` (an
-`incident` or `release` token, say) is 403, even though the public may
-read them. Leave the header off to read as the public. `status.json`,
-outages, incidents and `/llms.txt` are the same for everyone and ignore
-the header. A non-public project is left
-out wholesale, not redacted: it is not in the release list, its deploys
-are not on the timeline, and `/llms.txt` does not mention it.
+One rule holds on every read, `/llms.txt` included:
+
+- No `Authorization` header: the public view.
+- A known token with `status:read`: the full view.
+- A known token without it (an `incident` or `release` token, say): the
+  public view, never 403, so a write token left in `TOCSIN_TOKEN` does not
+  break a read.
+- A header that is malformed or names no `[[token]]`: 401, so a typo is
+  loud rather than quietly anonymous.
+
+Raw check results are the one read with nothing public to show: no token is
+401 and a token without `status:read` is 403.
+
+Only a `[[project]]` can be non-public; components, checks and their
+outages have no visibility setting and are on the public page. A
+non-public project is left out wholesale, not redacted: it is not in the
+release list, its deploys are not on the timeline, and `/llms.txt` does
+not mention it.
 
 ```toml
 [[token]]
@@ -88,8 +97,8 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
   stored.
 - **`outages`** lists every outage open at any moment in the window: one
   that started before `since` but ended after it is included, as is one
-  still open (`ended_at: null`). `kind` says whether `check_id` is a
-  check or a heartbeat.
+  still open (`ended_at: null`). `check_kind` says whether `check_id`
+  is a check or a heartbeat, as on the timeline's outage events.
 - **`timeline`** merges outages, incidents, deploys and releases; see
   [releases.md](releases.md#http-api). `component=` narrows it to one
   component's checks, incidents and projects.
@@ -121,8 +130,8 @@ Errors are the same JSON every endpoint returns; the full table is in
 
 | Status | `error` | When |
 |---|---|---|
-| 401 | `unauthorized` | An unknown token, or none where one is required. Carries `WWW-Authenticate: Bearer`. |
-| 403 | `forbidden` | The token lacks `status:read`. |
+| 401 | `unauthorized` | A malformed header or unknown token on any read, or no token on check results. Carries `WWW-Authenticate: Bearer`. |
+| 403 | `forbidden` | Check results with a token that lacks `status:read`. |
 | 404 | `not_found` | No component, check or incident with that id. |
 | 422 | `invalid` | A query value breaks a rule. `fields[].path` is the parameter (`since`, `limit`); `""` when the query does not parse at all (`limit=x`, an unknown parameter). |
 
@@ -139,9 +148,9 @@ what `status.json` shows the public. Links are absolute when
 
 The query commands are HTTP clients of a running server. `--url` or
 `TOCSIN_URL` names it; `--token` or `TOCSIN_TOKEN` is sent with every read
-when set, so for `history` and `timeline` it must be a `status:read`
-token (an `incident` or `release` token gets 403). Leave it unset to read
-as the public.
+when set. A token without `status:read` reads the public view, so a write
+token in the environment is harmless; `history` alone needs `status:read`
+and exits 2 on the 403 without it. Leave it unset to read as the public.
 
 ```sh
 export TOCSIN_URL=https://status.example.com TOCSIN_TOKEN=...

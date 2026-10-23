@@ -7,6 +7,7 @@ expression: trusted
     {
       "at": "[time]",
       "check_id": "api-https",
+      "check_kind": "check",
       "component_id": "api",
       "ended_at": null,
       "health": "down",

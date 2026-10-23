@@ -86,7 +86,6 @@ pub struct Window<'a> {
     responses(
         (status = 200, description = "Oldest first", body = Timeline),
         (status = 401, description = "An `Authorization` header with an unknown token", body = ErrorBody),
-        (status = 403, description = "A token without the `status:read` scope", body = ErrorBody),
         (status = 422, description = "An unknown component, or a bad `since`, `after` or `limit`", body = ErrorBody),
     ),
 )]

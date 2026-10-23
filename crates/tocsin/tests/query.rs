@@ -423,8 +423,10 @@ fn timeline_shows_private_deploys_only_to_a_reader() {
     assert_eq!(code, Some(0), "{trusted}");
     insta::assert_json_snapshot!("timeline_reader", trusted);
 
-    let (code, error) = server.run(Some(DEPLOYS), &args);
-    assert_eq!(code, Some(2), "a token on a read must be a reader: {error}");
+    // A write-only TOCSIN_TOKEN reads the public view rather than failing.
+    let (code, written) = server.run(Some(DEPLOYS), &args);
+    assert_eq!(code, Some(0), "{written}");
+    assert_eq!(written, public);
 }
 
 #[test]

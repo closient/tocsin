@@ -375,22 +375,23 @@ async fn checks_carry_their_live_state_and_only_a_reader_sees_targets() {
 }
 
 #[tokio::test]
-async fn a_token_on_a_public_read_must_be_a_reader() {
+async fn a_token_without_status_read_sees_no_targets() {
     let api = api();
-    for uri in [
-        "/api/v1/checks",
-        "/api/v1/components/api",
-        "/api/v1/checks/api-https/results",
-    ] {
+    for uri in ["/api/v1/checks", "/api/v1/components/api"] {
         let (status, error) = api.get(uri, Some("not-a-token-0123456789")).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}: {error}");
-        let (status, error) = api.get(uri, Some(ONCALL)).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{uri}: {error}");
-        assert!(
-            error["message"].as_str().unwrap().contains("status:read"),
-            "{uri}: {error}"
-        );
+        let (status, body) = api.get(uri, Some(ONCALL)).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        assert!(!body.to_string().contains("internal"), "{uri}: {body}");
     }
+    let (status, error) = api
+        .get("/api/v1/checks/api-https/results", Some(ONCALL))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
+    assert!(
+        error["message"].as_str().unwrap().contains("status:read"),
+        "{error}"
+    );
 }
 
 #[tokio::test]
@@ -538,9 +539,12 @@ async fn outages_are_public_and_overlap_the_window() {
     assert_eq!(ids, [open, ended], "30 days by default, newest first");
     assert_eq!(list["outages"][0]["ended_at"], Value::Null);
     assert_eq!(list["outages"][0]["check_id"], "api-https");
-    assert_eq!(list["outages"][0]["kind"], "check");
+    assert_eq!(list["outages"][0]["check_kind"], "check");
     assert_eq!(
-        (&list["outages"][1]["check_id"], &list["outages"][1]["kind"]),
+        (
+            &list["outages"][1]["check_id"],
+            &list["outages"][1]["check_kind"]
+        ),
         (&json!("backup"), &json!("heartbeat"))
     );
     assert_eq!(list["next_before"], Value::Null);

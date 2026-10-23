@@ -14,6 +14,7 @@ use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use tocsin_core::incident::Timestamp;
 
+use super::auth::Viewer;
 use super::error::ApiError;
 use super::timeline::DAY_MS;
 use super::{AppState, OPENAPI_PATH, status};
@@ -24,12 +25,16 @@ pub const PATH: &str = "/llms.txt";
 /// The API reference, for readers that cannot fetch the OpenAPI document.
 pub const DOCS_URL: &str = "https://github.com/closient/tocsin/blob/main/docs/api.md";
 
-/// Serves the page.
+/// Serves the page. It is the same for everyone, but a token that names
+/// no `[[token]]` is refused as on every read.
 ///
 /// # Errors
 ///
-/// 500 if the store fails.
-pub async fn get_llms_txt(State(state): State<AppState>) -> Result<Response, ApiError> {
+/// 401 for an unknown token; 500 if the store fails.
+pub async fn get_llms_txt(
+    State(state): State<AppState>,
+    _viewer: Viewer,
+) -> Result<Response, ApiError> {
     let text = render(&state).await?;
     Ok((
         [(

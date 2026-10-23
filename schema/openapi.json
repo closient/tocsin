@@ -37,16 +37,6 @@
                 }
               }
             }
-          },
-          "403": {
-            "description": "A token without the `status:read` scope",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
           }
         },
         "security": [
@@ -203,16 +193,6 @@
               }
             }
           },
-          "403": {
-            "description": "A token without the `status:read` scope",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
           "404": {
             "description": "No `[[component]]` has that id",
             "content": {
@@ -273,6 +253,16 @@
               }
             }
           },
+          "401": {
+            "description": "An `Authorization` header with an unknown token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "422": {
             "description": "A bad `before` or `limit`",
             "content": {
@@ -283,7 +273,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
       },
       "post": {
         "tags": [
@@ -380,6 +376,16 @@
               }
             }
           },
+          "401": {
+            "description": "An `Authorization` header with an unknown token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "description": "No incident has that id",
             "content": {
@@ -390,7 +396,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
       },
       "patch": {
         "tags": [
@@ -617,6 +629,16 @@
               }
             }
           },
+          "401": {
+            "description": "An `Authorization` header with an unknown token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "422": {
             "description": "A bad `since`, `before` or `limit`",
             "content": {
@@ -627,7 +649,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/api/v1/releases": {
@@ -690,16 +718,6 @@
           },
           "401": {
             "description": "An `Authorization` header with an unknown token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "A token without the `status:read` scope",
             "content": {
               "application/json": {
                 "schema": {
@@ -931,8 +949,24 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "An `Authorization` header with an unknown token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
-        }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/api/v1/timeline": {
@@ -995,16 +1029,6 @@
           },
           "401": {
             "description": "An `Authorization` header with an unknown token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "A token without the `status:read` scope",
             "content": {
               "application/json": {
                 "schema": {
@@ -1881,7 +1905,7 @@
           "id",
           "node_id",
           "check_id",
-          "kind",
+          "check_kind",
           "health",
           "started_at"
         ],
@@ -1889,6 +1913,10 @@
           "check_id": {
             "type": "string",
             "description": "The failing check or heartbeat."
+          },
+          "check_kind": {
+            "$ref": "#/components/schemas/CheckKind",
+            "description": "Whether `check_id` is a check or a heartbeat."
           },
           "component_id": {
             "type": [
@@ -1916,10 +1944,6 @@
             "type": "integer",
             "format": "int64",
             "description": "Its id."
-          },
-          "kind": {
-            "$ref": "#/components/schemas/CheckKind",
-            "description": "Whether `check_id` is a check or a heartbeat."
           },
           "node_id": {
             "type": "string",
@@ -2129,6 +2153,7 @@
               "id",
               "node_id",
               "check_id",
+              "check_kind",
               "health",
               "kind"
             ],
@@ -2139,7 +2164,11 @@
               },
               "check_id": {
                 "type": "string",
-                "description": "The failing check."
+                "description": "The failing check or heartbeat."
+              },
+              "check_kind": {
+                "$ref": "#/components/schemas/CheckKind",
+                "description": "Whether `check_id` is a check or a heartbeat; `kind` is the\nevent's."
               },
               "component_id": {
                 "type": [

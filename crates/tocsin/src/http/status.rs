@@ -38,11 +38,16 @@ pub fn router() -> OpenApiRouter<AppState> {
     get,
     path = "/api/v1/status.json",
     tag = TAG,
+    security((), ("bearer" = [])),
     responses(
         (status = 200, description = "The status now", body = StatusDocument),
+        (status = 401, description = "An `Authorization` header with an unknown token", body = ErrorBody),
     ),
 )]
-pub async fn get_status(State(state): State<AppState>) -> Result<Json<StatusDocument>, ApiError> {
+pub async fn get_status(
+    State(state): State<AppState>,
+    _viewer: Viewer,
+) -> Result<Json<StatusDocument>, ApiError> {
     document(&state).await.map(Json)
 }
 
@@ -57,7 +62,6 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<StatusDocu
     responses(
         (status = 200, description = "The component", body = ComponentDetail),
         (status = 401, description = "An `Authorization` header with an unknown token", body = ErrorBody),
-        (status = 403, description = "A token without the `status:read` scope", body = ErrorBody),
         (status = 404, description = "No `[[component]]` has that id", body = ErrorBody),
     ),
 )]
@@ -99,7 +103,6 @@ pub async fn get_component(
     responses(
         (status = 200, description = "Checks, then heartbeats", body = CheckList),
         (status = 401, description = "An `Authorization` header with an unknown token", body = ErrorBody),
-        (status = 403, description = "A token without the `status:read` scope", body = ErrorBody),
     ),
 )]
 pub async fn list_checks(State(state): State<AppState>, viewer: Viewer) -> Json<CheckList> {

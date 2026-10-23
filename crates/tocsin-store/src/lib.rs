@@ -734,7 +734,8 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// The read fails.
+    /// [`Error::Invalid`] when `page.before` names no result of
+    /// `check_id`, or the read fails.
     pub async fn check_results(
         &self,
         check_id: &str,
@@ -750,7 +751,8 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// The read fails.
+    /// [`Error::Invalid`] when `page.before` names no outage, or the read
+    /// fails.
     pub async fn outages(&self, page: HistoryPage) -> Result<Vec<OutageRecord>> {
         self.read(move |conn| history::outages(conn, page)).await
     }

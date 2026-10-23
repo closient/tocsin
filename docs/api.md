@@ -86,19 +86,27 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
   `heartbeat`, so heartbeats sit beside checks rather than in a second
   list; `type` is the probe (`http`, `tcp`, `dns`, `icmp`, `tls`) and
   `null` for a heartbeat. `health`, `since`, `last_health` and
-  `last_result_at` are the engine's live state on this node.
+  `last_result_at` are the engine's live state on this node, for a
+  heartbeat as for a check: its last ping or missed deadline, and the
+  state they confirmed. Checks and heartbeats share one id space; the
+  configuration loader refuses a check and a heartbeat with the same id.
 
 ### History
 
 - **`checks/{id}/results`** is one check's or heartbeat's raw results,
   newest first: `started_at`, `duration_ms`, `health`, `error`,
-  `status_code`, the probe's `detail` and the `node_id` that ran it. An id
-  no check or heartbeat has is 404, even one with old results still
+  `status_code`, the probe's `detail` and the `node_id` that ran it. A
+  heartbeat's results are its pings (health from the ping's status, its
+  message in `detail`) and the `down` results its missed deadlines wrote.
+  An id no check or heartbeat has is 404, even one with old results still
   stored.
 - **`outages`** lists every outage open at any moment in the window: one
   that started before `since` but ended after it is included, as is one
-  still open (`ended_at: null`). `check_kind` says whether `check_id`
+  still open (`ended_at: null`). `subject_kind` says whether `check_id`
   is a check or a heartbeat, as on the timeline's outage events.
+  `node_id` is public here, as it is on the timeline: it is the
+  `[server] node_id` setting, which defaults to the host name, so set it
+  in config if the host name is sensitive.
 - **`timeline`** merges outages, incidents, deploys and releases; see
   [releases.md](releases.md#http-api). `component=` narrows it to one
   component's checks, incidents and projects.
@@ -114,6 +122,11 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
 
 `next_before` (or `next_after`) is set when more follows and `null` on the
 last page, even a full one. Unknown query parameters are refused.
+
+A `before` that names no row of that read is 422 with the field path
+`before`: the row was purged by retention since the previous page, or the
+cursor came from another check's results. Start again without `before`.
+It is never an empty page, which would look like the end.
 
 ### Errors
 
@@ -167,14 +180,16 @@ output ends with `more: --before N` (or `more: --after C`) when another
 page follows.
 
 With `--json`, stdout is exactly one JSON document: the endpoint's
-response as it came, or on failure `{"error": {kind, message, errors}}`.
+response as it came, field for field, or on failure `{"error": {kind,
+message, errors}}`. A newer server's extra fields and enum values pass
+through untouched; the text output prints an unknown value as it is.
 
 | Exit | When |
 |---|---|
 | 0 | The read succeeded (and for `status`, nothing is degraded or down). |
 | 1 | `tocsin status` only: the overall status is `degraded` or `down`. |
 | 2 | Invalid input: a bad `--since`, a check id that is not a valid id, or any 4xx (401, 403, 404, 422). |
-| 3 | The server cannot be reached or answers 5xx. |
+| 3 | The server cannot be reached, answers 5xx, or answers 2xx with a body that is not the expected JSON. |
 
 `history` checks the id before sending it, since it goes into the request
 path.

@@ -3,18 +3,20 @@
 //! `tocsin status`, `history`, `outages` and `timeline`: reading a running
 //! server's state and history.
 //!
-//! Each prints the API's document as it comes (`--json`) or a short table.
-//! The token, when set, goes with every read: without one the server
-//! answers as it does the public, and raw results need one with
-//! `status:read`.
+//! Each prints the API's document as it came (`--json`), field for field,
+//! or a short table read from it. The table reads leniently: every enum is
+//! a string printed as it came and unknown fields are skipped, so a server
+//! newer than this CLI still prints. The token, when set, goes with every
+//! read: without one the server answers as it does the public, and raw
+//! results need one with `status:read`.
 
 use std::fmt::Write as _;
 
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 use tocsin_core::config::{Duration, Id};
 use tocsin_core::incident::Timestamp;
-use tocsin_core::release::{Timeline, TimelineEvent};
-use tocsin_core::state::ComponentStatus;
-use tocsin_core::status::{CheckResults, OutageList, StatusDocument};
 use url::form_urlencoded;
 
 use crate::cli::{HistoryArgs, ServerArgs};
@@ -25,19 +27,17 @@ use crate::output::{Failure, Report};
 /// `tocsin status`: exits 1 when anything is degraded or down, so a
 /// script can branch on it without reading the document.
 pub fn status(server: &ServerArgs) -> Result<Report, Failure> {
-    let document: StatusDocument = Client::new(server)?.read("api/v1/status.json")?;
-    let exit = if matches!(
-        document.status,
-        ComponentStatus::Degraded | ComponentStatus::Down
-    ) {
+    let json = Client::new(server)?.read("api/v1/status.json")?;
+    let document: StatusView = view(&json)?;
+    let exit = if matches!(document.status.as_str(), "degraded" | "down") {
         Exit::CheckFailed
     } else {
         Exit::Ok
     };
     Ok(Report {
         exit,
-        json: to_json(&document),
         text: describe_status(&document),
+        json,
     })
 }
 
@@ -47,22 +47,22 @@ pub fn history(server: &ServerArgs, check: &str, page: &HistoryArgs) -> Result<R
     Id::parse(check)
         .map_err(|error| Failure::new(Exit::InvalidInput, format!("check {check:?}: {error}")))?;
     let path = with_query(&format!("api/v1/checks/{check}/results"), &page.pairs());
-    let results: CheckResults = Client::new(server)?.read(&path)?;
+    let json = Client::new(server)?.read(&path)?;
     Ok(Report {
         exit: Exit::Ok,
-        json: to_json(&results),
-        text: describe_results(&results),
+        text: describe_results(&view(&json)?),
+        json,
     })
 }
 
 /// `tocsin outages`.
 pub fn outages(server: &ServerArgs, page: &HistoryArgs) -> Result<Report, Failure> {
     let path = with_query("api/v1/outages", &page.pairs());
-    let list: OutageList = Client::new(server)?.read(&path)?;
+    let json = Client::new(server)?.read(&path)?;
     Ok(Report {
         exit: Exit::Ok,
-        json: to_json(&list),
-        text: describe_outages(&list),
+        text: describe_outages(&view(&json)?),
+        json,
     })
 }
 
@@ -87,11 +87,11 @@ pub fn timeline(
     if let Some(limit) = limit {
         pairs.push(("limit", limit.to_string()));
     }
-    let timeline: Timeline = Client::new(server)?.read(&with_query("api/v1/timeline", &pairs))?;
+    let json = Client::new(server)?.read(&with_query("api/v1/timeline", &pairs))?;
     Ok(Report {
         exit: Exit::Ok,
-        json: to_json(&timeline),
-        text: describe_timeline(&timeline),
+        text: describe_timeline(&view(&json)?),
+        json,
     })
 }
 
@@ -137,12 +137,110 @@ fn with_query(path: &str, pairs: &[(&str, String)]) -> String {
     format!("{path}?{query}")
 }
 
-fn to_json(value: &impl serde::Serialize) -> serde_json::Value {
-    serde_json::to_value(value).expect("API types serialize")
+/// What the table needs of `json`; a document without it is not the
+/// answer this CLI asked for.
+fn view<T: DeserializeOwned>(json: &Value) -> Result<T, Failure> {
+    T::deserialize(json).map_err(|error| {
+        Failure::new(
+            Exit::Runtime,
+            format!("the server's answer is not what tocsin expects: {error}"),
+        )
+    })
+}
+
+/// `GET /api/v1/status.json`, as the table reads it.
+#[derive(Deserialize)]
+struct StatusView {
+    title: String,
+    status: String,
+    generated_at: String,
+    components: Vec<ComponentView>,
+    incidents: Vec<IncidentView>,
+}
+
+#[derive(Deserialize)]
+struct ComponentView {
+    id: String,
+    name: String,
+    status: String,
+}
+
+#[derive(Deserialize)]
+struct IncidentView {
+    id: i64,
+    kind: String,
+    status: String,
+    impact: String,
+    title: String,
+}
+
+/// `GET /api/v1/checks/{id}/results`, as the table reads it.
+#[derive(Deserialize)]
+struct ResultsView {
+    check_id: String,
+    since: String,
+    results: Vec<ResultView>,
+    next_before: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct ResultView {
+    started_at: String,
+    health: String,
+    duration_ms: i64,
+    error: Option<String>,
+}
+
+/// `GET /api/v1/outages`, as the table reads it.
+#[derive(Deserialize)]
+struct OutagesView {
+    since: String,
+    outages: Vec<OutageView>,
+    next_before: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct OutageView {
+    started_at: String,
+    ended_at: Option<String>,
+    health: String,
+    check_id: String,
+    node_id: String,
+}
+
+/// `GET /api/v1/timeline`, as the table reads it.
+#[derive(Deserialize)]
+struct TimelineView {
+    since: String,
+    events: Vec<EventView>,
+    next_after: Option<String>,
+}
+
+/// One event of any kind: each kind fills its own fields, and a kind this
+/// CLI does not know prints by name.
+#[derive(Deserialize)]
+struct EventView {
+    kind: String,
+    at: String,
+    check_id: Option<String>,
+    health: Option<String>,
+    ended_at: Option<String>,
+    incident_kind: Option<String>,
+    title: Option<String>,
+    status: Option<String>,
+    release: Option<ReleaseView>,
+}
+
+#[derive(Deserialize)]
+struct ReleaseView {
+    project: String,
+    version: String,
+    #[serde(default)]
+    environment: String,
 }
 
 /// The overall status, a line per component, then the open incidents.
-fn describe_status(document: &StatusDocument) -> String {
+fn describe_status(document: &StatusView) -> String {
     let mut text = format!(
         "{}: {} as of {}\n",
         document.title, document.status, document.generated_at
@@ -168,7 +266,7 @@ fn describe_status(document: &StatusDocument) -> String {
 }
 
 /// One line per result.
-fn describe_results(results: &CheckResults) -> String {
+fn describe_results(results: &ResultsView) -> String {
     if results.results.is_empty() {
         return format!(
             "no results for {} since {}",
@@ -193,15 +291,13 @@ fn describe_results(results: &CheckResults) -> String {
 }
 
 /// One line per outage.
-fn describe_outages(list: &OutageList) -> String {
+fn describe_outages(list: &OutagesView) -> String {
     if list.outages.is_empty() {
         return format!("no outages since {}", list.since);
     }
     let mut text = String::new();
     for outage in &list.outages {
-        let ended = outage
-            .ended_at
-            .map_or_else(|| "open".to_owned(), |at| at.to_string());
+        let ended = outage.ended_at.as_deref().unwrap_or("open");
         let _ = writeln!(
             text,
             "{}  {:<24}  {:<8}  {:<20}  {}",
@@ -215,38 +311,41 @@ fn describe_outages(list: &OutageList) -> String {
 }
 
 /// One line per event.
-fn describe_timeline(timeline: &Timeline) -> String {
+fn describe_timeline(timeline: &TimelineView) -> String {
     if timeline.events.is_empty() {
         return format!("nothing since {}", timeline.since);
     }
     let mut text = String::new();
     for event in &timeline.events {
-        let line = match event {
-            TimelineEvent::Outage {
-                check_id,
-                health,
-                ended_at,
-                ..
-            } => {
-                let ended =
-                    ended_at.map_or_else(|| "still open".to_owned(), |at| format!("until {at}"));
-                format!("outage    {check_id} {health}, {ended}")
+        let field = |value: &Option<String>| value.clone().unwrap_or_default();
+        let line = match (event.kind.as_str(), &event.release) {
+            ("outage", _) => {
+                let ended = event
+                    .ended_at
+                    .as_ref()
+                    .map_or_else(|| "still open".to_owned(), |at| format!("until {at}"));
+                format!(
+                    "outage    {} {}, {ended}",
+                    field(&event.check_id),
+                    field(&event.health)
+                )
             }
-            TimelineEvent::Incident {
-                incident_kind,
-                title,
-                status,
-                ..
-            } => format!("{incident_kind:<9} {title} ({status})"),
-            TimelineEvent::Deploy { release, .. } => format!(
+            ("incident", _) => format!(
+                "{:<9} {} ({})",
+                field(&event.incident_kind),
+                field(&event.title),
+                field(&event.status)
+            ),
+            ("deploy", Some(release)) => format!(
                 "deploy    {} {} to {}",
                 release.project, release.version, release.environment
             ),
-            TimelineEvent::Release { release, .. } => {
+            ("release", Some(release)) => {
                 format!("release   {} {}", release.project, release.version)
             }
+            (kind, _) => kind.to_owned(),
         };
-        let _ = writeln!(text, "{}  {line}", event.at());
+        let _ = writeln!(text, "{}  {line}", event.at);
     }
     if let Some(next) = &timeline.next_after {
         let _ = writeln!(text, "more: --after {next}");

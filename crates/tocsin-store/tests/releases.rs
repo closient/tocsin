@@ -718,20 +718,20 @@ async fn the_timeline_interleaves_every_kind_in_time_order() {
         ]
     );
     assert!(!timeline.truncated);
-    let check_kinds: Vec<_> = timeline
+    let subject_kinds: Vec<_> = timeline
         .events
         .iter()
         .filter_map(|event| match event {
             TimelineEvent::Outage {
                 check_id,
-                check_kind,
+                subject_kind,
                 ..
-            } => Some((check_id.as_str(), *check_kind)),
+            } => Some((check_id.as_str(), *subject_kind)),
             _ => None,
         })
         .collect();
     assert_eq!(
-        check_kinds,
+        subject_kinds,
         [
             ("web-health", CheckKind::Check),
             ("api-cron", CheckKind::Heartbeat)

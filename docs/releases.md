@@ -121,7 +121,7 @@ shows them to everyone already.
   creation), deploys (at `deployed_at`) and releases not yet deployed (at
   `released_at`), read from one database snapshot. Ties on time order by
   kind (outage, incident, deploy, release), then id. `kind` names the
-  event, so an outage's own kind is `check_kind` (`check` or `heartbeat`),
+  event, so an outage's own kind is `subject_kind` (`check` or `heartbeat`),
   as on `/api/v1/outages`, just as an incident's is `incident_kind`.
   `since` defaults to
   30 days ago and may reach back at most 366 days; `limit` is 1 to 500,

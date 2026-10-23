@@ -46,6 +46,8 @@ pub struct ResultsParams {
     /// one day ago. Keep it the same while paging.
     since: Option<Timestamp>,
     /// Only results after the previous page's last: its `next_before`.
+    /// One that names no result of this check (purged since, or from
+    /// another read) is 422; start again without it.
     before: Option<i64>,
     /// Results, 1 to 500; default 100.
     limit: Option<u32>,
@@ -61,6 +63,8 @@ pub struct OutageParams {
     /// while paging.
     since: Option<Timestamp>,
     /// Only outages after the previous page's last: its `next_before`.
+    /// One that names no outage (purged since) is 422; start again
+    /// without it.
     before: Option<i64>,
     /// Outages, 1 to 500; default 100.
     limit: Option<u32>,
@@ -78,7 +82,7 @@ pub struct OutageParams {
         (status = 401, description = "No token, or an unknown one", body = ErrorBody),
         (status = 403, description = "The token lacks the `status:read` scope", body = ErrorBody),
         (status = 404, description = "No `[[check]]` or `[[heartbeat]]` has that id", body = ErrorBody),
-        (status = 422, description = "A bad `since`, `before` or `limit`", body = ErrorBody),
+        (status = 422, description = "A bad `since` or `limit`, or a `before` naming no row of this read", body = ErrorBody),
     ),
 )]
 pub async fn get_results(
@@ -117,7 +121,7 @@ pub async fn get_results(
     responses(
         (status = 200, description = "One page, newest first", body = OutageList),
         (status = 401, description = "An `Authorization` header with an unknown token", body = ErrorBody),
-        (status = 422, description = "A bad `since`, `before` or `limit`", body = ErrorBody),
+        (status = 422, description = "A bad `since` or `limit`, or a `before` naming no row of this read", body = ErrorBody),
     ),
 )]
 pub async fn list_outages(

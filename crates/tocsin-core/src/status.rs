@@ -99,7 +99,8 @@ pub struct CheckList {
 /// One check or heartbeat and its current state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct CheckState {
-    /// Its id; checks and heartbeats never share one.
+    /// Its id. Checks and heartbeats share one id space, so this names
+    /// one member and its results alike.
     pub id: String,
     /// Check or heartbeat.
     pub kind: CheckKind,
@@ -188,7 +189,7 @@ pub struct OutageRecord {
     /// The failing check or heartbeat.
     pub check_id: String,
     /// Whether `check_id` is a check or a heartbeat.
-    pub check_kind: CheckKind,
+    pub subject_kind: CheckKind,
     /// The check's component when the outage opened, if any.
     pub component_id: Option<String>,
     /// `degraded` or `down`.

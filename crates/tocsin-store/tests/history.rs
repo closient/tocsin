@@ -138,16 +138,114 @@ async fn outages_overlapping_the_window_page_newest_first() {
     assert_eq!(
         (
             all[1].check_id.as_str(),
-            all[1].check_kind,
+            all[1].subject_kind,
             all[1].health,
             all[1].component_id.as_deref()
         ),
         ("c", CheckKind::Heartbeat, Degraded, Some("api"))
     );
-    assert_eq!(all[0].check_kind, CheckKind::Check);
+    assert_eq!(all[0].subject_kind, CheckKind::Check);
 
     let one = store.outages(page(1_000, None, 2)).await.unwrap();
     assert_eq!(ids(&one), [open, inside]);
     let two = store.outages(page(1_000, Some(inside), 2)).await.unwrap();
     assert_eq!(ids(&two), [straddles]);
+}
+
+#[tokio::test]
+async fn outages_page_through_ties_and_both_kinds_of_straddler() {
+    let (_dir, store) = open();
+    // Still open since before the window, and ended inside it.
+    let open_before = store.open_outage(outage("a", 400, Down)).await.unwrap();
+    let ended_inside = store.open_outage(outage("b", 600, Down)).await.unwrap();
+    store.end_outage(ended_inside, 1_100).await.unwrap();
+    // Three starting in the same millisecond, inside the window.
+    let tie_a = store.open_outage(outage("d", 2_000, Down)).await.unwrap();
+    let tie_b = store.open_outage(outage("e", 2_000, Down)).await.unwrap();
+    let tie_c = store.open_outage(outage("f", 2_000, Down)).await.unwrap();
+
+    let mut seen = Vec::new();
+    let mut before = None;
+    loop {
+        let rows = store.outages(page(1_000, before, 2)).await.unwrap();
+        if rows.is_empty() {
+            break;
+        }
+        seen.extend(rows.iter().map(|row| row.id));
+        before = rows.last().map(|row| row.id);
+    }
+    assert_eq!(
+        seen,
+        [tie_c, tie_b, tie_a, ended_inside, open_before],
+        "ties by id, each row once, straddlers last"
+    );
+}
+
+#[tokio::test]
+async fn a_cursor_that_names_no_row_of_the_read_is_invalid() {
+    let (_dir, store) = open();
+    let api = store.append(result("api", 1_000, Up)).await.unwrap();
+    let web = store.append(result("web", 1_000, Up)).await.unwrap();
+    let outage = store.open_outage(outage("a", 1_000, Down)).await.unwrap();
+
+    for (check, before) in [("api", web), ("api", web + 100), ("web", api)] {
+        let error = store
+            .check_results(check, page(0, Some(before), 10))
+            .await
+            .unwrap_err();
+        let tocsin_store::Error::Invalid(fields) = &error else {
+            panic!("{check} before {before}: {error}");
+        };
+        assert_eq!(fields[0].path, "before", "{fields:?}");
+        assert!(
+            fields[0].message.contains("start again without before"),
+            "{fields:?}"
+        );
+    }
+    let error = store
+        .outages(page(0, Some(outage + 100), 10))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, tocsin_store::Error::Invalid(fields) if fields[0].path == "before"),
+        "{error}"
+    );
+    // The cursor's own row is fine, on either read.
+    let after_own = store
+        .check_results("api", page(0, Some(api), 10))
+        .await
+        .unwrap();
+    assert_eq!(after_own, []);
+    let after_own = store.outages(page(0, Some(outage), 10)).await.unwrap();
+    assert_eq!(after_own, []);
+}
+
+#[tokio::test]
+async fn a_heartbeats_pings_read_back_as_its_results() {
+    let (_dir, store) = open();
+    let ping = store
+        .record(result("backup", 1_000, Up), SubjectKind::Heartbeat, None)
+        .await
+        .unwrap();
+    assert_eq!(ping, None, "no outage change");
+    let missed = store
+        .record(result("backup", 2_000, Down), SubjectKind::Heartbeat, None)
+        .await
+        .unwrap();
+    assert_eq!(missed, None);
+    let rows = store
+        .check_results("backup", page(0, None, 10))
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.started_at.as_millis(), row.health))
+            .collect::<Vec<_>>(),
+        [(2_000, Down), (1_000, Up)]
+    );
+    let older = store
+        .check_results("backup", page(0, Some(rows[0].id), 10))
+        .await
+        .unwrap();
+    assert_eq!(older.len(), 1, "a heartbeat's cursor pages too");
 }

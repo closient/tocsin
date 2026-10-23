@@ -7,13 +7,13 @@ expression: public
     {
       "at": "[time]",
       "check_id": "api-https",
-      "check_kind": "check",
       "component_id": "api",
       "ended_at": null,
       "health": "down",
       "id": 4,
       "kind": "outage",
-      "node_id": "node-a"
+      "node_id": "node-a",
+      "subject_kind": "check"
     },
     {
       "at": "[time]",

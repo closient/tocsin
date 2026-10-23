@@ -20,7 +20,7 @@ use tocsin_core::release::{
 
 use crate::FUTURE_TOLERANCE;
 use crate::error::{Error, Result};
-use crate::history::check_kind;
+use crate::history::subject_kind;
 use crate::incident::{actor, snapshot, text};
 use crate::rollup::parse_column;
 
@@ -495,7 +495,7 @@ fn outage_events(
                     id: row.get(0)?,
                     node_id: row.get(1)?,
                     check_id: row.get(2)?,
-                    check_kind: check_kind(7, row)?,
+                    subject_kind: subject_kind(7, row)?,
                     component_id: row.get(3)?,
                     health: parse_column(4, &row.get::<_, String>(4)?)?,
                     ended_at: row.get::<_, Option<i64>>(6)?.map(Timestamp::from_millis),

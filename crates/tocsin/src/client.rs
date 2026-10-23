@@ -69,8 +69,10 @@ impl Client {
     }
 
     /// `GET path`, with the token when one is set: the server answers
-    /// without one as it does the public.
-    pub fn read<T: DeserializeOwned>(&self, path: &str) -> Result<T, Failure> {
+    /// without one as it does the public. The answer comes back as the
+    /// server sent it, any JSON at all; a body that is not JSON is a
+    /// runtime failure.
+    pub fn read(&self, path: &str) -> Result<Value, Failure> {
         self.request(&Method::GET, path, &[], None::<&()>, self.token.is_some())
     }
 

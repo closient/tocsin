@@ -7,33 +7,33 @@ expression: list
   "outages": [
     {
       "check_id": "api-https",
-      "check_kind": "check",
       "component_id": "api",
       "ended_at": null,
       "health": "down",
       "id": 4,
       "node_id": "node-a",
-      "started_at": "[time]"
+      "started_at": "[time]",
+      "subject_kind": "check"
     },
     {
       "check_id": "api-https",
-      "check_kind": "check",
       "component_id": "api",
       "ended_at": "[time]",
       "health": "degraded",
       "id": 3,
       "node_id": "node-a",
-      "started_at": "[time]"
+      "started_at": "[time]",
+      "subject_kind": "check"
     },
     {
       "check_id": "api-https",
-      "check_kind": "check",
       "component_id": "api",
       "ended_at": "[time]",
       "health": "down",
       "id": 2,
       "node_id": "node-a",
-      "started_at": "[time]"
+      "started_at": "[time]",
+      "subject_kind": "check"
     }
   ],
   "since": "[time]"

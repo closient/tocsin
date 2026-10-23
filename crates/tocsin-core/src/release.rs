@@ -375,7 +375,7 @@ pub enum TimelineEvent {
         check_id: String,
         /// Whether `check_id` is a check or a heartbeat; `kind` is the
         /// event's.
-        check_kind: CheckKind,
+        subject_kind: CheckKind,
         /// The check's component when the outage opened, if any.
         component_id: Option<String>,
         /// `degraded` or `down`.

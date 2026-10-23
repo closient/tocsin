@@ -469,3 +469,108 @@ fn an_unreachable_server_is_a_runtime_failure() {
         assert_eq!(document["error"]["kind"], "runtime_error", "{command}");
     }
 }
+
+/// A server that answers every request with `status` and `body`, for
+/// answers a real tocsin never gives.
+fn canned(status: &'static str, body: &'static str) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            // The CLI sends a GET with no body: read to the blank line.
+            let mut request = Vec::new();
+            let mut byte = [0; 1];
+            while !request.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap() == 1 {
+                request.push(byte[0]);
+            }
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    format!("http://{address}")
+}
+
+#[test]
+fn json_is_the_answer_as_it_came_and_text_prints_what_it_does_not_know() {
+    let status_document = r#"{"title": "Example status", "status": "partial",
+        "generated_at": "2026-10-23T14:05:00.000Z", "region": "eu-west",
+        "components": [{"id": "api", "name": "API", "description": null,
+            "group": null, "status": "frozen", "health": null, "uptime": 0.99}],
+        "incidents": []}"#;
+    let url = canned("200 OK", status_document);
+    let output = cli(&url, None, &["status"]);
+    assert_eq!(output.status.code(), Some(0), "not degraded or down");
+    let echoed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        echoed,
+        serde_json::from_str::<Value>(status_document).unwrap()
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_tocsin"))
+        .arg("status")
+        .env("TOCSIN_URL", &url)
+        .env_remove("TOCSIN_TOKEN")
+        .output()
+        .unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(0), "{text}");
+    assert!(text.starts_with("Example status: partial as of "), "{text}");
+    assert!(text.contains("frozen"), "{text}");
+
+    let timeline = r#"{"since": "2026-10-23T14:05:00.000Z", "next_after": null,
+        "events": [{"kind": "audit", "at": "2026-10-23T14:06:00.000Z", "who": "ops"},
+            {"kind": "outage", "at": "2026-10-23T14:05:00.000Z", "id": 1,
+             "node_id": "node-a", "check_id": "api-https", "subject_kind": "probe",
+             "component_id": null, "health": "flapping", "ended_at": null}]}"#;
+    let url = canned("200 OK", timeline);
+    let output = Command::new(env!("CARGO_BIN_EXE_tocsin"))
+        .arg("timeline")
+        .env("TOCSIN_URL", &url)
+        .env_remove("TOCSIN_TOKEN")
+        .output()
+        .unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(0), "{text}");
+    assert!(
+        text.contains("2026-10-23T14:06:00.000Z  audit\n"),
+        "an unknown kind by name: {text}"
+    );
+    assert!(
+        text.contains("outage    api-https flapping, still open"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_server_error_or_an_unexpected_answer_is_a_runtime_failure() {
+    for (status, body) in [
+        (
+            "503 Service Unavailable",
+            r#"{"error": "unavailable", "message": "busy"}"#,
+        ),
+        ("500 Internal Server Error", "<html>oops</html>"),
+        ("200 OK", "<html>a captive portal</html>"),
+        ("200 OK", r#"{"title": 7}"#),
+    ] {
+        let url = canned(status, body);
+        for command in ["status", "outages", "timeline"] {
+            let output = cli(&url, None, &[command]);
+            let document: Value = serde_json::from_slice(&output.stdout)
+                .unwrap_or_else(|error| panic!("{status} {body} {command}: {error}"));
+            assert_eq!(
+                output.status.code(),
+                Some(3),
+                "{status} {body} {command}: {document}"
+            );
+            assert_eq!(
+                document["error"]["kind"], "runtime_error",
+                "{status} {body} {command}"
+            );
+        }
+    }
+}

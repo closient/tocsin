@@ -1116,6 +1116,23 @@ async fn retention_waits_for_a_pass_past_the_soft_limit(finalized: bool) {
         "retention deleted past the soft limit before a pass copied the log"
     );
     assert!(!retention.is_finished());
+    // Waiting holds neither the writer nor a transaction: a check result
+    // still commits.
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        store.writer.run(move |conn| {
+            conn.execute(
+                "INSERT INTO check_result (node_id, check_id, started_at, duration_ms, health)
+                 VALUES ('node-a', 'web', ?1, 1, 'up')",
+                params![now],
+            )?;
+            Ok(())
+        }),
+    )
+    .await
+    .expect("a write waited behind retention's wait for the checkpointer")
+    .unwrap();
+    assert!(!retention.is_finished());
     holder.join();
     let released = Instant::now();
     // The checkpointer tries a busy pass again a second later.
@@ -1140,6 +1157,37 @@ async fn retention_rolls_up_only_once_a_pass_has_copied_the_log() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retention_deletes_only_once_a_pass_has_copied_the_log() {
     retention_waits_for_a_pass_past_the_soft_limit(true).await;
+}
+
+/// A pass that never copies the log holds retention up for no longer than
+/// the writer would wait at the hard limit, and says so: one warning with
+/// the log's length and the wait, then retention writes.
+#[test]
+fn retention_that_waits_out_its_cap_warns_and_carries_on() {
+    let logs = Captured::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (waited, stats) = logs.run(|| {
+        runtime.block_on(async {
+            let (_dir, store) = open();
+            let day: Day = "2026-10-01".parse().unwrap();
+            let holder = CheckpointHolder::hold(store.path());
+            old_results_until(&store, day, soft_limit_frames() + 200).await;
+            let started = Instant::now();
+            store.checkpointer.make_room().await;
+            let waited = started.elapsed();
+            holder.join();
+            (waited, store.checkpoint_stats())
+        })
+    });
+    assert!(waited >= checkpoint::PACE_WAIT, "{waited:?}");
+    assert!(stats.paced_wait_max >= checkpoint::PACE_WAIT, "{stats:?}");
+    let warnings = logs.at(tracing::Level::WARN);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("frames="), "{warnings:?}");
+    assert!(warnings[0].contains("waited=5"), "{warnings:?}");
 }
 
 /// Below the soft limit retention never waits for the checkpointer.

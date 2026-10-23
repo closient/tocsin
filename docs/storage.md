@@ -59,7 +59,10 @@ threshold SQLite's own automatic checkpoint uses, or a minute after the
 first of fewer, so a quiet store still checkpoints. A WAL hook on the
 writer counts the frames each commit appends. A passive checkpoint takes
 no lock the writer or the readers need and skips frames a reader still
-uses, so it never holds them up; one that a reader held back is tried
+uses, so it never blocks them on a lock. That is all the separate thread
+guarantees: it takes the copy and its fsyncs out of the writer's commits,
+not off the disk the writer commits to, and a write can still stall while
+a pass runs (see below). One that a reader held back is tried
 again a second later until it copies the whole log, and ten in a row
 that leave 1000 frames or more behind log a warning.
 
@@ -148,7 +151,10 @@ commit rewind the log, so the purge runs at the speed the disk copies it,
 and its frames are paid for by the purge rather than by a check result
 queued behind it. A pass a reader held back is tried again a second
 later, so a chunk can wait that long. A wait that times out writes
-anyway; the hard limit still bounds the log.
+anyway and logs a warning with the frames in the log and how long it
+waited; the hard limit still bounds the log. Retention waits between its
+writes, never inside one: it holds no transaction and no place in the
+writer's queue while it waits, so check results keep committing.
 
 `Store::checkpoint_stats` counts every path above: writes at the hard
 limit, how long they waited and copied, lockouts, stand-asides, passes
@@ -158,15 +164,26 @@ timed event. The write-latency bench prints them beside its latency table,
 with every stall over budget and the events that overlapped it, so a
 failing run names its path.
 
-The disk is still shared: on ext4 a write can wait for the filesystem
-journal while a checkpoint's fsync commits it. On a runner still flushing
-a gigabyte of build output that cost single writes up to 200 ms, while the
-p99 stayed under 12 ms. The bench's events show the same thing below both
-limits: on CI, a 93 ms write with the log at 2079 frames, entirely inside
-a 222 ms pass, and on a shared rotational disk beside a loop of synced
-writes, commits of a single row taking 1.38 s inside a 1.42 s pass. The
-writer commits with `synchronous = NORMAL`, which does not sync, so those
-commits wait on the filesystem, not on SQLite's locks. If the checkpointer thread ever dies, the writer
+Writes still stall below both limits, while a pass is running. On CI the
+bench recorded a write of one check result taking 93 ms with the log far
+under the soft limit, entirely inside a 222 ms pass:
+
+```text
+- 16.048–16.141 s write 92.76ms, log at 2079 frames after
+- 15.919–16.141 s checkpointer pass 222.30ms
+```
+
+Locally, on a shared rotational disk beside a loop of synced writes,
+commits of a single row took up to 1.38 s inside a 1.42 s pass. The
+working hypothesis is that the two connections are coupled through the
+filesystem rather than through SQLite: the writer commits with
+`synchronous = NORMAL`, which does not sync, and the passive pass takes no
+lock it needs, but on ext4 a write can wait for the filesystem journal
+while the pass's fsync commits it. Nothing here has measured that wait
+directly; the evidence is only that the stalls fall inside passes and
+that no SQLite lock explains them. Durability is not lowered to chase
+them. If they break the latency budget, the lever is shorter passes (fewer
+frames copied per pass), measured first. If the checkpointer thread ever dies, the writer
 logs an error and turns automatic checkpoints back on rather than let the
 log grow without bound. On close, and when the writer thread unwinds from
 a panic, the writer's connection closes before it lets go of the

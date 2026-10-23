@@ -2,7 +2,8 @@
 
 //! The checkpointer: copies the write-ahead log back into the database file
 //! on its own connection and thread, so a checkpoint's fsyncs never run
-//! inside a write.
+//! inside a write. The two still share a disk, so a write can stall while a
+//! pass runs; `docs/storage.md` has the evidence and the hypothesis.
 //!
 //! SQLite's automatic checkpoint runs inside whichever commit pushes the log
 //! past 1000 pages, on the committing connection. Here that is the writer
@@ -100,9 +101,9 @@ const CHECKPOINT_POLL: Duration = Duration::from_millis(10);
 
 /// Longest retention waits, before one of its writes, for the checkpointer
 /// to copy a log past [`SOFT_LIMIT_FRAMES`]: as long as the writer would wait
-/// at the hard limit. A wait that times out writes anyway, and the hard
-/// limit still bounds the log.
-const PACE_WAIT: Duration = schema::BUSY_TIMEOUT;
+/// at the hard limit. A wait that times out logs a warning and writes
+/// anyway, and the hard limit still bounds the log.
+pub(crate) const PACE_WAIT: Duration = schema::BUSY_TIMEOUT;
 
 /// The log file's size once a rewind has emptied it: about
 /// [`HARD_LIMIT_FRAMES`] frames of 4 KiB pages. A log that a long read kept
@@ -319,7 +320,9 @@ impl Checkpointer {
 
     /// Before a bulk write: while the log is past [`SOFT_LIMIT_FRAMES`] and
     /// no pass has copied it, waits for one, for up to [`PACE_WAIT`], so the
-    /// bulk writer, not the writes queued behind it, waits for the copy.
+    /// bulk writer, not the writes queued behind it, waits for the copy. The
+    /// caller holds no transaction and nothing of the writer's meanwhile, so
+    /// other writes go on. A wait that times out logs a warning.
     pub(crate) async fn make_room(&self) {
         if !self.log.behind() {
             return;
@@ -328,7 +331,16 @@ impl Checkpointer {
         while self.log.behind() && started.elapsed() < PACE_WAIT {
             tokio::time::sleep(CHECKPOINT_POLL).await;
         }
-        self.stats.paced(started, started.elapsed());
+        let waited = started.elapsed();
+        self.stats.paced(started, waited);
+        if self.log.behind() {
+            tracing::warn!(
+                frames = self.log.frames.load(Ordering::Relaxed),
+                ?waited,
+                "no checkpoint copied the write-ahead log past its soft limit in time; \
+                 retention writes anyway"
+            );
+        }
     }
 }
 

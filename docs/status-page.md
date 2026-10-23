@@ -78,7 +78,8 @@ component's or a project's own feed first on its page.
   `urn:tocsin:releases` and `urn:tocsin:releases:<project>`. None depends
   on configuration, so moving the site keeps every reader's history.
 - **Links are absolute**, from `[server] public_url`, or else from the
-  request's `Host`.
+  request's `Host` over `http://`. Behind TLS, set `public_url` so links
+  say `https://`.
 - An incident's entry holds its status, impact and components, then every
   update newest first, rendered like the page. A feed's `<updated>` is its
   newest entry's, so an unchanged feed keeps its `ETag`.

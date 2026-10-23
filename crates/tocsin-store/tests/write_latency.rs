@@ -255,6 +255,19 @@ fn paths(stats: &CheckpointStats, stalls: &[Stall], opened: Instant, purged: Ins
     if stats.events_dropped > 0 {
         let _ = writeln!(out, "{} later events were not kept.", stats.events_dropped);
     }
+    // Each is a stall waiting to happen, so all of them, over budget or not.
+    for event in &stats.events {
+        if let CheckpointEvent::Limit { .. } = event {
+            let (from, to) = span(event);
+            let _ = writeln!(
+                out,
+                "- {:.3}–{:.3} s {}",
+                since(from),
+                since(to),
+                describe(event)
+            );
+        }
+    }
     for stall in stalls {
         let _ = writeln!(
             out,

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Bearer-token authorization: required for write routes, optional for
-//! reads that show more to a `status:read` token ([`Viewer`]).
+//! reads ([`Viewer`]), which show more to a `status:read` token.
 //!
 //! A handler takes [`Authorized<S>`] for the scope `S` it needs:
 //!
@@ -125,17 +125,29 @@ fn authorize<S: Scope>(parts: &Parts, state: &AppState) -> Result<Authorized<S>,
     })
 }
 
-/// Who is reading a route whose answer depends on it.
+/// The `[[token]]` an `Authorization: Bearer` header names: 401 when the
+/// header is missing, malformed or holds a secret no token has.
+fn authenticate<'a>(parts: &Parts, state: &'a AppState) -> Result<&'a Token, ApiError> {
+    let secret = bearer(parts)
+        .ok_or_else(|| ApiError::unauthorized("send a token as `Authorization: Bearer <token>`"))?;
+    find_token(&state.config.tokens, secret.as_bytes())
+        .ok_or_else(|| ApiError::unauthorized("unknown token"))
+}
+
+/// Who is reading. Every read route takes it, so one rule holds for all.
 ///
-/// No `Authorization` header is the public view. A header is checked like
-/// a write's: 401 for an unknown token, 403 for one without `status:read`,
-/// so a mistyped secret is an error rather than a quietly smaller answer.
+/// No `Authorization` header is the public view, and so is a known token
+/// without `status:read` (an `incident` or `release` token in a script's
+/// environment), which reads what anyone may. A header that is malformed
+/// or names no token is 401, so a mistyped secret is an error rather than
+/// a quietly smaller answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Viewer {
     /// Anyone: sees public projects only.
     Public,
-    /// A token with `status:read`: sees every project.
-    // TODO(TOC-48): the private status page admits the same viewer.
+    /// A token with `status:read`: sees every project and check targets.
+    // TODO(TOC-56): the internal check board behind proxy auth admits the
+    // same viewer.
     Trusted,
 }
 
@@ -147,7 +159,13 @@ impl FromRequestParts<AppState> for Viewer {
         state: &AppState,
     ) -> impl Future<Output = Result<Self, ApiError>> + Send {
         std::future::ready(if parts.headers.contains_key(header::AUTHORIZATION) {
-            authorize::<scope::StatusRead>(parts, state).map(|_| Viewer::Trusted)
+            authenticate(parts, state).map(|token| {
+                if token.scopes.contains(&TokenScope::StatusRead) {
+                    Viewer::Trusted
+                } else {
+                    Viewer::Public
+                }
+            })
         } else {
             Ok(Viewer::Public)
         })

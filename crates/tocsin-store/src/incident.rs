@@ -192,6 +192,20 @@ pub(crate) fn list(conn: &Connection, before: Option<i64>, limit: u32) -> Result
     })
 }
 
+/// Every incident not yet resolved and every maintenance not yet
+/// completed, scheduled ones included, newest first, complete.
+pub(crate) fn unresolved(conn: &Connection) -> Result<Vec<Incident>> {
+    snapshot(conn, |conn| {
+        let incidents = conn
+            .prepare_cached(&format!(
+                "SELECT {INCIDENT_COLUMNS} FROM incident WHERE resolved_at IS NULL ORDER BY id DESC"
+            ))?
+            .query_map([], incident_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        complete(conn, incidents)
+    })
+}
+
 /// An incident not yet resolved or a maintenance not yet completed, with
 /// only what deriving component status needs: no title, no updates.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -56,7 +56,7 @@ description = "The on-call rota"
 
 The token's `id`, never its secret, is what the API records and logs. Every
 configured secret is compared in constant time, so a response does not
-reveal how much of a guess was right. Reads need no token. The full
+reveal how much of a guess was right. Reads need no token ([api.md](api.md) has the whole read API). The full
 `[[token]]` reference is in [`config.md`](config.md#token).
 
 ## HTTP API

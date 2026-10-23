@@ -143,6 +143,7 @@ async fn serve(
         config: Arc::clone(config),
         events,
         admin,
+        live: Arc::new(monitor.engine.status_handle()),
         heartbeats: monitor.heartbeats(),
     });
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
@@ -633,6 +634,7 @@ mod tests {
             config,
             events,
             admin: None,
+            live: Arc::new(monitor.engine.status_handle()),
             heartbeats: monitor.heartbeats(),
         });
 

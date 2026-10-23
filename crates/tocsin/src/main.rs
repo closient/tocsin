@@ -24,6 +24,7 @@ mod net;
 mod notify;
 mod output;
 mod probe;
+mod query;
 mod release;
 mod serve;
 mod web;
@@ -86,6 +87,26 @@ fn run(cli: Cli) -> Result<Report, Failure> {
                 .expect("the OpenAPI document serializes"),
             text: http::openapi::pretty().trim_end().to_owned(),
         }),
+        Some(Command::Status { server }) => query::status(&server),
+        Some(Command::History {
+            server,
+            check,
+            page,
+        }) => query::history(&server, &check, &page),
+        Some(Command::Outages { server, page }) => query::outages(&server, &page),
+        Some(Command::Timeline {
+            server,
+            component,
+            since,
+            after,
+            limit,
+        }) => query::timeline(
+            &server,
+            component.as_deref(),
+            since,
+            after.as_deref(),
+            limit,
+        ),
         None => Err(Failure::new(
             Exit::InvalidInput,
             "no command given; run `tocsin --help` for usage",

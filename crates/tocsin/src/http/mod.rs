@@ -15,11 +15,16 @@ pub mod auth;
 pub mod error;
 pub mod events;
 pub mod heartbeats;
+pub mod history;
 pub mod incidents;
+pub mod llms;
 pub mod openapi;
 pub mod releases;
+pub mod status;
 pub mod timeline;
 
+#[cfg(test)]
+mod read_tests;
 #[cfg(test)]
 mod release_tests;
 #[cfg(test)]
@@ -34,7 +39,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use tocsin_core::config::Config;
 use tocsin_core::incident::Timestamp;
-use tocsin_engine::HeartbeatHandle;
+use tocsin_engine::{HeartbeatHandle, Snapshot, StatusHandle};
 use tocsin_store::Store;
 
 use self::error::ApiError;
@@ -54,6 +59,27 @@ pub struct AppState {
     pub admin: Option<Arc<AdminAuth>>,
     /// Takes heartbeat pings to the running engine.
     pub heartbeats: HeartbeatHandle,
+    /// The checks' and components' current state.
+    pub live: Arc<dyn LiveStatus>,
+}
+
+/// Where the read API gets the current state of every check and
+/// component: the running engine, or a fixed snapshot in tests.
+pub trait LiveStatus: Send + Sync {
+    /// The state now.
+    fn snapshot(&self) -> Snapshot;
+}
+
+impl LiveStatus for StatusHandle {
+    fn snapshot(&self) -> Snapshot {
+        StatusHandle::snapshot(self)
+    }
+}
+
+impl LiveStatus for Snapshot {
+    fn snapshot(&self) -> Snapshot {
+        self.clone()
+    }
 }
 
 impl AppState {
@@ -115,6 +141,7 @@ pub fn router(state: AppState) -> Router {
                     .into_response()
             }),
         )
+        .route(llms::PATH, get(llms::get_llms_txt))
         .fallback(|| async { ApiError::not_found("no such route") })
         .method_not_allowed_fallback(|| async { ApiError::method_not_allowed() })
         .layer(DefaultBodyLimit::max(BODY_LIMIT))

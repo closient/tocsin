@@ -10,7 +10,8 @@ use std::process::ExitCode;
 pub enum Exit {
     /// The command did what was asked.
     Ok = 0,
-    /// The command ran, and a check it ran failed.
+    /// The command ran, and a check it ran failed; or `tocsin status`
+    /// found something degraded or down.
     CheckFailed = 1,
     /// Bad arguments, or configuration that does not validate.
     InvalidInput = 2,

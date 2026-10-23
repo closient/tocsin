@@ -1,0 +1,86 @@
+---
+source: crates/tocsin/tests/query.rs
+expression: trusted
+---
+{
+  "events": [
+    {
+      "at": "[time]",
+      "check_id": "api-https",
+      "component_id": "api",
+      "ended_at": null,
+      "health": "down",
+      "id": 4,
+      "kind": "outage",
+      "node_id": "node-a",
+      "subject_kind": "check"
+    },
+    {
+      "at": "[time]",
+      "components": [
+        "api"
+      ],
+      "id": 1,
+      "impact": "major",
+      "incident_kind": "incident",
+      "kind": "incident",
+      "status": "investigating",
+      "title": "API errors"
+    },
+    {
+      "at": "[time]",
+      "id": 1,
+      "kind": "deploy",
+      "release": {
+        "created_at": "[time]",
+        "created_by": {
+          "id": "deploys",
+          "kind": "token"
+        },
+        "deployed_at": "[time]",
+        "environment": "production",
+        "id": 1,
+        "notes": "",
+        "project": "site",
+        "released_at": null,
+        "title": "",
+        "updated_at": "[time]",
+        "updated_by": {
+          "id": "deploys",
+          "kind": "token"
+        },
+        "url": null,
+        "version": "v1.2.0"
+      }
+    },
+    {
+      "at": "[time]",
+      "id": 2,
+      "kind": "deploy",
+      "release": {
+        "created_at": "[time]",
+        "created_by": {
+          "id": "deploys",
+          "kind": "token"
+        },
+        "deployed_at": "[time]",
+        "environment": "production",
+        "id": 2,
+        "notes": "",
+        "project": "secret",
+        "released_at": null,
+        "title": "",
+        "updated_at": "[time]",
+        "updated_by": {
+          "id": "deploys",
+          "kind": "token"
+        },
+        "url": null,
+        "version": "v1.2.0"
+      }
+    }
+  ],
+  "next_after": null,
+  "since": "[time]",
+  "truncated": false
+}

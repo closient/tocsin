@@ -68,6 +68,14 @@ impl Client {
         self.request(&Method::GET, path, &[], None::<&()>, false)
     }
 
+    /// `GET path`, with the token when one is set: the server answers
+    /// without one as it does the public. The answer comes back as the
+    /// server sent it, any JSON at all; a body that is not JSON is a
+    /// runtime failure.
+    pub fn read(&self, path: &str) -> Result<Value, Failure> {
+        self.request(&Method::GET, path, &[], None::<&()>, self.token.is_some())
+    }
+
     /// A write: `method path` with a JSON body and the token.
     pub fn write<B: Serialize, T: DeserializeOwned>(
         &self,
@@ -190,6 +198,7 @@ fn failure(method: &Method, url: &Url, status: StatusCode, bytes: &[u8]) -> Fail
         .as_str()
         .map_or_else(|| status.to_string(), ToOwned::to_owned);
     let mut failure = Failure::new(exit, format!("{method} {url}: {status}: {message}"));
+    failure.status = Some(status.as_u16());
     if let Some(fields) = body["fields"].as_array() {
         failure.errors = fields
             .iter()

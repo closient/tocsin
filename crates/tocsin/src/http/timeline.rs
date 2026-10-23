@@ -35,7 +35,8 @@ pub const DEFAULT_LIMIT: u32 = 100;
 /// The most events one read returns.
 pub const MAX_LIMIT: u32 = 500;
 
-const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+/// One day in milliseconds.
+pub const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
 pub fn router() -> OpenApiRouter<AppState> {
     OpenApiRouter::new().routes(routes!(get_timeline))
@@ -85,7 +86,6 @@ pub struct Window<'a> {
     responses(
         (status = 200, description = "Oldest first", body = Timeline),
         (status = 401, description = "An `Authorization` header with an unknown token", body = ErrorBody),
-        (status = 403, description = "A token without the `status:read` scope", body = ErrorBody),
         (status = 422, description = "An unknown component, or a bad `since`, `after` or `limit`", body = ErrorBody),
     ),
 )]
@@ -132,24 +132,7 @@ pub async fn read(
         order,
         limit,
     } = window;
-    let mut errors = Vec::new();
-    let earliest = now().as_millis() - MAX_WINDOW_MS;
-    if since.as_millis() < earliest {
-        errors.push(FieldError::new(
-            "since",
-            format!(
-                "must be within the last {} days, so at or after {}",
-                MAX_WINDOW_MS / DAY_MS,
-                Timestamp::from_millis(earliest)
-            ),
-        ));
-    }
-    if !(1..=MAX_LIMIT).contains(&limit) {
-        errors.push(FieldError::new(
-            "limit",
-            format!("must be 1 to {MAX_LIMIT}"),
-        ));
-    }
+    let mut errors = check_window(since, limit);
     let after = match after.map(str::parse::<TimelineCursor>) {
         Some(Err(bad)) => {
             errors.push(FieldError::new("after", bad.to_string()));
@@ -183,6 +166,31 @@ pub async fn read(
             component,
         })
         .await?)
+}
+
+/// What is wrong with a history read's `since` and `limit`: a `since`
+/// more than [`MAX_WINDOW_MS`] ago, a `limit` outside 1 to [`MAX_LIMIT`].
+/// Every history route bounds its window the same way.
+pub fn check_window(since: Timestamp, limit: u32) -> Vec<FieldError> {
+    let mut errors = Vec::new();
+    let earliest = now().as_millis() - MAX_WINDOW_MS;
+    if since.as_millis() < earliest {
+        errors.push(FieldError::new(
+            "since",
+            format!(
+                "must be within the last {} days, so at or after {}",
+                MAX_WINDOW_MS / DAY_MS,
+                Timestamp::from_millis(earliest)
+            ),
+        ));
+    }
+    if !(1..=MAX_LIMIT).contains(&limit) {
+        errors.push(FieldError::new(
+            "limit",
+            format!("must be 1 to {MAX_LIMIT}"),
+        ));
+    }
+    errors
 }
 
 /// What belongs to component `id` in the configuration: the checks and

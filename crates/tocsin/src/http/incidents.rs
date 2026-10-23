@@ -17,7 +17,7 @@ use utoipa::IntoParams;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use super::auth::{Authorized, scope};
+use super::auth::{Authorized, Viewer, scope};
 use super::error::{ApiError, ApiJson, ErrorBody};
 use super::events::Event;
 use super::{AppState, now};
@@ -54,13 +54,16 @@ pub struct ListQuery {
     path = "/api/v1/incidents",
     tag = TAG,
     params(ListQuery),
+    security((), ("bearer" = [])),
     responses(
         (status = 200, description = "One page, newest first", body = IncidentList),
+        (status = 401, description = "An `Authorization` header with an unknown token", body = ErrorBody),
         (status = 422, description = "A bad `before` or `limit`", body = ErrorBody),
     ),
 )]
 pub async fn list_incidents(
     State(state): State<AppState>,
+    _viewer: Viewer,
     query: Result<Query<ListQuery>, QueryRejection>,
 ) -> Result<Json<IncidentList>, ApiError> {
     let Query(query) = query
@@ -93,13 +96,16 @@ pub async fn list_incidents(
     path = "/api/v1/incidents/{id}",
     tag = TAG,
     params(("id" = i64, Path, description = "Incident id")),
+    security((), ("bearer" = [])),
     responses(
         (status = 200, description = "The incident", body = Incident),
+        (status = 401, description = "An `Authorization` header with an unknown token", body = ErrorBody),
         (status = 404, description = "No incident has that id", body = ErrorBody),
     ),
 )]
 pub async fn get_incident(
     State(state): State<AppState>,
+    _viewer: Viewer,
     id: Result<Path<i64>, PathRejection>,
 ) -> Result<Json<Incident>, ApiError> {
     let id = incident_id(id)?;

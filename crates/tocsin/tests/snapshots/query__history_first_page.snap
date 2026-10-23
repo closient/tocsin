@@ -1,0 +1,31 @@
+---
+source: crates/tocsin/tests/query.rs
+expression: first
+---
+{
+  "check_id": "api-https",
+  "next_before": 4,
+  "results": [
+    {
+      "detail": null,
+      "duration_ms": 40,
+      "error": "status 503",
+      "health": "down",
+      "id": 5,
+      "node_id": "node-a",
+      "started_at": "[time]",
+      "status_code": 503
+    },
+    {
+      "detail": null,
+      "duration_ms": 40,
+      "error": "status 503",
+      "health": "down",
+      "id": 4,
+      "node_id": "node-a",
+      "started_at": "[time]",
+      "status_code": 503
+    }
+  ],
+  "since": "[time]"
+}

@@ -83,6 +83,75 @@ pub enum Command {
     },
     /// Print the OpenAPI document for the HTTP API.
     Openapi,
+    /// The status now on a running server: overall, every component and
+    /// the open incidents. Exits 1 when anything is degraded or down.
+    Status {
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// One check's or heartbeat's raw results, newest first. Needs a token
+    /// with the `status:read` scope.
+    History {
+        #[command(flatten)]
+        server: ServerArgs,
+
+        /// A `[[check]]` or `[[heartbeat]]` id.
+        check: String,
+
+        #[command(flatten)]
+        page: HistoryArgs,
+    },
+    /// Outages open at any time in the window, newest first.
+    Outages {
+        #[command(flatten)]
+        server: ServerArgs,
+
+        #[command(flatten)]
+        page: HistoryArgs,
+    },
+    /// Outages, incidents and deploys, oldest first. Non-public projects'
+    /// deploys need a token with the `status:read` scope.
+    Timeline {
+        #[command(flatten)]
+        server: ServerArgs,
+
+        /// Only events touching this `[[component]]`.
+        #[arg(long, value_name = "ID")]
+        component: Option<String>,
+
+        /// The start of the window: a duration back from now, such as `1d`,
+        /// or RFC 3339. At most 366 days back; defaults to 30 days.
+        #[arg(long, value_name = "WHEN", value_parser = crate::query::parse_since)]
+        since: Option<Timestamp>,
+
+        /// Only events after this: the previous page's `next_after`, with
+        /// the same `--since`.
+        #[arg(long, value_name = "CURSOR")]
+        after: Option<String>,
+
+        /// Events, 1 to 500; defaults to 100.
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+}
+
+/// The window and page of a newest-first history read.
+#[derive(Debug, Args)]
+pub struct HistoryArgs {
+    /// The start of the window: a duration back from now, such as `2h` or
+    /// `7d`, or RFC 3339. At most 366 days back; defaults to one day for
+    /// results and 30 days for outages.
+    #[arg(long, value_name = "WHEN", value_parser = crate::query::parse_since)]
+    pub since: Option<Timestamp>,
+
+    /// Only rows older than this: the previous page's `next_before`, with
+    /// the same `--since`.
+    #[arg(long, value_name = "ID")]
+    pub before: Option<i64>,
+
+    /// Rows, 1 to 500; defaults to 100.
+    #[arg(long)]
+    pub limit: Option<u32>,
 }
 
 /// Which server to talk to, and as whom.
@@ -92,10 +161,10 @@ pub struct ServerArgs {
     #[arg(long, env = "TOCSIN_URL", value_name = "URL")]
     pub url: String,
 
-    /// A `[[token]]` secret with the scope the command writes with:
-    /// `incident` for incidents and maintenance, `release` for releases,
-    /// `heartbeat` for pings; needed to write. Prefer the environment
-    /// variable: arguments show in `ps`.
+    /// A `[[token]]` secret with the scope the command needs: `incident`
+    /// for incidents and maintenance, `release` for releases, `heartbeat`
+    /// for pings, `status:read` to read what is not public. Prefer the
+    /// environment variable: arguments show in `ps`.
     #[arg(
         long,
         env = "TOCSIN_TOKEN",

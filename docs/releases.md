@@ -80,9 +80,11 @@ secret = "${ENV:TOCSIN_READ_TOKEN}"
 scopes = ["status:read"]
 ```
 
-A read request with no `Authorization` header is anonymous. One with a
-header must carry a known token (else 401) with `status:read` (else 403):
-a wrong token is refused, not quietly treated as anonymous.
+A read request with no `Authorization` header, or with a known token that
+lacks `status:read` (this `deploys` token, say), sees public projects
+only. A header that is malformed or names no token is 401: a wrong token
+is refused, not quietly treated as anonymous. The full rule is in
+[api.md](api.md#who-sees-what).
 
 ## Visibility
 
@@ -118,7 +120,10 @@ shows them to everyone already.
 - **Timeline**: outages (at their start), incidents and maintenance (at
   creation), deploys (at `deployed_at`) and releases not yet deployed (at
   `released_at`), read from one database snapshot. Ties on time order by
-  kind (outage, incident, deploy, release), then id. `since` defaults to
+  kind (outage, incident, deploy, release), then id. `kind` names the
+  event, so an outage's own kind is `subject_kind` (`check` or `heartbeat`),
+  as on `/api/v1/outages`, just as an incident's is `incident_kind`.
+  `since` defaults to
   30 days ago and may reach back at most 366 days; `limit` is 1 to 500,
   default 100. `truncated` says more events fell in the window, and
   `next_after` is an opaque cursor: pass it back as `after`, with the same
@@ -135,7 +140,7 @@ The release-specific ones:
 | Status | `error` | When |
 |---|---|---|
 | 401 | `unauthorized` | A write with no token or an unknown one; a read with an unknown one. |
-| 403 | `forbidden` | A write without `release`; a read with a token that lacks `status:read`. |
+| 403 | `forbidden` | A write without `release`. |
 | 413 | `too_large` | `notes` over 64 KiB. (A body over 2 MiB is also 413.) |
 | 422 | `invalid` | An unknown project or component (named in the message), a bad version or environment (in the body or the path), a title over 200 characters, `released_at` earlier than recorded, a `released_at` or `deployed_at` more than an hour past the server's clock, a `since` or `limit` out of range, a `before` or `after` that is not a cursor tocsin handed out. |
 

@@ -6,7 +6,8 @@
 
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::Health;
 use crate::config::ComponentRule;
@@ -200,7 +201,7 @@ pub fn component_health(rule: ComponentRule, checks: &[Option<Health>]) -> Optio
 }
 
 /// What the status page shows for a component.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ComponentStatus {
     /// Working.

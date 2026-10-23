@@ -97,6 +97,7 @@ fn api() -> Api {
         config: Arc::new(config),
         events: EventBus::new(),
         admin: None,
+        live: Arc::new(tocsin_engine::Snapshot::default()),
         heartbeats: HeartbeatHandle::default(),
     };
     Api {
@@ -164,12 +165,61 @@ impl Api {
         .await
     }
 
+    /// A GET with `authorization` as the raw header. A JSON body loses its
+    /// clock echoes (`generated_at`, a defaulted `since`) and text its
+    /// instants, so two reads of the same data compare equal.
+    async fn read(&self, uri: &str, authorization: Option<&str>) -> (StatusCode, String) {
+        let mut request = Request::get(uri);
+        if let Some(value) = authorization {
+            request = request.header(header::AUTHORIZATION, value);
+        }
+        let (status, _, text) = self.raw(request.body(Body::empty()).unwrap()).await;
+        let text = match serde_json::from_str::<Value>(&text) {
+            Ok(Value::Object(mut object)) => {
+                object.remove("generated_at");
+                object.remove("since");
+                Value::Object(object).to_string()
+            }
+            _ => without_instants(&text),
+        };
+        (status, text)
+    }
+
     async fn page(&self, uri: &str) -> (StatusCode, String) {
         let (status, _, text) = self
             .raw(Request::get(uri).body(Body::empty()).unwrap())
             .await;
         (status, text)
     }
+}
+
+/// `text` with each millisecond RFC 3339 instant, such as
+/// `2026-10-23T15:04:39.116Z`, replaced by `[time]`.
+fn without_instants(text: &str) -> String {
+    const SHAPE: &[u8] = b"0000-00-00T00:00:00.000Z";
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let instant = bytes.get(at..at + SHAPE.len()).is_some_and(|window| {
+            window.iter().zip(SHAPE).all(|(byte, shape)| {
+                if *shape == b'0' {
+                    byte.is_ascii_digit()
+                } else {
+                    byte == shape
+                }
+            })
+        });
+        if instant {
+            out.push_str("[time]");
+            at += SHAPE.len();
+        } else {
+            let next = text[at..].chars().next().unwrap();
+            out.push(next);
+            at += next.len_utf8();
+        }
+    }
+    out
 }
 
 fn release(project: &str, version: &str) -> Value {
@@ -392,14 +442,107 @@ async fn a_private_release_is_absent_without_status_read() {
         "{timeline}"
     );
 
-    // A token that is not status:read is refused, not quietly narrowed.
-    for (token, expected) in [
-        (DEPLOYS, StatusCode::FORBIDDEN),
-        ("wrong", StatusCode::UNAUTHORIZED),
+    // A token without status:read reads the public view; one that names
+    // no token is refused.
+    let (status, list) = api
+        .send(Method::GET, "/api/v1/releases", Some(DEPLOYS), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert!(!list.to_string().contains("internal"), "{list}");
+    for uri in ["/api/v1/releases", "/api/v1/timeline"] {
+        let (status, _) = api.send(Method::GET, uri, Some("wrong"), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}");
+    }
+}
+
+/// One token rule on every read: no header, or a token without
+/// `status:read`, gets exactly the public view; a `status:read` token sees
+/// more; a header that names no token is a 401 so a typo is loud. Raw
+/// check results alone need the scope.
+#[tokio::test]
+async fn every_read_follows_one_token_rule() {
+    let api = api();
+    api.publish(release("api", "v1")).await;
+    api.publish(release("internal", "v9")).await;
+    api.deployed("internal", "v9", None).await;
+    let (status, incident) = api
+        .send(
+            Method::POST,
+            "/api/v1/incidents",
+            Some(ONCALL),
+            Some(json!({"title": "API errors", "impact": "major", "components": ["api"], "message": "Looking."})),
+        )
+        .await;
+    assert!(status.is_success(), "{status}: {incident}");
+    let incident = format!("/api/v1/incidents/{}", incident["id"]);
+    let reader = format!("Bearer {READER}");
+    // What only a reader sees: a check target and the non-public project's
+    // release, id and name.
+    let private = ["api.example.com:443", "v9", "internal", "Internal tool"];
+
+    for uri in [
+        "/api/v1/status.json",
+        "/api/v1/components/api",
+        "/api/v1/checks",
+        "/api/v1/outages",
+        "/api/v1/incidents",
+        incident.as_str(),
+        "/api/v1/releases",
+        "/api/v1/timeline",
+        "/llms.txt",
     ] {
-        for uri in ["/api/v1/releases", "/api/v1/timeline"] {
-            let (status, _) = api.send(Method::GET, uri, Some(token), None).await;
-            assert_eq!(status, expected, "{uri} {token}");
+        let (status, public) = api.read(uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {public}");
+        for hidden in private {
+            assert!(!public.contains(hidden), "{uri} shows {hidden}: {public}");
+        }
+        for token in [DEPLOYS, ONCALL] {
+            assert_eq!(
+                api.read(uri, Some(&format!("Bearer {token}"))).await,
+                (StatusCode::OK, public.clone()),
+                "{uri} with a write token"
+            );
+        }
+        for wrong in [
+            "Bearer not-a-token-0123456789",
+            "Bearer ",
+            "Basic cmVhZGVy",
+            READER,
+        ] {
+            let (status, error) = api.read(uri, Some(wrong)).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri} {wrong:?}: {error}");
+        }
+        let (status, full) = api.read(uri, Some(&reader)).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {full}");
+    }
+    for (uri, hidden) in [
+        ("/api/v1/checks", private[0]),
+        ("/api/v1/components/api", private[0]),
+        ("/api/v1/releases", private[1]),
+        ("/api/v1/timeline", private[1]),
+    ] {
+        let (_, full) = api.read(uri, Some(&reader)).await;
+        assert!(
+            full.contains(hidden),
+            "{uri} hides {hidden} from a reader: {full}"
+        );
+    }
+
+    let results = "/api/v1/checks/api-port/results";
+    for (authorization, expected) in [
+        (None, StatusCode::UNAUTHORIZED),
+        (
+            Some("Bearer not-a-token-0123456789".to_owned()),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (Some(format!("Bearer {DEPLOYS}")), StatusCode::FORBIDDEN),
+        (Some(format!("Bearer {ONCALL}")), StatusCode::FORBIDDEN),
+        (Some(reader.clone()), StatusCode::OK),
+    ] {
+        let (status, body) = api.read(results, authorization.as_deref()).await;
+        assert_eq!(status, expected, "{authorization:?}: {body}");
+        if status == StatusCode::FORBIDDEN {
+            assert!(body.contains("status:read"), "{body}");
         }
     }
 }

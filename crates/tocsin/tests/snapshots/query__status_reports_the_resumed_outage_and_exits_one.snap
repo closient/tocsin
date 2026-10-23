@@ -1,0 +1,64 @@
+---
+source: crates/tocsin/tests/query.rs
+expression: document
+---
+{
+  "components": [
+    {
+      "description": null,
+      "group": null,
+      "health": "down",
+      "id": "api",
+      "name": "API",
+      "status": "down"
+    },
+    {
+      "description": null,
+      "group": null,
+      "health": null,
+      "id": "jobs",
+      "name": "Jobs",
+      "status": "unknown"
+    }
+  ],
+  "generated_at": "[time]",
+  "incidents": [
+    {
+      "components": [
+        "api"
+      ],
+      "created_at": "[time]",
+      "created_by": {
+        "id": "oncall",
+        "kind": "token"
+      },
+      "id": 1,
+      "impact": "major",
+      "kind": "incident",
+      "resolved_at": null,
+      "scheduled_end": null,
+      "scheduled_start": null,
+      "status": "investigating",
+      "title": "API errors",
+      "updated_at": "[time]",
+      "updated_by": {
+        "id": "oncall",
+        "kind": "token"
+      },
+      "updates": [
+        {
+          "created_at": "[time]",
+          "created_by": {
+            "id": "oncall",
+            "kind": "token"
+          },
+          "id": 1,
+          "message": "Looking into it.",
+          "status": "investigating"
+        }
+      ]
+    }
+  ],
+  "status": "down",
+  "title": "Example status"
+}

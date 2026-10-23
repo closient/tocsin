@@ -19,6 +19,7 @@ use crate::incident::{
     Actor, FieldError, Impact, IncidentKind, IncidentStatus, Timestamp, check_title, into_result,
 };
 use crate::link::http_url;
+use crate::status::CheckKind;
 
 /// The environment a release or deploy is for when none is given.
 pub const DEFAULT_ENVIRONMENT: &str = "production";
@@ -370,8 +371,11 @@ pub enum TimelineEvent {
         id: i64,
         /// The node that saw it.
         node_id: String,
-        /// The failing check.
+        /// The failing check or heartbeat.
         check_id: String,
+        /// Whether `check_id` is a check or a heartbeat; `kind` is the
+        /// event's.
+        subject_kind: CheckKind,
         /// The check's component when the outage opened, if any.
         component_id: Option<String>,
         /// `degraded` or `down`.

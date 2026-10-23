@@ -466,7 +466,7 @@ fn check_components(
     }
 }
 
-fn check_text(path: &str, text: &str, errors: &mut Vec<FieldError>) {
+pub(crate) fn check_text(path: &str, text: &str, errors: &mut Vec<FieldError>) {
     if text.trim().is_empty() {
         errors.push(FieldError::new(path, "must not be empty"));
     }
@@ -480,7 +480,7 @@ pub const MAX_TITLE_LENGTH: usize = 200;
 /// characters (CR, LF, tab, ...) and no Unicode line or paragraph
 /// separator, any of which would break the line it is printed on. It is at
 /// most [`MAX_TITLE_LENGTH`] characters.
-fn check_title(path: &str, title: &str, errors: &mut Vec<FieldError>) {
+pub(crate) fn check_title(path: &str, title: &str, errors: &mut Vec<FieldError>) {
     check_text(path, title, errors);
     let length = title.chars().count();
     if length > MAX_TITLE_LENGTH {
@@ -565,7 +565,7 @@ fn check_status(kind: IncidentKind, status: IncidentStatus, errors: &mut Vec<Fie
     }
 }
 
-fn into_result(errors: Vec<FieldError>) -> Result<(), Vec<FieldError>> {
+pub(crate) fn into_result(errors: Vec<FieldError>) -> Result<(), Vec<FieldError>> {
     if errors.is_empty() {
         Ok(())
     } else {

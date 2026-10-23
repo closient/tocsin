@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Bearer-token authorization for write routes.
+//! Bearer-token authorization: required for write routes, optional for
+//! reads that show more to a `status:read` token ([`Viewer`]).
 //!
 //! A handler takes [`Authorized<S>`] for the scope `S` it needs:
 //!
@@ -44,8 +45,10 @@ pub mod scope {
     #[allow(dead_code, reason = "used by the heartbeat API")]
     pub struct Heartbeat;
     /// `release`: releases and deploys.
-    #[allow(dead_code, reason = "used by the release API")]
     pub struct Release;
+
+    /// `status:read`: reading what is not public.
+    pub struct StatusRead;
 
     impl super::Scope for Incident {
         const SCOPE: TokenScope = TokenScope::Incident;
@@ -58,6 +61,10 @@ pub mod scope {
     impl super::Scope for Release {
         const SCOPE: TokenScope = TokenScope::Release;
         const NAME: &'static str = "release";
+    }
+    impl super::Scope for StatusRead {
+        const SCOPE: TokenScope = TokenScope::StatusRead;
+        const NAME: &'static str = "status:read";
     }
 }
 
@@ -98,6 +105,35 @@ fn authorize<S: Scope>(parts: &Parts, state: &AppState) -> Result<Authorized<S>,
         actor: Actor::token(token.id.as_str()),
         scope: PhantomData,
     })
+}
+
+/// Who is reading a route whose answer depends on it.
+///
+/// No `Authorization` header is the public view. A header is checked like
+/// a write's: 401 for an unknown token, 403 for one without `status:read`,
+/// so a mistyped secret is an error rather than a quietly smaller answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Viewer {
+    /// Anyone: sees public projects only.
+    Public,
+    /// A token with `status:read`: sees every project.
+    // TODO(TOC-48): the private status page admits the same viewer.
+    Trusted,
+}
+
+impl FromRequestParts<AppState> for Viewer {
+    type Rejection = ApiError;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> impl Future<Output = Result<Self, ApiError>> + Send {
+        std::future::ready(if parts.headers.contains_key(header::AUTHORIZATION) {
+            authorize::<scope::StatusRead>(parts, state).map(|_| Viewer::Trusted)
+        } else {
+            Ok(Viewer::Public)
+        })
+    }
 }
 
 /// The credentials of an `Authorization: Bearer` header; the scheme is

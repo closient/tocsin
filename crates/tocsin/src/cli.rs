@@ -14,7 +14,8 @@ pub struct Cli {
     /// Print the version and exit.
     ///
     /// Declared by hand rather than through clap so that `--json` applies.
-    #[arg(short = 'V', long, global = true, action = ArgAction::SetTrue)]
+    /// Not global: `tocsin release` takes a `--version` of its own.
+    #[arg(short = 'V', long, action = ArgAction::SetTrue)]
     pub version: bool,
 
     /// Write exactly one JSON document to stdout instead of text.
@@ -63,6 +64,11 @@ pub enum Command {
         #[command(subcommand)]
         command: MaintenanceCommand,
     },
+    /// Publish releases and stamp deploys on a running server.
+    Release {
+        #[command(subcommand)]
+        command: ReleaseCommand,
+    },
     /// Print the OpenAPI document for the HTTP API.
     Openapi,
 }
@@ -74,8 +80,9 @@ pub struct ServerArgs {
     #[arg(long, env = "TOCSIN_URL", value_name = "URL")]
     pub url: String,
 
-    /// A `[[token]]` secret with the `incident` scope; needed to write.
-    /// Prefer the environment variable: arguments show in `ps`.
+    /// A `[[token]]` secret with the scope the command writes with
+    /// (`incident` or `release`); needed to write. Prefer the environment
+    /// variable: arguments show in `ps`.
     #[arg(
         long,
         env = "TOCSIN_TOKEN",
@@ -242,6 +249,73 @@ pub enum MaintenanceCommand {
         /// none, minor, major or critical. Defaults to none.
         #[arg(long)]
         impact: Option<Impact>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ReleaseCommand {
+    /// Publish a release, or update the one with the same project, version
+    /// and environment.
+    Publish {
+        #[command(flatten)]
+        server: ServerArgs,
+
+        /// A `[[project]]` id.
+        #[arg(long, value_name = "ID")]
+        project: String,
+
+        /// The version, such as `v1.4.0`: 1 to 64 ASCII letters, digits,
+        /// `.`, `_`, `+` or `-`, starting with a letter or digit.
+        #[arg(long, value_name = "VERSION")]
+        version: String,
+
+        /// One line, at most 200 characters. Defaults to the version.
+        #[arg(long)]
+        title: Option<String>,
+
+        /// Release notes in markdown, at most 64 KiB; `-` reads stdin.
+        #[arg(long, value_name = "FILE")]
+        notes_file: Option<PathBuf>,
+
+        /// Defaults to `production`.
+        #[arg(long, value_name = "NAME")]
+        environment: Option<String>,
+
+        /// An http or https link to the release, such as its GitHub
+        /// release page. (`--url` is the tocsin server.)
+        #[arg(long, value_name = "URL")]
+        release_url: Option<String>,
+
+        /// When it was released: `now` or RFC 3339. Defaults to now on the
+        /// first publish and to the recorded time after.
+        #[arg(long, value_name = "TIME", value_parser = crate::release::parse_when)]
+        released_at: Option<Timestamp>,
+
+        /// When it was deployed, if it already has been: `now` or RFC 3339.
+        #[arg(long, value_name = "TIME", value_parser = crate::release::parse_when)]
+        deployed_at: Option<Timestamp>,
+    },
+    /// Record that a version was deployed. A version not yet published is
+    /// recorded as a stub its publish fills in.
+    Deployed {
+        #[command(flatten)]
+        server: ServerArgs,
+
+        /// A `[[project]]` id.
+        #[arg(long, value_name = "ID")]
+        project: String,
+
+        /// The version, as published.
+        #[arg(long, value_name = "VERSION")]
+        version: String,
+
+        /// Defaults to `production`.
+        #[arg(long, value_name = "NAME")]
+        environment: Option<String>,
+
+        /// `now` (the default) or RFC 3339.
+        #[arg(long, value_name = "TIME", value_parser = crate::release::parse_when)]
+        deployed_at: Option<Timestamp>,
     },
 }
 

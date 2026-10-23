@@ -42,10 +42,15 @@ const ORIGIN: &str = "https://status.example.com";
 const ALICE: &str = "alice@example.com";
 
 fn config(auth: &str) -> Config {
+    config_with(auth, "")
+}
+
+/// [`config`] with `more` TOML after the components.
+fn config_with(auth: &str, more: &str) -> Config {
     let text = format!(
         "[server]\npublic_url = \"{ORIGIN}/\"\n\n[server.auth]\n{auth}\n\n\
          [[component]]\nid = \"api\"\nname = \"API\"\n\n\
-         [[component]]\nid = \"web\"\nname = \"Web\"\n"
+         [[component]]\nid = \"web\"\nname = \"Web\"\n\n{more}"
     );
     tocsin_core::config::load(
         &[Source {
@@ -848,6 +853,7 @@ async fn admin_is_404_when_auth_is_off() {
             (Method::GET, "/admin"),
             (Method::GET, "/admin/incidents/1"),
             (Method::POST, "/admin/incidents"),
+            (Method::GET, "/admin/timeline"),
         ] {
             let request = from(PROXY, method, uri)
                 .header("x-forwarded-email", ALICE)
@@ -1541,4 +1547,99 @@ async fn rows(state: &AppState) -> (IncidentRow, Vec<UpdateRow>) {
         })
         .await
         .unwrap()
+}
+
+// --- Timeline ------------------------------------------------------------
+
+/// The admin timeline shows every project's deploys, private ones too;
+/// the public release pages beside it do not.
+#[tokio::test]
+async fn the_admin_timeline_shows_private_deploys_to_an_admin_only() {
+    let config = config_with(
+        "mode = \"trusted_header\"\ntrusted_proxies = [\"10.0.0.0/8\"]",
+        "[[project]]\nid = \"internal\"\nname = \"Internal\"\npublic = false\ncomponents = [\"api\"]\n",
+    );
+    let admin = AdminAuth::from_config(&config).unwrap();
+    let site = site(config, admin);
+    http::releases::deployed(
+        &site.state,
+        "internal".into(),
+        "v9.9.9".into(),
+        tocsin_core::release::DeployStamp::default(),
+        Actor::token("deploys"),
+    )
+    .await
+    .unwrap();
+
+    for uri in ["/admin/timeline", "/admin/timeline?component=api"] {
+        let request = from(PROXY, Method::GET, uri)
+            .header("x-forwarded-email", ALICE)
+            .body(Body::empty())
+            .unwrap();
+        let (status, response) = send(&site.router, request).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        let page = text(response).await;
+        assert!(
+            page.contains("internal v9.9.9 to production"),
+            "{uri}: {page}"
+        );
+        assert!(page.contains("deployed before it was published"), "{uri}");
+    }
+    let request = from(PROXY, Method::GET, "/admin/timeline?component=web")
+        .header("x-forwarded-email", ALICE)
+        .body(Body::empty())
+        .unwrap();
+    let page = text(send(&site.router, request).await.1).await;
+    assert!(page.contains("Nothing in this window."), "{page}");
+
+    let request = from(OUTSIDER, Method::GET, "/admin/timeline")
+        .body(Body::empty())
+        .unwrap();
+    let (status, response) = send(&site.router, request).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(!text(response).await.contains("v9.9.9"));
+    let request = from(OUTSIDER, Method::GET, "/api/v1/timeline")
+        .body(Body::empty())
+        .unwrap();
+    let body = text(send(&site.router, request).await.1).await;
+    assert!(!body.contains("v9.9.9"), "{body}");
+}
+
+/// More than a page of events: the admin sees the newest, and is told so.
+#[tokio::test]
+async fn the_admin_timeline_shows_the_newest_page_and_says_so() {
+    let config = config_with(
+        "mode = \"trusted_header\"\ntrusted_proxies = [\"10.0.0.0/8\"]",
+        "[[project]]\nid = \"api\"\nname = \"API\"\n",
+    );
+    let admin = AdminAuth::from_config(&config).unwrap();
+    let site = site(config, admin);
+    for index in 0..510 {
+        http::releases::deployed(
+            &site.state,
+            "api".into(),
+            format!("r{index}"),
+            tocsin_core::release::DeployStamp::default(),
+            Actor::token("deploys"),
+        )
+        .await
+        .unwrap();
+    }
+    let request = from(PROXY, Method::GET, "/admin/timeline")
+        .header("x-forwarded-email", ALICE)
+        .body(Body::empty())
+        .unwrap();
+    let (status, response) = send(&site.router, request).await;
+    assert_eq!(status, StatusCode::OK);
+    let page = text(response).await;
+    assert!(page.contains("these are the newest 500."), "{page}");
+    let newest = page.find("api r509 to production").unwrap();
+    let oldest_shown = page.find("api r10 to production").unwrap();
+    assert!(newest < oldest_shown, "newest first");
+    for hidden in 0..10 {
+        assert!(
+            !page.contains(&format!("api r{hidden} to production")),
+            "r{hidden}"
+        );
+    }
 }

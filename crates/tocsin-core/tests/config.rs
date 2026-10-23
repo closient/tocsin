@@ -4,7 +4,8 @@
 //! column.
 
 use tocsin_core::config::{
-    AuthMode, CheckType, Config, Diagnostic, Environment, Id, NotifierType, Secret, Source, load,
+    AuthMode, CheckType, Config, Diagnostic, Environment, Id, NotifierType, Secret, Source,
+    TokenScope, load,
 };
 
 const HOSTNAME: &str = "probe-01";
@@ -237,6 +238,39 @@ fn an_unknown_component_is_located_with_a_suggestion() {
     assert_eq!(diagnostic.location().as_deref(), Some("checks.toml:3:13"));
     assert_eq!(diagnostic.message, "unknown component `apj`");
     assert_eq!(diagnostic.hint.as_deref(), Some("did you mean `api`?"));
+}
+
+#[test]
+fn each_project_component_is_checked_and_located() {
+    let components = "[[component]]\nid = \"api\"\nname = \"API\"\n\n[[component]]\nid = \"web\"\nname = \"Web\"\n";
+    let diagnostic = only_error(&[
+        ("components.toml", components),
+        (
+            "projects.toml",
+            "[[project]]\nid = \"site\"\nname = \"Site\"\ncomponents = [\"api\", \"wbe\"]\n",
+        ),
+    ]);
+    assert_eq!(diagnostic.path.as_deref(), Some("project[0].components[1]"));
+    assert_eq!(diagnostic.message, "unknown component `wbe`");
+    assert_eq!(diagnostic.hint.as_deref(), Some("did you mean `web`?"));
+}
+
+#[test]
+fn a_project_is_public_unless_it_says_otherwise() {
+    let config = run(&[(
+        "projects.toml",
+        "[[project]]\nid = \"site\"\nname = \"Site\"\n\n\
+         [[project]]\nid = \"ops\"\nname = \"Ops\"\npublic = false\n\n\
+         [[token]]\nid = \"reader\"\nsecret = \"${ENV:TOKEN_C}\"\nscopes = [\"status:read\"]\n",
+    )])
+    .expect("valid");
+    let public: Vec<_> = config
+        .projects
+        .iter()
+        .map(|project| (project.id.as_str(), project.public))
+        .collect();
+    assert_eq!(public, [("site", true), ("ops", false)]);
+    assert_eq!(config.tokens[0].scopes, [TokenScope::StatusRead]);
 }
 
 #[test]

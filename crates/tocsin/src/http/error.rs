@@ -16,7 +16,8 @@ use utoipa::ToSchema;
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ErrorBody {
     /// Stable machine-readable code: `unauthorized`, `forbidden`,
-    /// `not_found`, `method_not_allowed`, `bad_request`, `invalid` or `internal`.
+    /// `not_found`, `method_not_allowed`, `bad_request`, `too_large`, `invalid`
+    /// or `internal`.
     pub error: &'static str,
     /// What went wrong, for a person.
     pub message: String,
@@ -71,6 +72,11 @@ impl ApiError {
     /// 400: a body or query that is not even well-formed.
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "bad_request", message)
+    }
+
+    /// 413: the body, or one field of it, is over its size limit.
+    pub fn too_large(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::PAYLOAD_TOO_LARGE, "too_large", message)
     }
 
     /// 422: well-formed, but some fields are wrong.
@@ -145,34 +151,70 @@ where
     type Rejection = ApiError;
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let json = request
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(';').next())
-            .is_some_and(|mime| {
-                let mime = mime.trim();
-                mime.eq_ignore_ascii_case("application/json") || mime.ends_with("+json")
-            });
-        if !json {
-            return Err(ApiError::new(
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "bad_request",
-                "send the body as JSON with `Content-Type: application/json`",
-            ));
+        if !is_json(&request) {
+            return Err(not_json());
         }
-        let bytes = axum::body::Bytes::from_request(request, state)
-            .await
-            .map_err(|rejection| match rejection.status() {
-                StatusCode::PAYLOAD_TOO_LARGE => ApiError::new(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "too_large",
-                    format!("the body is over the {} byte limit", super::BODY_LIMIT),
-                ),
-                status => ApiError::new(status, "bad_request", rejection.body_text()),
-            })?;
+        let bytes = body(request, state).await?;
         parse(&bytes).map(ApiJson)
     }
+}
+
+/// A JSON request body that may be left out: an empty body is
+/// `T::default()`. A body that is present follows [`ApiJson`]'s rules.
+pub struct OptionalJson<T>(pub T);
+
+impl<S, T> FromRequest<S> for OptionalJson<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned + Default,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let json = is_json(&request);
+        let bytes = body(request, state).await?;
+        if bytes.is_empty() {
+            return Ok(OptionalJson(T::default()));
+        }
+        if !json {
+            return Err(not_json());
+        }
+        parse(&bytes).map(OptionalJson)
+    }
+}
+
+/// Whether the request says its body is JSON.
+fn is_json(request: &Request) -> bool {
+    request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|mime| {
+            let mime = mime.trim();
+            mime.eq_ignore_ascii_case("application/json") || mime.ends_with("+json")
+        })
+}
+
+fn not_json() -> ApiError {
+    ApiError::new(
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "bad_request",
+        "send the body as JSON with `Content-Type: application/json`",
+    )
+}
+
+/// The whole body, or 413 past [`super::BODY_LIMIT`].
+async fn body<S: Send + Sync>(request: Request, state: &S) -> Result<axum::body::Bytes, ApiError> {
+    axum::body::Bytes::from_request(request, state)
+        .await
+        .map_err(|rejection| match rejection.status() {
+            StatusCode::PAYLOAD_TOO_LARGE => ApiError::too_large(format!(
+                "the body is over the {} byte limit",
+                super::BODY_LIMIT
+            )),
+            status => ApiError::new(status, "bad_request", rejection.body_text()),
+        })
 }
 
 /// Parses `bytes` as `T`, reporting a type mismatch at its field path.

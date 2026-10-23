@@ -6,6 +6,7 @@
 use askama::Template;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
+use tocsin_core::incident::Timestamp;
 
 use super::assets;
 use super::identity::Admin;
@@ -40,6 +41,15 @@ impl Layout {
             signed_in: Some(admin.email.clone()),
         }
     }
+}
+
+/// `at` for a person: `2026-10-23 14:05 UTC`. Pages put the exact instant
+/// beside it in a `<time datetime>`.
+pub fn when(at: Timestamp) -> String {
+    jiff::Timestamp::from_millisecond(at.as_millis()).map_or_else(
+        |_| at.to_string(),
+        |instant| instant.strftime("%Y-%m-%d %H:%M UTC").to_string(),
+    )
 }
 
 /// `page` as an HTML response with `status`.

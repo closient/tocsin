@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The incident CLI against a live `tocsin serve`: the round trip, the
-//! exit codes HTTP failures map to, and serve answering HTTP until a
-//! signal stops it.
+//! The incident and release CLIs against a live `tocsin serve`: the round
+//! trips, the exit codes HTTP failures map to, and serve answering HTTP
+//! until a signal stops it.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -24,6 +24,11 @@ name = "API"
 [[component]]
 id = "web"
 name = "Web"
+
+[[project]]
+id = "api"
+name = "API server"
+components = ["api"]
 
 [[token]]
 id = "oncall"
@@ -186,6 +191,144 @@ fn http_get(address: SocketAddr, path: &str) -> (String, String) {
     let (head, body) = response.split_once("\r\n\r\n").expect("a full response");
     let status = head.lines().next().unwrap().to_owned();
     (status, body.to_owned())
+}
+
+#[test]
+fn the_release_cli_publishes_and_stamps_deploys() {
+    let server = Server::start();
+    let notes = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(notes.path(), "**Faster** search.\n").unwrap();
+    let notes = notes.path().to_str().unwrap();
+
+    // Deployed before it is published: a stub, then filled in.
+    let stub = ok(&server.cli(
+        Some(DEPLOYS),
+        &[
+            "release",
+            "deployed",
+            "--project",
+            "api",
+            "--version",
+            "v1.4.0",
+        ],
+    ));
+    assert_eq!(stub["released_at"], Value::Null);
+    let published = ok(&server.cli(
+        Some(DEPLOYS),
+        &[
+            "release",
+            "publish",
+            "--project",
+            "api",
+            "--version",
+            "v1.4.0",
+            "--title",
+            "Faster search",
+            "--notes-file",
+            notes,
+            "--release-url",
+            "https://github.com/closient/tocsin/releases/tag/v1.4.0",
+        ],
+    ));
+    assert_eq!(published["id"], stub["id"]);
+    assert_eq!(published["deployed_at"], stub["deployed_at"]);
+    assert_eq!(published["notes"], "**Faster** search.\n");
+    assert_eq!(published["created_by"]["id"], "deploys");
+
+    // Publish with --deployed-at, into another environment.
+    let staging = ok(&server.cli(
+        Some(DEPLOYS),
+        &[
+            "release",
+            "publish",
+            "--project",
+            "api",
+            "--version",
+            "v1.5.0",
+            "--notes-file",
+            notes,
+            "--environment",
+            "staging",
+            "--deployed-at",
+            "2026-10-23T12:00:00Z",
+        ],
+    ));
+    assert_eq!(staging["environment"], "staging");
+    assert_eq!(staging["deployed_at"], "2026-10-23T12:00:00.000Z");
+    assert_eq!(staging["title"], "v1.5.0");
+
+    let (status, body) = http_get(server.address, "/releases/api/v1.4.0");
+    assert!(status.contains("200"), "{status}");
+    assert!(body.contains("<strong>Faster</strong> search."));
+}
+
+#[test]
+fn the_release_cli_maps_failures_to_exit_codes() {
+    let server = Server::start();
+    // A 422 naming the project, a 401, a 403, a missing file, an unsafe
+    // version caught before any request, and no server at all.
+    let (code, error) = failed(&server.cli(
+        Some(DEPLOYS),
+        &["release", "publish", "--project", "nope", "--version", "v1"],
+    ));
+    assert_eq!(code, Some(2));
+    assert!(
+        error["message"].as_str().unwrap().contains("nope"),
+        "{error}"
+    );
+    let (code, _) = failed(&server.cli(
+        Some("wrong-token-0123456789"),
+        &["release", "deployed", "--project", "api", "--version", "v1"],
+    ));
+    assert_eq!(code, Some(2));
+    let (code, _) = failed(&server.cli(
+        Some(ONCALL),
+        &["release", "deployed", "--project", "api", "--version", "v1"],
+    ));
+    assert_eq!(code, Some(2));
+    let (code, error) = failed(&server.cli(
+        Some(DEPLOYS),
+        &[
+            "release",
+            "publish",
+            "--project",
+            "api",
+            "--version",
+            "v1",
+            "--notes-file",
+            "/nonexistent/notes.md",
+        ],
+    ));
+    assert_eq!(
+        (code, error["kind"].as_str()),
+        (Some(2), Some("invalid_input"))
+    );
+    let (code, error) = failed(&server.cli(
+        Some(DEPLOYS),
+        &[
+            "release",
+            "deployed",
+            "--project",
+            "api",
+            "--version",
+            "../incidents",
+        ],
+    ));
+    assert_eq!(code, Some(2));
+    assert!(
+        error["message"].as_str().unwrap().contains("--version"),
+        "{error}"
+    );
+    drop(server);
+    let (code, error) = failed(&cli(
+        "http://127.0.0.1:9",
+        Some(DEPLOYS),
+        &["release", "deployed", "--project", "api", "--version", "v1"],
+    ));
+    assert_eq!(
+        (code, error["kind"].as_str()),
+        (Some(3), Some("runtime_error"))
+    );
 }
 
 #[test]

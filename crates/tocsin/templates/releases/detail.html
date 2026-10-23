@@ -1,0 +1,30 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{% extends "base.html" %}
+{% block content %}
+<p><a href="{{ project_href }}">{{ project }} releases</a></p>
+<h1>{{ title }}</h1>
+<div class="meta">
+  <span class="badge">{{ project }} {{ version }}</span>
+  {%- if let Some(at) = released_at %}
+  <span class="muted">released <time datetime="{{ at.iso }}">{{ at.text }}</time></span>
+  {%- endif %}
+</div>
+{%- if let Some(link) = url %}
+<p><a href="{{ link }}" rel="noopener noreferrer nofollow">{{ link }}</a></p>
+{%- endif %}
+<div class="markdown">{{ notes_html|safe }}</div>
+
+<h2>Deploys</h2>
+<ul class="items">
+  {%- for deploy in deploys %}
+  <li>
+    <span class="badge">{{ deploy.environment }}</span>
+    {%- if let Some(at) = deploy.deployed_at %}
+    <span class="muted">deployed <time datetime="{{ at.iso }}">{{ at.text }}</time></span>
+    {%- else %}
+    <span class="muted">not yet deployed</span>
+    {%- endif %}
+  </li>
+  {%- endfor %}
+</ul>
+{% endblock %}

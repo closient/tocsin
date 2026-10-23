@@ -1,0 +1,41 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ layout.title }}</h1>
+
+{%- if projects.len() > 1 %}
+<form class="inline" method="get" action="/releases">
+  <label>Project
+    <select name="project">
+      <option value="">All projects</option>
+      {%- for choice in projects %}
+      <option value="{{ choice.id }}"{% if choice.selected %} selected{% endif %}>{{ choice.name }}</option>
+      {%- endfor %}
+    </select>
+  </label>
+  <button type="submit" class="secondary">Show</button>
+</form>
+{%- endif %}
+
+{%- if releases.is_empty() %}
+<p class="muted">No releases yet.</p>
+{%- else %}
+<ul class="items">
+  {%- for release in releases %}
+  <li>
+    <a class="item-title" href="{{ release.href }}">{{ release.title }}</a>
+    <div class="meta">
+      <span class="badge">{{ release.project }} {{ release.version }}</span>
+      {%- if let Some(at) = release.released_at %}
+      <span class="muted">released <time datetime="{{ at.iso }}">{{ at.text }}</time></span>
+      {%- endif %}
+    </div>
+  </li>
+  {%- endfor %}
+</ul>
+{%- if truncated %}
+<p class="muted">Showing the newest {{ releases.len() }}.</p>
+{%- endif %}
+{%- endif %}
+<p class="pager"><a href="{{ feed }}">Atom feed</a></p>
+{% endblock %}

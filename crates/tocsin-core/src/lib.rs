@@ -8,7 +8,9 @@
 pub mod config;
 pub mod health;
 pub mod incident;
+pub mod link;
 pub mod probe;
+pub mod release;
 pub mod state;
 
 pub use health::Health;

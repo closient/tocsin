@@ -11,16 +11,16 @@ use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use serde::Deserialize;
 use tocsin_core::incident::{
-    Actor, FieldError, Incident, IncidentEdit, IncidentList, NewIncident, NewUpdate, Timestamp,
+    Actor, FieldError, Incident, IncidentEdit, IncidentList, NewIncident, NewUpdate,
 };
 use utoipa::IntoParams;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use super::AppState;
 use super::auth::{Authorized, scope};
 use super::error::{ApiError, ApiJson, ErrorBody};
 use super::events::Event;
+use super::{AppState, now};
 
 /// The OpenAPI tag for these routes.
 pub const TAG: &str = "incidents";
@@ -264,8 +264,4 @@ fn incident_id(id: Result<Path<i64>, PathRejection>) -> Result<i64, ApiError> {
 
 fn missing(id: i64) -> ApiError {
     ApiError::not_found(format!("no incident {id}"))
-}
-
-fn now() -> Timestamp {
-    Timestamp::from_millis(tocsin_store::now_ms())
 }

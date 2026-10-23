@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "tocsin",
-    "description": "Uptime monitor, status page and release log. Reads are public; writes need a `[[token]]` with the route's scope.",
+    "description": "Uptime monitor, status page and release log. Reads are public; writes need a `[[token]]` with the route's scope, and a `status:read` token also sees non-public projects.",
     "license": {
       "name": "AGPL-3.0-only",
       "identifier": "AGPL-3.0-only"
@@ -344,6 +344,387 @@
           }
         ]
       }
+    },
+    "/api/v1/releases": {
+      "get": {
+        "tags": [
+          "releases"
+        ],
+        "summary": "Published releases, newest first. Without a `status:read` token only\npublic projects' releases are listed.",
+        "operationId": "list_releases",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "description": "Only this project's releases. A project the reader may not see\nmatches nothing, like one that does not exist.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Only releases published at or after this instant (RFC 3339).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Timestamp"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Only releases older than the previous page's last: its\n`next_before`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, 1 to 200; default 50.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Newest `released_at` first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "An `Authorization` header with an unknown token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A token without the `status:read` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A bad `since`, `before` or `limit`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "releases"
+        ],
+        "summary": "Publish a release. Posting the same project, version and environment\nagain updates it in place: title, notes and url are replaced,\n`released_at` moves only later, and a deploy already stamped is kept.",
+        "operationId": "publish_release",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewRelease"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Already recorded (published, or stamped as deployed); updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Release"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Release"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks the `release` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`notes` is over 64 KiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid fields, by path; an unknown project is named",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/releases/{project}/{version}/deployed": {
+      "post": {
+        "tags": [
+          "releases"
+        ],
+        "summary": "Record that a version was deployed, at `deployed_at` or now. The body\nmay be empty. A version not yet published is recorded as a stub that\nits publish fills in; until then it is on the timeline but not in the\nrelease log.",
+        "operationId": "stamp_deploy",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "A `[[project]]` id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "path",
+            "description": "The version, as published",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional; empty means production, now",
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/DeployStamp"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stamped on the recorded release",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Release"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Not yet published: recorded as a stub",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Release"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks the `release` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid fields, by path; an unknown project is named",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/timeline": {
+      "get": {
+        "tags": [
+          "timeline"
+        ],
+        "summary": "Outages, incidents and deploys, oldest first, read in one snapshot.\nTies on time order by kind (outage, incident, deploy, release), then id.\nWithout a `status:read` token only public projects' deploys appear.",
+        "operationId": "get_timeline",
+        "parameters": [
+          {
+            "name": "component",
+            "in": "query",
+            "description": "Only events touching this `[[component]]`: outages of its checks,\nincidents naming it, deploys of projects that list it.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "The start of the window (RFC 3339): at most 366 days ago; default\n30 days ago. Keep it the same while paging.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Timestamp"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Only events after the previous page's last: its `next_after`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Events, 1 to 500; default 100.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Oldest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Timeline"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "An `Authorization` header with an unknown token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A token without the `status:read` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An unknown component, or a bad `since`, `after` or `limit`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -374,6 +755,33 @@
           "person"
         ]
       },
+      "DeployStamp": {
+        "type": "object",
+        "description": "`POST /api/v1/releases/{project}/{version}/deployed`: record that a\nversion was deployed. The body may be empty.",
+        "properties": {
+          "deployed_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "Defaults to now; at most an hour past the server's clock. The\nrelease keeps the latest deploy time it is given, so a stamp\nearlier than the recorded one changes nothing."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "environment": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Defaults to `production`.",
+            "maxLength": 32,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$"
+          }
+        },
+        "additionalProperties": false
+      },
       "ErrorBody": {
         "type": "object",
         "description": "The body of every error response.",
@@ -384,7 +792,7 @@
         "properties": {
           "error": {
             "type": "string",
-            "description": "Stable machine-readable code: `unauthorized`, `forbidden`,\n`not_found`, `method_not_allowed`, `bad_request`, `invalid` or `internal`."
+            "description": "Stable machine-readable code: `unauthorized`, `forbidden`,\n`not_found`, `method_not_allowed`, `bad_request`, `too_large`, `invalid`\nor `internal`."
           },
           "fields": {
             "type": "array",
@@ -416,6 +824,15 @@
             "description": "Where in the request body; empty for the body as a whole."
           }
         }
+      },
+      "Health": {
+        "type": "string",
+        "description": "How a check fared. Ordered from best to worst, so `max` is the worst.",
+        "enum": [
+          "up",
+          "degraded",
+          "down"
+        ]
       },
       "Impact": {
         "type": "string",
@@ -735,6 +1152,77 @@
         },
         "additionalProperties": false
       },
+      "NewRelease": {
+        "type": "object",
+        "description": "`POST /api/v1/releases`: publish a release, or update the one with the\nsame project, version and environment.",
+        "required": [
+          "project",
+          "version"
+        ],
+        "properties": {
+          "deployed_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When it was deployed, if it already has been. Left as recorded when\nomitted or earlier than the recorded time; never more than an hour\npast the server's clock."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "environment": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Defaults to `production`. 1 to 32 characters, the same set as\n`version`.",
+            "maxLength": 32,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$"
+          },
+          "notes": {
+            "type": "string",
+            "description": "Markdown, at most 64 KiB. Defaults to none."
+          },
+          "project": {
+            "type": "string",
+            "description": "A configured `[[project]]` id."
+          },
+          "released_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When it was released. Defaults to now on the first publish and to\nthe recorded time on a re-publish; it may move later, never earlier,\nand never more than an hour past the server's clock."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "One line, at most 200 characters. Defaults to the version.",
+            "maxLength": 200
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An `http` or `https` link to the release."
+          },
+          "version": {
+            "type": "string",
+            "description": "1 to 64 characters: ASCII letters, digits and `.`, `_`, `+`, `-`,\nstarting with a letter or digit, such as `v1.4.0` or `2026.10.23+5`.",
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$"
+          }
+        },
+        "additionalProperties": false
+      },
       "NewUpdate": {
         "type": "object",
         "description": "`POST /api/v1/incidents/{id}/updates`: append an update.",
@@ -753,6 +1241,335 @@
           }
         },
         "additionalProperties": false
+      },
+      "Release": {
+        "type": "object",
+        "description": "A release of a project to one environment.",
+        "required": [
+          "id",
+          "project",
+          "version",
+          "environment",
+          "title",
+          "notes",
+          "created_at",
+          "created_by",
+          "updated_at",
+          "updated_by"
+        ],
+        "properties": {
+          "created_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When tocsin first heard of it."
+          },
+          "created_by": {
+            "$ref": "#/components/schemas/Actor",
+            "description": "Who first wrote it."
+          },
+          "deployed_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When it was last deployed, if it has been: the latest deploy time\nit has been given."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "environment": {
+            "type": "string",
+            "description": "Where it was released, such as `production` or `staging`."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Assigned by tocsin; never reused."
+          },
+          "notes": {
+            "type": "string",
+            "description": "Markdown. Empty when none were given."
+          },
+          "project": {
+            "type": "string",
+            "description": "The `[[project]]` id."
+          },
+          "released_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When it was published. `null` for a deploy stamped before its\npublish; never moved earlier once set."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "type": "string",
+            "description": "One line. Empty while the release is only a deploy stamp waiting\nfor its publish."
+          },
+          "updated_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When it last changed."
+          },
+          "updated_by": {
+            "$ref": "#/components/schemas/Actor",
+            "description": "Who made the last change."
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A link to the release, such as its tag or changelog."
+          },
+          "version": {
+            "type": "string",
+            "description": "The version, as CI named it."
+          }
+        }
+      },
+      "ReleaseList": {
+        "type": "object",
+        "description": "`GET /api/v1/releases`: published releases, newest first.",
+        "required": [
+          "releases",
+          "truncated"
+        ],
+        "properties": {
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `before` to get the next, older page; `null` on the last."
+          },
+          "releases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Release"
+            },
+            "description": "Newest `released_at` first, ties by newest id."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "Whether more matched than `limit`."
+          }
+        }
+      },
+      "Timeline": {
+        "type": "object",
+        "description": "`GET /api/v1/timeline`: outages, incidents and deploys, oldest first.",
+        "required": [
+          "since",
+          "events",
+          "truncated"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TimelineEvent"
+            },
+            "description": "Oldest first; ties by kind (outage, incident, deploy, release),\nthen id."
+          },
+          "next_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `after`, with the same `since`, to get the next page;\n`null` on the last."
+          },
+          "since": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "The start of the window: events at or after it."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "Whether more events fell in the window than `limit`."
+          }
+        }
+      },
+      "TimelineEvent": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A check failed: at the outage's start.",
+            "required": [
+              "at",
+              "id",
+              "node_id",
+              "check_id",
+              "health",
+              "kind"
+            ],
+            "properties": {
+              "at": {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When it began."
+              },
+              "check_id": {
+                "type": "string",
+                "description": "The failing check."
+              },
+              "component_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The check's component when the outage opened, if any."
+              },
+              "ended_at": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Timestamp",
+                    "description": "When it ended; `null` while it is open."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "health": {
+                "$ref": "#/components/schemas/Health",
+                "description": "`degraded` or `down`."
+              },
+              "id": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The outage's id."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "outage"
+                ]
+              },
+              "node_id": {
+                "type": "string",
+                "description": "The node that saw it."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "An incident or maintenance was opened: at its creation.",
+            "required": [
+              "at",
+              "id",
+              "incident_kind",
+              "title",
+              "impact",
+              "status",
+              "components",
+              "kind"
+            ],
+            "properties": {
+              "at": {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When it was opened."
+              },
+              "components": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The components it affects."
+              },
+              "id": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The incident's id."
+              },
+              "impact": {
+                "$ref": "#/components/schemas/Impact",
+                "description": "Its impact."
+              },
+              "incident_kind": {
+                "$ref": "#/components/schemas/IncidentKind",
+                "description": "Incident or maintenance."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "incident"
+                ]
+              },
+              "status": {
+                "$ref": "#/components/schemas/IncidentStatus",
+                "description": "Its current status."
+              },
+              "title": {
+                "type": "string",
+                "description": "Its title."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A release was deployed: at `deployed_at`.",
+            "required": [
+              "at",
+              "id",
+              "release",
+              "kind"
+            ],
+            "properties": {
+              "at": {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When it was deployed."
+              },
+              "id": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The release's id."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "deploy"
+                ]
+              },
+              "release": {
+                "$ref": "#/components/schemas/Release",
+                "description": "The release."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A release was published and not yet deployed: at `released_at`.",
+            "required": [
+              "at",
+              "id",
+              "release",
+              "kind"
+            ],
+            "properties": {
+              "at": {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When it was published."
+              },
+              "id": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The release's id."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "release"
+                ]
+              },
+              "release": {
+                "$ref": "#/components/schemas/Release",
+                "description": "The release."
+              }
+            }
+          }
+        ],
+        "description": "One entry on the timeline. Every kind carries `at`, the instant it is\nplaced at, and the `id` of its row."
       },
       "Timestamp": {
         "type": "string",
@@ -775,6 +1592,14 @@
     {
       "name": "incidents",
       "description": "Incidents and scheduled maintenance"
+    },
+    {
+      "name": "releases",
+      "description": "The release log and deploy stamps"
+    },
+    {
+      "name": "timeline",
+      "description": "Outages, incidents and deploys in one stream"
     }
   ]
 }

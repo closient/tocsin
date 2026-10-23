@@ -16,7 +16,11 @@ pub mod error;
 pub mod events;
 pub mod incidents;
 pub mod openapi;
+pub mod releases;
+pub mod timeline;
 
+#[cfg(test)]
+mod release_tests;
 #[cfg(test)]
 mod tests;
 
@@ -28,6 +32,7 @@ use axum::http::{HeaderValue, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use tocsin_core::config::Config;
+use tocsin_core::incident::Timestamp;
 use tocsin_store::Store;
 
 use self::error::ApiError;
@@ -37,7 +42,7 @@ use crate::web::{self, identity::AdminAuth};
 /// What every handler can reach.
 #[derive(Clone)]
 pub struct AppState {
-    /// History: results, incidents.
+    /// History: results, incidents, releases.
     pub store: Arc<Store>,
     /// The configuration loaded at startup.
     pub config: Arc<Config>,
@@ -55,6 +60,27 @@ impl AppState {
             .iter()
             .any(|component| component.id.as_str() == id)
     }
+
+    /// Whether `[[project]]` `id` is configured.
+    pub fn knows_project(&self, id: &str) -> bool {
+        self.config
+            .projects
+            .iter()
+            .any(|project| project.id.as_str() == id)
+    }
+
+    /// Whether `[[project]]` `id` is configured and public.
+    pub fn project_is_public(&self, id: &str) -> bool {
+        self.config
+            .projects
+            .iter()
+            .any(|project| project.id.as_str() == id && project.public)
+    }
+}
+
+/// The current instant, as writes record it.
+pub fn now() -> Timestamp {
+    Timestamp::from_millis(tocsin_store::now_ms())
 }
 
 /// Where the OpenAPI document is served.

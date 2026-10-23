@@ -107,8 +107,9 @@ events. The author recorded is `{"kind": "person", "id": "<email>"}`.
 
 ## Adding a page
 
-The admin page is the first of several server-rendered pages; the status
-page and release pages will follow the same pattern. The pieces live in
+The admin pages and the release pages (`crates/tocsin/src/web/releases.rs`)
+are server-rendered this way, and the status page will follow the same
+pattern. The pieces live in
 `crates/tocsin/src/web/`:
 
 - **Templates** are askama files in `crates/tocsin/templates/`. A page is

@@ -1,0 +1,44 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{% extends "base.html" %}
+{% block content %}
+<p><a href="/admin/">All incidents</a></p>
+<h1>Timeline</h1>
+<p class="muted">Outages, incidents and deploys since <time datetime="{{ since.iso }}">{{ since.text }}</time>, newest first, every project included.</p>
+
+{%- if !components.is_empty() %}
+<form class="inline" method="get" action="/admin/timeline">
+  <label>Component
+    <select name="component">
+      <option value="">All components</option>
+      {%- for choice in components %}
+      <option value="{{ choice.id }}"{% if choice.selected %} selected{% endif %}>{{ choice.name }}</option>
+      {%- endfor %}
+    </select>
+  </label>
+  <button type="submit" class="secondary">Show</button>
+</form>
+{%- endif %}
+
+{%- if truncated %}
+<p class="notice">More events fell in this window than one page shows; these are the newest {{ events.len() }}.</p>
+{%- endif %}
+{%- if events.is_empty() %}
+<p class="muted">Nothing in this window.</p>
+{%- else %}
+<ul class="items">
+  {%- for event in events %}
+  <li>
+    {%- if let Some(link) = event.href %}
+    <a class="item-title" href="{{ link }}">{{ event.text }}</a>
+    {%- else %}
+    <span class="item-title">{{ event.text }}</span>
+    {%- endif %}
+    <div class="meta">
+      <span class="badge {{ event.tone }}">{{ event.kind }}</span>
+      <span class="muted"><time datetime="{{ event.at.iso }}">{{ event.at.text }}</time> · {{ event.detail }}</span>
+    </div>
+  </li>
+  {%- endfor %}
+</ul>
+{%- endif %}
+{% endblock %}

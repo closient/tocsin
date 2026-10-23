@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The in-process event bus. Writers emit an [`Event`] after a change is
-//! committed (the incident API, and the engine for check and component
-//! changes); subscribers (the SSE stream, notifiers) each get every event
+//! committed (the incident and release APIs, and the engine for check and
+//! component changes); subscribers (the SSE stream, notifiers) each get every event
 //! sent after they subscribe. Events share the incident through an `Arc`,
 //! so each subscriber's copy of an event costs a reference count, not a
 //! copy of every update.
@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use tocsin_core::incident::Incident;
+use tocsin_core::release::Release;
 use tocsin_engine::ports::Sink;
 use tocsin_engine::{CheckChange, ComponentChange, EngineEvent, NoticesHandle};
 use tokio::sync::broadcast;
@@ -38,6 +39,22 @@ pub enum Event {
     IncidentEdited {
         /// As stored after the edit.
         incident: Arc<Incident>,
+    },
+    /// A release was published, or published again with new fields.
+    ReleasePublished {
+        /// As stored.
+        release: Arc<Release>,
+        /// Whether its project is public: a subscriber that shows events
+        /// to anyone forwards only these.
+        public: bool,
+    },
+    /// A deploy of a release was stamped; before its publish, the release
+    /// is a stub with an empty title and no `released_at`.
+    ReleaseDeployed {
+        /// As stored, with the new `deployed_at`.
+        release: Arc<Release>,
+        /// Whether its project is public.
+        public: bool,
     },
     /// A check's confirmed state changed. Alerting keys off
     /// [`CheckChange::alerts`], which is false inside maintenance.
@@ -108,7 +125,12 @@ pub async fn wake_on_incident_changes(
             )
             // Some of the events missed may have been incident changes.
             | Err(RecvError::Lagged(_)) => engine.notices_changed(),
-            Ok(Event::CheckChanged(_) | Event::ComponentChanged(_)) => {}
+            Ok(
+                Event::ReleasePublished { .. }
+                | Event::ReleaseDeployed { .. }
+                | Event::CheckChanged(_)
+                | Event::ComponentChanged(_),
+            ) => {}
             Err(RecvError::Closed) => return,
         }
     }

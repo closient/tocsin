@@ -21,6 +21,7 @@ mod lock;
 mod net;
 mod output;
 mod probe;
+mod release;
 mod serve;
 mod web;
 
@@ -71,6 +72,7 @@ fn run(cli: Cli) -> Result<Report, Failure> {
         },
         Some(Command::Incident { command }) => incident::run(command),
         Some(Command::Maintenance { command }) => incident::run_maintenance(command),
+        Some(Command::Release { command }) => release::run(command),
         Some(Command::Openapi) => Ok(Report {
             exit: Exit::Ok,
             json: serde_json::to_value(http::openapi::spec())

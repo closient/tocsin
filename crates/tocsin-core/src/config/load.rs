@@ -25,6 +25,7 @@ use super::{
     Auth, AuthMode, Check, Component, Config, Group, Heartbeat, Link, Notifier, Page, Project,
     Route, Server, Token,
 };
+use crate::link::http_url;
 
 /// One configuration file's name and contents.
 #[derive(Debug, Clone)]
@@ -503,8 +504,12 @@ impl<'a> Loader<'a> {
             }
         }
         for project in &items.projects {
-            if let Some(component) = &project.value.component {
-                references.push(("component", component, project.origin.key("component")));
+            for (index, component) in project.value.components.iter().enumerate() {
+                references.push((
+                    "component",
+                    component,
+                    project.origin.key("components").index(index),
+                ));
             }
         }
         for route in &items.routes {
@@ -1560,18 +1565,6 @@ fn list<T: fmt::Display>(names: impl IntoIterator<Item = T>) -> String {
         .join(", ")
 }
 
-/// An `http://` or `https://` URL with a host.
-fn http_url(url: &str) -> Result<(), String> {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"));
-    let host = rest.map(|rest| rest.split(['/', '?', '#']).next().unwrap_or_default());
-    match host {
-        Some(host) if !host.is_empty() && !url.contains(char::is_whitespace) => Ok(()),
-        _ => Err(format!("`{url}` is not an http:// or https:// URL")),
-    }
-}
-
 /// Whether `text` is a hostname or IP address.
 fn is_host(text: &str) -> bool {
     text.parse::<std::net::IpAddr>().is_ok()
@@ -1664,8 +1657,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        Environment, Source, TOP_LEVEL_KEYS, closest, edit_distance, host_and_port, http_url, load,
-        target,
+        Environment, Source, TOP_LEVEL_KEYS, closest, edit_distance, host_and_port, load, target,
     };
     use crate::config::{CheckType, schema};
 
@@ -1767,10 +1759,6 @@ mod tests {
 
     #[test]
     fn targets() {
-        assert!(http_url("https://example.com/health").is_ok());
-        assert!(http_url("http://127.0.0.1:8080").is_ok());
-        assert!(http_url("example.com").is_err());
-        assert!(http_url("https://").is_err());
         assert_eq!(host_and_port("[::1]:443"), Some(("::1", Some(443))));
         assert_eq!(host_and_port("::1"), Some(("::1", None)));
         assert_eq!(host_and_port("db:0"), None);

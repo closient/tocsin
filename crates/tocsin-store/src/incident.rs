@@ -250,7 +250,10 @@ pub(crate) fn open(conn: &Connection) -> Result<Vec<OpenIncident>> {
 /// components and updates all come from the same moment even while the
 /// writer commits. A write already runs inside its own transaction, which
 /// is snapshot enough.
-fn snapshot<T>(conn: &Connection, read: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+pub(crate) fn snapshot<T>(
+    conn: &Connection,
+    read: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
     if !conn.is_autocommit() {
         return read(conn);
     }
@@ -340,7 +343,7 @@ fn incident_row(row: &Row<'_>) -> rusqlite::Result<Incident> {
 }
 
 /// The `*_by_kind` column at `index` and the id after it.
-fn actor(row: &Row<'_>, index: usize) -> rusqlite::Result<Actor> {
+pub(crate) fn actor(row: &Row<'_>, index: usize) -> rusqlite::Result<Actor> {
     Ok(Actor {
         kind: text::<ActorKind>(row, index)?,
         id: row.get(index + 1)?,
@@ -348,7 +351,7 @@ fn actor(row: &Row<'_>, index: usize) -> rusqlite::Result<Actor> {
 }
 
 /// A text column holding one of a fixed set of names.
-fn text<T>(row: &Row<'_>, index: usize) -> rusqlite::Result<T>
+pub(crate) fn text<T>(row: &Row<'_>, index: usize) -> rusqlite::Result<T>
 where
     T: std::str::FromStr<Err = String>,
 {

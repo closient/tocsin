@@ -49,6 +49,8 @@ workspace = true
 rusqlite = { version = "0.40", features = ["bundled"] }
 insta = { workspace = true }
 tempfile = "3"
+# A bound, never-listening socket: a port that refuses connections and stays ours.
+socket2 = "0.6"
 tocsin-core.workspace = true
 # Paused time for the key-cache tests.
 tokio = { workspace = true, features = ["test-util"] }

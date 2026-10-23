@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+#[allow(dead_code)]
+mod support;
+
 fn tocsin(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_tocsin"))
         .args(args)
@@ -356,9 +359,8 @@ fn notify_test_names_the_notifier_it_meant() {
 #[test]
 fn serve_stops_mid_delivery_and_keeps_the_alert_queued() {
     // A check on a port nobody listens on, so it goes down at once.
-    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let down_target = closed.local_addr().unwrap();
-    drop(closed);
+    let closed = support::RefusedPort::new();
+    let down_target = closed.address();
     // A webhook receiver that accepts the connection and never answers.
     let receiver = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let webhook = format!("http://{}/hook", receiver.local_addr().unwrap());
@@ -855,10 +857,8 @@ fn serve_applies_retention_at_startup() {
 fn serve_runs_the_checks_and_records_an_outage() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let open = listener.local_addr().unwrap();
-    let closed = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap();
+    let refused = support::RefusedPort::new();
+    let closed = refused.address();
     let config = config_folder();
     let checks = format!(
         "[[check]]\nid = \"open\"\ntype = \"tcp\"\ntarget = \"{open}\"\n\

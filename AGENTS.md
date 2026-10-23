@@ -16,6 +16,8 @@ cargo deny check            # licences must stay AGPL-compatible (deny.toml)
 
 CI (`.github/workflows/ci.yml`) runs exactly these on linux x86_64 and aarch64, plus a DCO check that every commit in a pull request is signed off. Warnings fail the build. tocsin targets Unix-like systems (Linux, macOS) only; a non-Unix build stops with a `compile_error!`.
 
+CI's `package` job also builds the static binaries, the container image and the systemd unit ([`docs/install.md`](docs/install.md)). [`docs/config-reference.md`](docs/config-reference.md) is generated from the schema: after changing a config type, `TOCSIN_UPDATE_DOCS=1 cargo test -p tocsin --test config_reference` rewrites it (the test fails until you do).
+
 ## Crate map
 
 | Crate | Holds | Must not |

@@ -94,6 +94,150 @@ jobs:
       - name: Write latency on one core
         run: taskset -c 0 cargo test --release --locked -p tocsin-store --test write_latency -- --ignored --nocapture
 
+  # The release's Linux packaging, on each architecture. dist builds the
+  # static musl archive the release would; the container image is built from
+  # that archive and run as its non-root user; and deploy/tocsin.service is
+  # verified, scored, and started with the binary. Building the macOS
+  # archive, and publishing anything, happen only on a tag (release.yml).
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.target }}
+      - name: Install dist and the musl toolchain
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.33.0/cargo-dist-installer.sh | sh
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - name: Build the release archive
+        run: dist build --artifacts=local --target ${{ matrix.target }} --print=linkage
+      - name: Unpack it into the image's build context
+        run: scripts/image-context.sh target/distrib target/image
+      - name: A configuration with one ICMP check, of the loopback address
+        run: |
+          mkdir -p "$RUNNER_TEMP/loopback"
+          cat > "$RUNNER_TEMP/loopback/tocsin.toml" <<'EOF'
+          [server]
+          listen = "0.0.0.0:8080"
+
+          [[component]]
+          id = "loopback"
+          name = "Loopback"
+
+          [[check]]
+          id = "loopback"
+          component = "loopback"
+          type = "icmp"
+          target = "127.0.0.1"
+          interval = "30s"
+          EOF
+
+      - name: Build the image
+        run: docker build --platform linux/${{ matrix.arch }} --build-arg VERSION=ci --tag tocsin:ci --file Dockerfile target/image
+      - name: The image runs as nonroot and checks the examples
+        run: |
+          test "$(docker inspect tocsin:ci --format '{{.Config.User}}')" = 65532:65532
+          docker run --rm tocsin:ci --version
+          cat > "$RUNNER_TEMP/examples.env" <<'EOF'
+          TOCSIN_SMTP_URL=smtp://status:placeholder@mail.example.com:587
+          TOCSIN_CI_TOKEN=placeholder-ci-token
+          TOCSIN_BACKUP_TOKEN=placeholder-backup-token
+          TOCSIN_RELEASE_TOKEN=placeholder-release-token
+          TOCSIN_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/placeholder
+          TOCSIN_PUSHOVER_USER_KEY=placeholder-user
+          TOCSIN_PUSHOVER_API_TOKEN=placeholder-token
+          TOCSIN_WEBHOOK_SIGNING_SECRET=placeholder-signing-secret
+          EOF
+          docker run --rm --env-file "$RUNNER_TEMP/examples.env" \
+            --volume "$PWD/examples/config:/config:ro" tocsin:ci config check --config /config
+      # Docker allows unprivileged ICMP sockets in every container. With
+      # them refused, only root's CAP_NET_RAW can send the echo; the
+      # nonroot user has no capabilities, and must fail.
+      - name: ICMP from the image, both ways
+        run: |
+          run() { docker run --rm --volume "$RUNNER_TEMP/loopback:/config:ro" "$@" probe run loopback --config /config; }
+          run tocsin:ci
+          run --sysctl net.ipv4.ping_group_range="1 0" --user 0:0 tocsin:ci
+          status=0
+          run --sysctl net.ipv4.ping_group_range="1 0" tocsin:ci || status=$?
+          test "$status" -eq 3
+      - name: The image serves from a named volume
+        run: |
+          docker run --detach --name tocsin --volume "$RUNNER_TEMP/loopback:/config:ro" \
+            --volume tocsin-data:/data --publish 127.0.0.1:8080:8080 tocsin:ci
+          for _ in $(seq 30); do
+            curl --fail --silent --output /dev/null http://127.0.0.1:8080/api/v1/openapi.json && break
+            sleep 1
+          done
+          curl --fail --silent --show-error --output /dev/null http://127.0.0.1:8080/api/v1/openapi.json
+          docker logs tocsin
+          docker rm --force tocsin
+
+      - name: Install the systemd unit
+        run: |
+          sudo install -m 0755 target/image/${{ matrix.arch }}/tocsin /usr/local/bin/tocsin
+          sudo install -D -m 0644 "$RUNNER_TEMP/loopback/tocsin.toml" /etc/tocsin/tocsin.toml
+          sudo install -m 0644 deploy/tocsin.service /etc/systemd/system/tocsin.service
+          sudo systemctl daemon-reload
+      - name: systemd-analyze verify and security
+        run: |
+          systemd-analyze verify /etc/systemd/system/tocsin.service
+          systemd-analyze security --no-pager tocsin.service
+          systemd-analyze security --threshold=20 tocsin.service > /dev/null
+      # The unit's sandbox, running one ICMP probe in place of the server.
+      # Unprivileged ICMP sockets are refused, so the echo needs the unit's
+      # CAP_NET_RAW; without it, the same probe must fail.
+      - name: ICMP under the unit
+        run: |
+          sudo sysctl -w net.ipv4.ping_group_range="1 0"
+          sudo mkdir -p /etc/systemd/system/tocsin.service.d
+          printf '%s\n' '[Service]' 'Type=oneshot' 'Restart=no' 'ExecStart=' \
+            'ExecStart=/usr/local/bin/tocsin probe run loopback --config /etc/tocsin' |
+            sudo tee /etc/systemd/system/tocsin.service.d/probe.conf
+          sudo systemctl daemon-reload
+          sudo systemctl start tocsin
+          printf '%s\n' '[Service]' 'AmbientCapabilities=' |
+            sudo tee /etc/systemd/system/tocsin.service.d/no-capability.conf
+          sudo systemctl daemon-reload
+          if sudo systemctl start tocsin; then
+            echo "::error::the probe passed without CAP_NET_RAW"
+            exit 1
+          fi
+          test "$(systemctl show tocsin --property=ExecMainStatus --value)" -eq 3
+          sudo journalctl --unit tocsin --no-pager
+          sudo rm -r /etc/systemd/system/tocsin.service.d
+          sudo systemctl daemon-reload
+      - name: The unit serves
+        run: |
+          sudo systemctl start tocsin
+          for _ in $(seq 30); do
+            curl --fail --silent --output /dev/null http://127.0.0.1:8080/api/v1/openapi.json && break
+            sleep 1
+          done
+          curl --fail --silent --show-error --output /dev/null http://127.0.0.1:8080/api/v1/openapi.json
+          systemctl is-active tocsin
+          sudo test -f /var/lib/private/tocsin/tocsin.db
+          sudo journalctl --unit tocsin --no-pager
+
   # CONTRIBUTING.md promises unsigned commits are not merged; this keeps
   # that promise. Every commit the pull request adds needs a Signed-off-by.
   dco:

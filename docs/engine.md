@@ -221,7 +221,10 @@ with code 3.
 
 On SIGTERM or SIGINT, `serve` stops the engine before draining HTTP and
 closing the database, so no probe writes into a closed store. A probe in
-flight is abandoned, not recorded.
+flight is abandoned, not recorded. Requests in flight get ten seconds to
+finish; any still running are then aborted and awaited, so the database
+closes either way. A write a request already handed to the store still
+commits before it closes.
 
 ## Extending it
 

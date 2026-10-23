@@ -449,9 +449,8 @@ pub fn steady_status() -> watch::Receiver<ConfigStatus> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{self, Write};
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex, PoisonError};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use notify::event::{AccessKind, AccessMode, CreateKind, Flag, ModifyKind};
@@ -460,7 +459,6 @@ mod tests {
     use tocsin_store::{DB_FILE, Store};
     use tokio::sync::watch;
     use tokio::time::{Instant, timeout};
-    use tracing_subscriber::fmt::MakeWriter;
 
     use super::{
         ConfigStatus, DEBOUNCE, Debounce, LiveRouter, Reloader, Reloading, Variables,
@@ -472,6 +470,7 @@ mod tests {
     use crate::http::{self, AppState};
     use crate::metrics::Metrics;
     use crate::serve::Monitor;
+    use crate::testing::Captured;
 
     /// How long any one step may take before the test gives up on it.
     const PATIENCE: Duration = Duration::from_secs(20);
@@ -521,39 +520,6 @@ id = "deploys"
 secret = "${ENV:NEVER_SET}"
 scopes = ["release"]
 "#;
-
-    /// The log lines written while it is the default subscriber.
-    #[derive(Clone, Default)]
-    struct Captured(Arc<Mutex<Vec<u8>>>);
-
-    impl Captured {
-        fn text(&self) -> String {
-            String::from_utf8_lossy(&self.0.lock().unwrap_or_else(PoisonError::into_inner))
-                .into_owned()
-        }
-    }
-
-    impl Write for Captured {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> MakeWriter<'a> for Captured {
-        type Writer = Captured;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
 
     /// A running reloader with the HTTP API in front of it.
     struct Served {

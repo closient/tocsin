@@ -2706,6 +2706,8 @@ dependencies = [
  "base64",
  "clap",
  "gethostname",
+ "hyper",
+ "hyper-util",
  "insta",
  "jiff",
  "notify",

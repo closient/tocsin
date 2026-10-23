@@ -56,9 +56,9 @@ tocsin config check [--config <dir>] --json  # validate; every error with file, 
 tocsin config show [--config <dir>] --json   # the merged configuration, secrets redacted
 tocsin config schema                         # JSON Schema for one config file
 tocsin serve [--config <dir>] [--data <dir>] # until SIGINT/SIGTERM; --data defaults to [server] data_dir
-tocsin db info --data <dir> --json           # size, schema version, row counts, oldest result
+tocsin db info --data <dir> --json           # read-only: size, schema version, row counts, oldest result
 tocsin db rollup --data <dir> --since YYYY-MM-DD
-tocsin db vacuum --data <dir>
+tocsin db vacuum --data <dir>                # refused while serve runs on <dir>
 ```
 
 `--config` defaults to `/etc/tocsin`; a folder with no `*.toml` file is an error (exit 2).

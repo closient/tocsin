@@ -689,6 +689,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "gethostname",
+ "rusqlite",
  "serde_json",
  "tempfile",
  "tocsin-core",

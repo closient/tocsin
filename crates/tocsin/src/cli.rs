@@ -52,6 +52,9 @@ pub enum Command {
 #[derive(Debug, Subcommand)]
 pub enum DbCommand {
     /// Report the database size, schema version and row counts.
+    ///
+    /// Read-only: never migrates, so it also describes a database written by
+    /// a newer tocsin.
     Info {
         /// Folder holding `tocsin.db`.
         #[arg(long, value_name = "DIR")]
@@ -59,6 +62,8 @@ pub enum DbCommand {
     },
 
     /// Rebuild the database file to reclaim space freed by retention.
+    ///
+    /// Refused while `tocsin serve` is running on the same folder.
     Vacuum {
         /// Folder holding `tocsin.db`.
         #[arg(long, value_name = "DIR")]

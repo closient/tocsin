@@ -418,6 +418,122 @@ fn db_commands_never_create_a_database() {
     assert!(!data.path().join("tocsin.db").exists());
 }
 
+fn user_version(data: &tempfile::TempDir) -> i64 {
+    rusqlite::Connection::open(data.path().join("tocsin.db"))
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap()
+}
+
+/// `db info` opens read-only and never migrates: a database a newer build
+/// wrote is described, with its version, and left exactly as it was.
+#[test]
+fn db_info_reports_a_newer_schema_without_touching_it() {
+    let data = seeded_database();
+    {
+        let conn = rusqlite::Connection::open(data.path().join("tocsin.db")).unwrap();
+        conn.execute_batch("PRAGMA user_version = 99; CREATE TABLE from_the_future (id INTEGER);")
+            .unwrap();
+    }
+    let output = tocsin(&["--json", "db", "info", "--data", data_arg(&data)]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let info = json_stdout(&output);
+    assert_eq!(info["schema_version"], 99);
+    assert_eq!(info["supported_schema_version"], 1);
+    assert_eq!(info["rows"]["check_result"], 4);
+    assert_eq!(user_version(&data), 99);
+
+    let text = tocsin(&["db", "info", "--data", data_arg(&data)]);
+    assert!(
+        String::from_utf8_lossy(&text.stdout).contains("newer than this build's 1"),
+        "{}",
+        String::from_utf8_lossy(&text.stdout)
+    );
+}
+
+/// An older database is reported at its own version, not migrated first.
+#[test]
+fn db_info_does_not_migrate() {
+    let data = tempfile::tempdir().unwrap();
+    rusqlite::Connection::open(data.path().join("tocsin.db"))
+        .unwrap()
+        .execute_batch("CREATE TABLE check_result (started_at INTEGER); INSERT INTO check_result VALUES (1000);")
+        .unwrap();
+    let output = tocsin(&["--json", "db", "info", "--data", data_arg(&data)]);
+    assert_eq!(output.status.code(), Some(0));
+    let info = json_stdout(&output);
+    assert_eq!(info["schema_version"], 0);
+    assert_eq!(info["rows"], serde_json::json!({ "check_result": 1 }));
+    assert_eq!(info["purged_before"], Value::Null);
+    assert_eq!(user_version(&data), 0);
+}
+
+/// While `serve` holds the data folder, `db vacuum` and a second `serve` are
+/// refused; `db info` and `db rollup` still run. Once it stops, vacuum works.
+#[test]
+fn a_running_server_locks_out_vacuum_and_a_second_server() {
+    let config = config_folder();
+    let data = seeded_database();
+    let mut server = Server::start(config.path(), data.path());
+    let lines = wait_ready(&mut server);
+    let drain = std::thread::spawn(move || lines.map_while(Result::ok).count());
+
+    let vacuum = tocsin(&["--json", "db", "vacuum", "--data", data_arg(&data)]);
+    assert_eq!(vacuum.status.code(), Some(2));
+    let error = &json_stdout(&vacuum)["error"];
+    assert_eq!(error["kind"], "invalid_input");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("tocsin serve is running"),
+        "{error}"
+    );
+
+    let second = tocsin(&[
+        "--json",
+        "serve",
+        "--config",
+        data_arg(&config),
+        "--data",
+        data_arg(&data),
+    ]);
+    assert_eq!(second.status.code(), Some(2));
+    let error = &json_stdout(&second)["error"];
+    assert_eq!(error["kind"], "invalid_input");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("another tocsin serve"),
+        "{error}"
+    );
+
+    let info = tocsin(&["--json", "db", "info", "--data", data_arg(&data)]);
+    assert_eq!(info.status.code(), Some(0));
+    let rollup = tocsin(&[
+        "--json",
+        "db",
+        "rollup",
+        "--data",
+        data_arg(&data),
+        "--since",
+        "2026-10-01",
+    ]);
+    assert_eq!(rollup.status.code(), Some(0));
+
+    server.signal("-TERM");
+    assert_eq!(server.wait_with_deadline().code(), Some(0));
+    drain.join().unwrap();
+    let vacuum = tocsin(&["--json", "db", "vacuum", "--data", data_arg(&data)]);
+    assert_eq!(vacuum.status.code(), Some(0));
+}
+
 #[test]
 fn serve_refuses_an_invalid_configuration() {
     let config = tempfile::tempdir().unwrap();

@@ -30,27 +30,46 @@ transaction, gives each write its own savepoint so a bad row fails alone, and
 answers each caller once the transaction commits. SQLite allows one writer
 at a time anyway; owning that in one thread means no write ever spins on
 `SQLITE_BUSY`, and batching turns 100 appends into one fsync-bounded commit.
+If an error ends the batch's transaction instead of just its savepoint
+(SQLite rolls the whole transaction back on some errors, such as
+`SQLITE_FULL`), every write in the batch gets that error; none is reported
+as committed. A write that panics is rolled back and answered with
+`WriterPanicked`, the panic is logged, and the thread carries on with the
+next write.
+
+Every write transaction that reads before it writes is `IMMEDIATE`, taking
+the write lock up front. A deferred one would read on a snapshot and then
+need to upgrade it, which fails with `SQLITE_BUSY_SNAPSHOT` (no retry, no
+busy wait) if another connection, such as a hand-run `sqlite3`, committed
+in between.
 
 **A pool of four readers**, each opened `query_only`, behind a semaphore.
-Queries run on tokio's blocking pool. It is hand-rolled (under 80 lines)
+Queries run on tokio's blocking pool. It is hand-rolled (about 140 lines)
 rather than `r2d2`/`r2d2_sqlite` or `deadpool-sqlite`: those bring a
 connection manager, health checks and extra dependencies for what is, with
 a fixed pool of local file handles that never go stale, a `Vec` behind a
-mutex. A reader that panics is not returned to the pool.
+mutex. The borrowed connection travels with the query onto the blocking
+thread and goes back when the query finishes, so a caller that stops waiting
+(a timeout, a `select!`, an aborted task) cannot lose it. A query that
+panics is answered with `ReaderPanicked` and its connection is replaced by a
+fresh one; only if SQLite will not open another does the pool shrink, and a
+pool with none left fails reads instead of hanging them.
 
 ## Tables
 
 ### `check_result`
 
 One row per probe run. **Append-only**: the `check_result_append_only`
-trigger aborts every `UPDATE`. `DELETE` stays open for retention.
+trigger aborts every `UPDATE`. `DELETE` stays open for retention. The
+`check_result_not_before_retention` trigger aborts an insert dated before
+`purged_before`, because that day's rollup is final.
 
 | Column | Type | Notes |
 |---|---|---|
-| `id` | integer | Row id. |
+| `id` | integer | `AUTOINCREMENT`, so an id is never reused, even after retention deletes the newest rows; retention relies on that. |
 | `node_id` | text | Node that ran the probe. Non-empty. |
 | `check_id` | text | Check from the config. Non-empty. |
-| `started_at` | integer | When the probe started. |
+| `started_at` | integer | When the probe started. At most an hour after the storing node's clock (`FUTURE_TOLERANCE`): a later one is refused with `FutureResult`, since it points at a clock that is wrong, not merely skewed. |
 | `duration_ms` | integer | ≥ 0. |
 | `health` | text | `up`, `degraded` or `down`. |
 | `detail` | text | Valid JSON or null: per-assertion detail, for display only. |
@@ -98,7 +117,7 @@ health seen that day.
 A single row (`id = 1`) holding `purged_before`: a UTC day boundary. Raw
 results before it have been rolled up and are deleted, or being deleted.
 Rollups for days before it are **final**: nothing recomputes them, because
-the raw rows they came from are gone.
+the raw rows they came from are gone, and no result for them can be stored.
 
 ### `heartbeat_ping`
 
@@ -128,7 +147,9 @@ Rollups are recomputed from raw results, never incremented, so recomputing
 is idempotent: run it twice and the table is the same.
 
 - **Hourly**, `serve` recomputes from the latest day already rolled up (it may
-  have been partial) to now: normally one or two days per check.
+  have been partial) to now, but never starting later than yesterday:
+  normally yesterday and today. The cap keeps a rollup for a future day
+  (left by a node whose clock ran ahead) from freezing today's.
 - **On demand**, `tocsin db rollup --data <dir> --since YYYY-MM-DD` recomputes
   every day from `--since` on. Days before `purged_before` are skipped, and the
   output's `since` says where it really started.
@@ -142,9 +163,16 @@ writer, so a long recompute never holds the write lock while it scans.
 [config.md](config.md)) keeps N whole UTC days of raw results before today.
 Each hour, after rolling up:
 
-1. In one write transaction, roll up every day being dropped and raise
-   `purged_before` to the new cutoff. The status bar never loses a day, even
-   if the process dies right after.
+1. Finalize the expiring days one at a time, oldest first. A day is
+   aggregated on a reader, since it can be hundreds of thousands of rows and
+   scanning them must not hold the write lock. Then one `IMMEDIATE` write
+   transaction upserts that day's rollups and raises `purged_before` past
+   it. A result committed between the two would otherwise be deleted
+   without being counted, so the write transaction first looks for any row
+   in the day with an id above the highest the read saw, and re-aggregates
+   under the lock if it finds one. Once the watermark is raised, the trigger
+   on `check_result` refuses results for that day. The status bar never
+   loses a day, even if the process dies between days.
 2. Delete results older than `purged_before` in chunks (2 000 rows by
    default), each its own short write transaction, pausing between chunks.
    Writes queued meanwhile commit between chunks; readers never wait under
@@ -152,8 +180,9 @@ Each hour, after rolling up:
 
 Deleted pages are reused by later inserts, so the file stops growing once the
 window is full. `tocsin db vacuum --data <dir>` rebuilds the file to give the
-space back to the filesystem; run it while `serve` is stopped, since it holds
-the write lock for the whole rebuild.
+space back to the filesystem. It holds the write lock for the whole rebuild,
+so it refuses to run (`invalid_input`, exit 2) while `serve` is running on
+the same folder.
 
 ## Inspecting
 
@@ -166,10 +195,24 @@ tocsin db vacuum --data <dir> --json
 None of them create a database; pointing one at a folder without `tocsin.db`
 is `invalid_input` (exit 2).
 
+`db info` opens the file read-only and never migrates it, so it can describe
+a database a newer build wrote: `schema_version` is the file's, and
+`supported_schema_version` is this binary's. `db rollup` and `db vacuum`
+open the store like `serve` does, migrating an older file and refusing a
+newer one.
+
+**The data folder's lock.** `serve` holds an exclusive lock (`flock`) on
+`<data>/tocsin.lock` while it runs; the operating system drops it when the
+process ends, however it ends. A second `serve` on the same folder, and
+`db vacuum`, are refused while it is held. `db info` and `db rollup` do not
+take it: info only reads, and rollup's upserts queue for the write lock like
+any other write.
+
 ## Migrations
 
 Migrations live in `crates/tocsin-store/migrations/`, numbered, and are applied
 in order by `rusqlite_migration`, which records progress in
 `PRAGMA user_version`. **A shipped migration is never edited**: change the
 schema by adding the next file. A database whose `user_version` is newer than
-the binary knows is refused rather than guessed at.
+the binary knows is refused rather than guessed at; only `db info`, which
+never writes, will describe one.

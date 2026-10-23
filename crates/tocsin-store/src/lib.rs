@@ -145,9 +145,11 @@ pub struct DbInfo {
     pub path: PathBuf,
     /// Bytes on disk: the database file plus its write-ahead log.
     pub size_bytes: u64,
-    /// The schema version (number of migrations applied).
+    /// The schema version (number of migrations applied). It can be above
+    /// [`latest_schema_version`] when a newer build wrote the database.
     pub schema_version: i64,
-    /// Row count per table, in [`TABLES`] order.
+    /// Row count per table, in [`TABLES`] order. A table this database does
+    /// not have (its schema is older or newer than this build's) is left out.
     pub rows: Vec<(&'static str, i64)>,
     /// When the oldest stored result started, unix milliseconds UTC.
     pub oldest_result_ms: Option<i64>,
@@ -388,34 +390,7 @@ impl Store {
     /// A read fails or the file cannot be inspected.
     pub async fn info(&self) -> Result<DbInfo> {
         let path = self.path.clone();
-        self.read(move |conn| {
-            let schema_version: i64 =
-                conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-            let rows = TABLES
-                .into_iter()
-                .map(|table| {
-                    conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
-                        row.get(0)
-                    })
-                    .map(|count| (table, count))
-                })
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let (oldest_result_ms, newest_result_ms) = conn.query_row(
-                "SELECT min(started_at), max(started_at) FROM check_result",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
-            Ok(DbInfo {
-                size_bytes: size_on_disk(&path)?,
-                path,
-                schema_version,
-                rows,
-                oldest_result_ms,
-                newest_result_ms,
-                purged_before_ms: rollup::purged_before(conn)?,
-            })
-        })
-        .await
+        self.read(move |conn| describe(conn, path)).await
     }
 
     /// Rebuilds the database file to reclaim space freed by retention, then
@@ -471,6 +446,60 @@ pub fn now_ms() -> i64 {
 #[must_use]
 pub fn latest_schema_version() -> usize {
     schema::latest_version()
+}
+
+/// Describes the database at `path` without changing it: it is opened read
+/// only, nothing is migrated, and no writer starts. A schema newer than this
+/// build's is reported, not refused, which is what `tocsin db info` needs to
+/// say "upgrade the binary" rather than fail.
+///
+/// # Errors
+///
+/// The file is not a SQLite database, or cannot be read.
+pub fn inspect(path: &Path) -> Result<DbInfo> {
+    let conn = schema::open_inspector(path)?;
+    describe(&conn, path.to_path_buf())
+}
+
+/// The shared body of [`Store::info`] and [`inspect`]. Only tables present
+/// in `sqlite_master` are read, so a schema from another version works too.
+fn describe(conn: &Connection, path: PathBuf) -> Result<DbInfo> {
+    let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let mut present =
+        conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")?;
+    let mut rows = Vec::new();
+    for table in TABLES {
+        if present.exists([table])? {
+            let count = conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })?;
+            rows.push((table, count));
+        }
+    }
+    let has = |table: &str| rows.iter().any(|(name, _)| *name == table);
+    let (oldest_result_ms, newest_result_ms) = if has("check_result") {
+        conn.query_row(
+            "SELECT min(started_at), max(started_at) FROM check_result",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?
+    } else {
+        (None, None)
+    };
+    let purged_before_ms = if has("retention") {
+        rollup::purged_before(conn)?
+    } else {
+        None
+    };
+    Ok(DbInfo {
+        size_bytes: size_on_disk(&path)?,
+        path,
+        schema_version,
+        rows,
+        oldest_result_ms,
+        newest_result_ms,
+        purged_before_ms,
+    })
 }
 
 fn size_on_disk(path: &Path) -> std::io::Result<u64> {

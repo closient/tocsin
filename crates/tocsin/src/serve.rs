@@ -12,6 +12,7 @@ use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::time::MissedTickBehavior;
 
 use crate::exit::Exit;
+use crate::lock;
 use crate::output::{Failure, Report};
 
 pub fn run(config: &Path, data: Option<&Path>) -> Result<Report, Failure> {
@@ -44,6 +45,13 @@ pub fn run(config: &Path, data: Option<&Path>) -> Result<Report, Failure> {
             format!("cannot create data folder {}: {error}", data.display()),
         )
     })?;
+    // Held until this function returns, after the store has closed.
+    let Some(_lock) = lock::try_take(data)? else {
+        return Err(Failure::new(
+            Exit::InvalidInput,
+            format!("another tocsin serve is using {}", data.display()),
+        ));
+    };
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

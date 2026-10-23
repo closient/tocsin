@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use rusqlite_migration::{M, Migrations};
 
 use crate::error::{Error, Result};
@@ -51,6 +51,17 @@ pub(crate) fn open_reader(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(BUSY_TIMEOUT)?;
     conn.pragma_update(None, "query_only", "ON")?;
+    Ok(conn)
+}
+
+/// Opens a connection that cannot write at all, for looking at a database
+/// this build may not own: no WAL switch, no migrations.
+pub(crate) fn open_inspector(path: &Path) -> Result<Connection> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
     Ok(conn)
 }
 

@@ -3,19 +3,32 @@
 //! `tocsin db`: inspect and maintain the SQLite database.
 
 use std::fmt::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 use tocsin_store::{DB_FILE, Day, Store, day};
 
 use crate::cli::DbCommand;
 use crate::exit::Exit;
+use crate::lock;
 use crate::output::{Failure, Report};
 
 pub fn run(command: DbCommand) -> Result<Report, Failure> {
     match command {
-        DbCommand::Info { data } => with_store(&data, info),
-        DbCommand::Vacuum { data } => with_store(&data, vacuum),
+        DbCommand::Info { data } => info(&existing_database(&data)?),
+        DbCommand::Vacuum { data } => {
+            // Held through the vacuum, so a server cannot start mid-rebuild.
+            let Some(_lock) = lock::try_take(&data)? else {
+                return Err(Failure::new(
+                    Exit::InvalidInput,
+                    format!(
+                        "tocsin serve is running on {}; stop it before vacuuming, which would hold the database's write lock for the whole rebuild",
+                        data.display()
+                    ),
+                ));
+            };
+            with_store(&data, vacuum)
+        }
         DbCommand::Rollup { data, since } => {
             let since: Day = since.parse().map_err(|error| {
                 Failure::new(Exit::InvalidInput, format!("--since {since:?}: {error}"))
@@ -25,24 +38,30 @@ pub fn run(command: DbCommand) -> Result<Report, Failure> {
     }
 }
 
-/// Opens the existing database under `data`, runs `action` on it, and
-/// closes it. A missing database is the caller's mistake, not ours: these
-/// commands never create one.
+/// The database under `data`. A missing database is the caller's mistake,
+/// not ours: these commands never create one.
+fn existing_database(data: &Path) -> Result<PathBuf, Failure> {
+    let path = data.join(DB_FILE);
+    if path.is_file() {
+        return Ok(path);
+    }
+    Err(Failure::new(
+        Exit::InvalidInput,
+        format!(
+            "no database at {}; `tocsin serve --data {}` creates one",
+            path.display(),
+            data.display()
+        ),
+    ))
+}
+
+/// Opens the existing database under `data` (migrating it, like the server
+/// would), runs `action` on it, and closes it.
 fn with_store(
     data: &Path,
     action: impl AsyncFnOnce(&Store) -> Result<Report, Failure>,
 ) -> Result<Report, Failure> {
-    let path = data.join(DB_FILE);
-    if !path.is_file() {
-        return Err(Failure::new(
-            Exit::InvalidInput,
-            format!(
-                "no database at {}; `tocsin serve --data {}` creates one",
-                path.display(),
-                data.display()
-            ),
-        ));
-    }
+    let path = existing_database(data)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -75,18 +94,32 @@ fn instant(ms: Option<i64>) -> Value {
     )
 }
 
-async fn info(store: &Store) -> Result<Report, Failure> {
-    let info = store.info().await.map_err(runtime_failure)?;
+/// Describes the database read-only: no migrations, so `db info` works on a
+/// database a newer build wrote and never changes the one it looks at.
+fn info(path: &Path) -> Result<Report, Failure> {
+    let info = tocsin_store::inspect(path).map_err(|error| {
+        Failure::new(
+            Exit::Runtime,
+            format!("cannot read {}: {error}", path.display()),
+        )
+    })?;
+    let supported = tocsin_store::latest_schema_version();
+    let newer = usize::try_from(info.schema_version).is_ok_and(|version| version > supported);
     let rows: Map<String, Value> = info
         .rows
         .iter()
         .map(|(table, count)| ((*table).to_owned(), json!(count)))
         .collect();
     let mut text = format!(
-        "path: {}\nsize: {} bytes\nschema version: {}\noldest result: {}\nnewest result: {}\nraw results purged before: {}\nrows:",
+        "path: {}\nsize: {} bytes\nschema version: {}{}\noldest result: {}\nnewest result: {}\nraw results purged before: {}\nrows:",
         info.path.display(),
         info.size_bytes,
         info.schema_version,
+        if newer {
+            format!(" (newer than this build's {supported}; upgrade tocsin)")
+        } else {
+            String::new()
+        },
         info.oldest_result_ms
             .map_or("none".to_owned(), day::rfc3339),
         info.newest_result_ms
@@ -102,6 +135,7 @@ async fn info(store: &Store) -> Result<Report, Failure> {
             "path": info.path.display().to_string(),
             "size_bytes": info.size_bytes,
             "schema_version": info.schema_version,
+            "supported_schema_version": supported,
             "rows": rows,
             "oldest_result": instant(info.oldest_result_ms),
             "newest_result": instant(info.newest_result_ms),

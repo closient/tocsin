@@ -13,6 +13,7 @@ mod cli;
 mod config;
 mod db;
 mod exit;
+mod lock;
 mod output;
 mod serve;
 

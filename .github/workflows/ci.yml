@@ -41,6 +41,10 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo build --workspace --locked
+      # The runners refuse unprivileged ICMP sockets, and the ICMP probe test
+      # fails under CI rather than skip, so allow them for every group.
+      - name: Allow unprivileged ICMP sockets
+        run: sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
       - run: cargo test --workspace --locked
 
   # The JSON Schema editors use must accept every example, both as

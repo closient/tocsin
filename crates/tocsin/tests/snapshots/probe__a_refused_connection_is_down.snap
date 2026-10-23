@@ -1,0 +1,18 @@
+---
+source: crates/tocsin/tests/probe.rs
+expression: fixture.json(&output)
+---
+{
+  "assertions": [],
+  "check": "refused",
+  "duration_ms": "[ms]",
+  "error": {
+    "kind": "connect",
+    "message": "could not connect to 127.0.0.1:CLOSED: Connection refused (os error 111)"
+  },
+  "facts": null,
+  "health": "down",
+  "started_at_ms": "[ms]",
+  "target": "127.0.0.1:CLOSED",
+  "type": "tcp"
+}

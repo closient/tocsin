@@ -10,6 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::check::CheckType;
+use crate::Health;
 
 /// One condition a probe result must meet, and the state a failure maps to.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
@@ -33,9 +34,19 @@ pub struct Assertion {
     /// Days until the server certificate expires.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub certificate_days_remaining: Option<Comparison>,
+    /// Whether the server certificate is valid for the host name checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname_valid: Option<bool>,
+    /// Whether the server certificate chains to a trusted root and is
+    /// within its validity period.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_valid: Option<bool>,
     /// The records a DNS lookup returns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub records: Option<RecordsAssertion>,
+    /// The text a TCP server sends after connecting (and after `send`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banner: Option<TextAssertion>,
     /// The state the check takes when this condition fails.
     #[serde(default)]
     pub on_fail: FailureState,
@@ -56,8 +67,14 @@ pub enum Condition<'a> {
     Header(&'a HeaderAssertion),
     /// See [`Assertion::certificate_days_remaining`].
     CertificateDaysRemaining(&'a Comparison),
+    /// See [`Assertion::hostname_valid`].
+    HostnameValid(bool),
+    /// See [`Assertion::chain_valid`].
+    ChainValid(bool),
     /// See [`Assertion::records`].
     Records(&'a RecordsAssertion),
+    /// See [`Assertion::banner`].
+    Banner(&'a TextAssertion),
 }
 
 impl Condition<'_> {
@@ -71,7 +88,10 @@ impl Condition<'_> {
             Condition::Body(_) => "body",
             Condition::Header(_) => "header",
             Condition::CertificateDaysRemaining(_) => "certificate_days_remaining",
+            Condition::HostnameValid(_) => "hostname_valid",
+            Condition::ChainValid(_) => "chain_valid",
             Condition::Records(_) => "records",
+            Condition::Banner(_) => "banner",
         }
     }
 
@@ -84,11 +104,25 @@ impl Condition<'_> {
             | Condition::Json(_)
             | Condition::Body(_)
             | Condition::Header(_) => check_type == CheckType::Http,
-            Condition::CertificateDaysRemaining(_) => {
+            Condition::CertificateDaysRemaining(_)
+            | Condition::HostnameValid(_)
+            | Condition::ChainValid(_) => {
                 matches!(check_type, CheckType::Http | CheckType::Tls)
             }
             Condition::Records(_) => check_type == CheckType::Dns,
+            Condition::Banner(_) => check_type == CheckType::Tcp,
         }
+    }
+
+    /// Whether the condition reads the server certificate.
+    #[must_use]
+    pub fn needs_certificate(&self) -> bool {
+        matches!(
+            self,
+            Condition::CertificateDaysRemaining(_)
+                | Condition::HostnameValid(_)
+                | Condition::ChainValid(_)
+        )
     }
 }
 
@@ -115,8 +149,17 @@ impl Assertion {
         if let Some(days) = &self.certificate_days_remaining {
             conditions.push(Condition::CertificateDaysRemaining(days));
         }
+        if let Some(valid) = self.hostname_valid {
+            conditions.push(Condition::HostnameValid(valid));
+        }
+        if let Some(valid) = self.chain_valid {
+            conditions.push(Condition::ChainValid(valid));
+        }
         if let Some(records) = &self.records {
             conditions.push(Condition::Records(records));
+        }
+        if let Some(banner) = &self.banner {
+            conditions.push(Condition::Banner(banner));
         }
         conditions
     }
@@ -144,7 +187,10 @@ pub const CONDITION_KEYS: &[&str] = &[
     "body",
     "header",
     "certificate_days_remaining",
+    "hostname_valid",
+    "chain_valid",
     "records",
+    "banner",
 ];
 
 /// The state a failed assertion puts its check in.
@@ -156,6 +202,15 @@ pub enum FailureState {
     /// Not working.
     #[default]
     Down,
+}
+
+impl From<FailureState> for Health {
+    fn from(state: FailureState) -> Self {
+        match state {
+            FailureState::Degraded => Health::Degraded,
+            FailureState::Down => Health::Down,
+        }
+    }
 }
 
 /// Numeric bounds; every bound given must hold.
@@ -185,14 +240,30 @@ impl Comparison {
     pub fn is_empty(&self) -> bool {
         *self == Comparison::default()
     }
+
+    /// Whether `value` meets every bound. A negative value, such as the
+    /// days left on an expired certificate, is below every bound.
+    #[must_use]
+    pub fn holds(&self, value: i64) -> bool {
+        let value = i128::from(value);
+        let bound = |bound: Option<u64>, test: fn(i128, i128) -> bool| {
+            bound.is_none_or(|bound| test(value, i128::from(bound)))
+        };
+        bound(self.lt, |value, bound| value < bound)
+            && bound(self.lte, |value, bound| value <= bound)
+            && bound(self.gt, |value, bound| value > bound)
+            && bound(self.gte, |value, bound| value >= bound)
+            && bound(self.eq, |value, bound| value == bound)
+    }
 }
 
-/// A value at a path in a JSON response body.
+/// A value selected from the JSON response body by an RFC 9535 JSON path.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct JsonAssertion {
-    /// Where the value is: `$`, then `.key`, `[index]` or `["key"]` steps,
-    /// such as `$.checks[0].status`.
+    /// An RFC 9535 JSON path, such as `$.checks[0].status` or
+    /// `$.components[?@.name=='API'].status`. When it selects several
+    /// values, the first in document order is compared.
     pub path: String,
     /// The value equals this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -200,7 +271,7 @@ pub struct JsonAssertion {
     /// The value does not equal this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ne: Option<serde_json::Value>,
-    /// Whether a value exists at the path.
+    /// Whether the path selects any value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exists: Option<bool>,
     /// The value is a string containing this.
@@ -230,13 +301,19 @@ pub struct TextAssertion {
     /// The text does not contain this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_contains: Option<String>,
+    /// The text matches this regular expression (Rust `regex` syntax),
+    /// anywhere in the text unless anchored with `^` or `$`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regex: Option<String>,
 }
 
 impl TextAssertion {
     /// How many matchers are set; a valid assertion has exactly one.
     #[must_use]
     pub fn matcher_count(&self) -> usize {
-        usize::from(self.contains.is_some()) + usize::from(self.not_contains.is_some())
+        usize::from(self.contains.is_some())
+            + usize::from(self.not_contains.is_some())
+            + usize::from(self.regex.is_some())
     }
 }
 
@@ -246,10 +323,10 @@ impl TextAssertion {
 pub struct HeaderAssertion {
     /// The header name, matched without regard to case.
     pub name: String,
-    /// The header value equals this.
+    /// A value of the header equals this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eq: Option<String>,
-    /// The header value contains this.
+    /// A value of the header contains this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contains: Option<String>,
     /// Whether the header is present.
@@ -267,94 +344,31 @@ impl HeaderAssertion {
     }
 }
 
-/// A condition on the records a DNS lookup returns.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// A condition on the records a DNS lookup returns. Records are compared
+/// as text, ignoring a trailing `.` on names; CNAME, MX, NS and SRV
+/// records, which hold names, also ignore case.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecordsAssertion {
     /// One of the records equals this.
-    pub contains: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contains: Option<String>,
+    /// The records are exactly these, in any order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eq: Option<Vec<String>>,
 }
 
-/// One step of a [`JsonAssertion::path`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum JsonPathStep {
-    /// An object member.
-    Key(String),
-    /// An array element.
-    Index(usize),
-}
-
-/// Parses a JSON path: `$`, then `.key`, `[index]`, `["key"]` or `['key']`.
-///
-/// # Errors
-///
-/// Returns a message saying where the path stops making sense.
-pub fn parse_json_path(path: &str) -> Result<Vec<JsonPathStep>, String> {
-    let invalid = |detail: &str| format!("invalid JSON path `{path}`: {detail}");
-    let mut rest = path
-        .strip_prefix('$')
-        .ok_or_else(|| invalid("it must start with `$`"))?;
-    let mut steps = Vec::new();
-    while !rest.is_empty() {
-        if let Some(after) = rest.strip_prefix('.') {
-            let end = after
-                .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'))
-                .unwrap_or(after.len());
-            if end == 0 {
-                return Err(invalid("a `.` must be followed by a key"));
-            }
-            steps.push(JsonPathStep::Key(after[..end].to_owned()));
-            rest = &after[end..];
-        } else if let Some(after) = rest.strip_prefix('[') {
-            let close = after
-                .find(']')
-                .ok_or_else(|| invalid("a `[` is never closed"))?;
-            let inside = &after[..close];
-            let quoted = inside
-                .strip_prefix('"')
-                .and_then(|key| key.strip_suffix('"'))
-                .or_else(|| {
-                    inside
-                        .strip_prefix('\'')
-                        .and_then(|key| key.strip_suffix('\''))
-                });
-            if let Some(key) = quoted {
-                steps.push(JsonPathStep::Key(key.to_owned()));
-            } else {
-                let index = inside
-                    .parse()
-                    .map_err(|_| invalid("brackets hold an index or a quoted key"))?;
-                steps.push(JsonPathStep::Index(index));
-            }
-            rest = &after[close + 1..];
-        } else {
-            return Err(invalid("expected `.key` or `[...]`"));
-        }
+impl RecordsAssertion {
+    /// How many matchers are set; a valid assertion has exactly one.
+    #[must_use]
+    pub fn matcher_count(&self) -> usize {
+        usize::from(self.contains.is_some()) + usize::from(self.eq.is_some())
     }
-    Ok(steps)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn json_paths() {
-        assert_eq!(parse_json_path("$").unwrap(), vec![]);
-        assert_eq!(
-            parse_json_path("$.checks[0][\"a b\"]['c'].status").unwrap(),
-            vec![
-                JsonPathStep::Key("checks".into()),
-                JsonPathStep::Index(0),
-                JsonPathStep::Key("a b".into()),
-                JsonPathStep::Key("c".into()),
-                JsonPathStep::Key("status".into()),
-            ]
-        );
-        for bad in ["status", "$.", "$[", "$[x]", "$..a", "$a"] {
-            assert!(parse_json_path(bad).is_err(), "{bad:?} should be rejected");
-        }
-    }
 
     #[test]
     fn condition_keys_match_the_struct() {
@@ -376,12 +390,32 @@ mod tests {
                 exists: None,
             }),
             certificate_days_remaining: Some(Comparison::default()),
-            records: Some(RecordsAssertion {
-                contains: "a".into(),
-            }),
+            hostname_valid: Some(true),
+            chain_valid: Some(true),
+            records: Some(RecordsAssertion::default()),
+            banner: Some(TextAssertion::default()),
             on_fail: FailureState::Down,
         };
         let keys: Vec<_> = every.conditions().iter().map(Condition::key).collect();
         assert_eq!(keys, CONDITION_KEYS);
+    }
+
+    #[test]
+    fn comparisons() {
+        let window = Comparison {
+            gt: Some(10),
+            lte: Some(20),
+            ..Comparison::default()
+        };
+        assert!(!window.holds(10));
+        assert!(window.holds(11));
+        assert!(window.holds(20));
+        assert!(!window.holds(21));
+        let positive = Comparison {
+            gte: Some(0),
+            ..Comparison::default()
+        };
+        assert!(!positive.holds(-1), "a negative value is below every bound");
+        assert!(Comparison::default().holds(-5));
     }
 }

@@ -1,0 +1,32 @@
+[package]
+name = "tocsin-probe"
+description = "Network probes for tocsin: HTTP(S), TLS, TCP, DNS and ICMP."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+tocsin-core.workspace = true
+hickory-resolver.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+rustls-webpki.workspace = true
+surge-ping.workspace = true
+tokio = { workspace = true, features = ["net", "time", "io-util"] }
+tokio-rustls.workspace = true
+url.workspace = true
+x509-parser.workspace = true
+
+[dev-dependencies]
+hickory-proto.workspace = true
+serde_json.workspace = true
+axum.workspace = true
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+tokio = { workspace = true, features = ["net", "time", "io-util", "rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

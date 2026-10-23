@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::Link;
 use super::assertion::Assertion;
-use super::values::{Duration, Id, Text};
+use super::values::{Duration, Id, Secret, Text};
 
 /// A probe run on an interval, whose result sets a component's health.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -50,9 +50,13 @@ pub struct Check {
     /// Settings for `tls` checks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<TlsSettings>,
+    /// Settings for `tcp` checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp: Option<TcpSettings>,
     /// Conditions a result must meet, each `[[check.assert]]` table holding
-    /// one. With none, a probe that completes counts as up (for `http`, a
-    /// 2xx or 3xx status).
+    /// one. With none, a probe that completes counts as up, except that
+    /// `http` needs a 2xx or 3xx status, `dns` a `NOERROR` response and
+    /// `tls` a certificate that verifies for the host.
     #[serde(default, rename = "assert", skip_serializing_if = "Vec::is_empty")]
     pub assertions: Vec<Assertion>,
     /// Links shown with the check, such as its dashboard or runbook, each a
@@ -104,7 +108,7 @@ impl CheckType {
 }
 
 /// `[check.http]`.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HttpSettings {
     /// Request method.
@@ -120,8 +124,46 @@ pub struct HttpSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<Text>,
     /// Whether the server's certificate must verify. Defaults to true.
+    /// When false, the request proceeds and the certificate is still
+    /// reported, so `chain_valid` and `hostname_valid` can be asserted.
     #[serde(default = "default_true")]
     pub verify_certificate: bool,
+    /// The host name sent as TLS SNI and `Host`, and checked against the
+    /// certificate, when it differs from the target's host. The target's
+    /// host is still the address connected to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
+    /// Sent as `Authorization: Bearer <token>`. Secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bearer_token: Option<Secret>,
+    /// Sent as HTTP basic authentication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basic_auth: Option<BasicAuth>,
+}
+
+/// `[check.http.basic_auth]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BasicAuth {
+    /// The user name. It may be a secret, `${ENV:NAME}`.
+    pub username: Text,
+    /// The password. Secret.
+    pub password: Secret,
+}
+
+impl Default for HttpSettings {
+    fn default() -> Self {
+        HttpSettings {
+            method: HttpMethod::default(),
+            follow_redirects: false,
+            headers: BTreeMap::new(),
+            body: None,
+            verify_certificate: default_true(),
+            server_name: None,
+            bearer_token: None,
+            basic_auth: None,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -193,4 +235,14 @@ pub struct TlsSettings {
     /// absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_name: Option<String>,
+}
+
+/// `[check.tcp]`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TcpSettings {
+    /// Text written once connected, before the banner is read. Escapes such
+    /// as `\r\n` are written in TOML's own string syntax.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send: Option<String>,
 }

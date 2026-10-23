@@ -15,6 +15,7 @@ mod db;
 mod exit;
 mod lock;
 mod output;
+mod probe;
 mod serve;
 
 use std::io::IsTerminal;
@@ -22,7 +23,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use crate::cli::{Cli, Command, ConfigCommand};
+use crate::cli::{Cli, Command, ConfigCommand, ProbeCommand};
 use crate::exit::Exit;
 use crate::output::{Failure, Report};
 
@@ -59,6 +60,9 @@ fn run(cli: Cli) -> Result<Report, Failure> {
             ConfigCommand::Schema => Ok(config::schema()),
         },
         Some(Command::Db { command }) => db::run(command),
+        Some(Command::Probe { command }) => match command {
+            ProbeCommand::Run { check, config } => probe::run(&check, &config),
+        },
         None => Err(Failure::new(
             Exit::InvalidInput,
             "no command given; run `tocsin --help` for usage",

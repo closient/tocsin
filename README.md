@@ -18,7 +18,7 @@ printf '[server]\n' > config/server.toml
 ./target/release/tocsin serve --config config --data data
 ```
 
-`--config` defaults to `/etc/tocsin`, and the folder needs at least one `*.toml` file. [docs/config.md](docs/config.md) describes every table, and [examples/config/](examples/config/) is a fuller example. `tocsin --version --json` prints `{"version": "..."}`. Stop the server with Ctrl-C or SIGTERM.
+`--config` defaults to `/etc/tocsin`, and the folder needs at least one `*.toml` file. [docs/config.md](docs/config.md) describes every table, and [examples/config/](examples/config/) is a fuller example. `tocsin probe run <check-id>` runs one check once and shows why it passed or failed; [docs/probes.md](docs/probes.md) describes its output. `tocsin --version --json` prints `{"version": "..."}`. Stop the server with Ctrl-C or SIGTERM.
 
 ## License
 

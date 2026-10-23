@@ -134,6 +134,7 @@ pub fn check(folder: &Path) -> Result<Report, Failure> {
             folder.display(),
             files.len()
         ),
+        exit: Exit::Ok,
         json: json!({
             "ok": true,
             "files": files,
@@ -173,6 +174,7 @@ pub fn show(folder: &Path) -> Result<Report, Failure> {
     Ok(Report {
         text: pretty(&json),
         json,
+        exit: Exit::Ok,
     })
 }
 
@@ -182,6 +184,7 @@ pub fn schema() -> Report {
     Report {
         text: pretty(&json),
         json,
+        exit: Exit::Ok,
     }
 }
 

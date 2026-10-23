@@ -16,7 +16,7 @@ use serde::de::DeserializeOwned;
 use toml::Spanned;
 use toml::de::{DeTable, DeValue, ValueDeserializer};
 
-use super::assertion::{Condition, parse_json_path};
+use super::assertion::{Condition, TextAssertion};
 use super::check::CheckType;
 use super::diagnostic::{Diagnostic, LineIndex};
 use super::notifier::NotifierType;
@@ -718,6 +718,7 @@ impl<'a> Loader<'a> {
             ("http", CheckType::Http, value.http.is_some()),
             ("dns", CheckType::Dns, value.dns.is_some()),
             ("tls", CheckType::Tls, value.tls.is_some()),
+            ("tcp", CheckType::Tcp, value.tcp.is_some()),
         ];
         for (table, applies_to, present) in tables {
             if present && applies_to != check_type {
@@ -743,8 +744,22 @@ impl<'a> Loader<'a> {
             CheckType::Tls => {
                 value.tls.get_or_insert_with(Default::default);
             }
-            CheckType::Tcp | CheckType::Icmp => {}
+            CheckType::Tcp => {
+                value.tcp.get_or_insert_with(Default::default);
+            }
+            CheckType::Icmp => {}
         }
+        self.validate_assertions(&origin, value);
+    }
+
+    /// Each `[[check.assert]]`: one condition, valid for the check.
+    fn validate_assertions(&mut self, origin: &Origin, value: &Check) {
+        let check_type = value.check_type;
+        let plain_http = check_type == CheckType::Http
+            && value
+                .target
+                .get(..7)
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://"));
         for (index, assertion) in value.assertions.iter().enumerate() {
             let origin = origin.key("assert").index(index);
             match assertion.conditions().as_slice() {
@@ -752,6 +767,14 @@ impl<'a> Loader<'a> {
                     &origin,
                     "an assertion needs a condition",
                     Some(format!("use one of {}", list(super::CONDITION_KEYS))),
+                ),
+                [condition] if plain_http && condition.needs_certificate() => self.report(
+                    &origin.key(condition.key()),
+                    format!(
+                        "a `{}` assertion needs an https:// target, and this one is http://",
+                        condition.key()
+                    ),
+                    None,
                 ),
                 [condition] => self.validate_condition(&origin, check_type, condition),
                 several => self.report(
@@ -766,8 +789,7 @@ impl<'a> Loader<'a> {
         }
     }
 
-    /// `[check.dns] resolver` and `[check.tls] server_name`, which are
-    /// written as plain strings.
+    /// `[check.dns] resolver`, the `server_name`s and HTTP authentication.
     fn validate_settings(&mut self, origin: &Origin, value: &Check) {
         if let Some(resolver) = value.dns.as_ref().and_then(|dns| dns.resolver.as_ref())
             && host_and_port(resolver).is_none_or(|(host, _)| host.parse::<IpAddr>().is_err())
@@ -780,12 +802,37 @@ impl<'a> Loader<'a> {
                 ),
             );
         }
-        if let Some(name) = value.tls.as_ref().and_then(|tls| tls.server_name.as_ref())
-            && !is_host(name)
+        let server_names = [
+            (
+                "tls",
+                value.tls.as_ref().and_then(|tls| tls.server_name.as_ref()),
+            ),
+            (
+                "http",
+                value
+                    .http
+                    .as_ref()
+                    .and_then(|http| http.server_name.as_ref()),
+            ),
+        ];
+        for (table, name) in server_names {
+            if let Some(name) = name
+                && !is_host(name)
+            {
+                self.report(
+                    &origin.keys(&[table, "server_name"]),
+                    format!("`{name}` is not a hostname"),
+                    None,
+                );
+            }
+        }
+        if let Some(http) = &value.http
+            && http.bearer_token.is_some()
+            && http.basic_auth.is_some()
         {
             self.report(
-                &origin.keys(&["tls", "server_name"]),
-                format!("`{name}` is not a hostname"),
+                &origin.keys(&["http", "basic_auth"]),
+                "give `bearer_token` or `basic_auth`, not both",
                 None,
             );
         }
@@ -826,24 +873,36 @@ impl<'a> Loader<'a> {
                     None,
                 )
             }),
-            Condition::Json(json) => match parse_json_path(&json.path) {
+            Condition::Json(json) => match crate::probe::json_path(&json.path) {
                 Err(message) => Some((
                     message,
-                    Some("such as \"$.status\" or \"$.checks[0].ok\"".to_owned()),
+                    Some(bracketed(&json.path).map_or_else(
+                        || {
+                            "such as \"$.status\", \"$.checks[0].ok\" or \"$.components[?@.name=='API'].status\""
+                                .to_owned()
+                        },
+                        |path| format!("use bracket notation: {path}"),
+                    )),
                 )),
                 Ok(_) => one_matcher(json.matcher_count(), "eq, ne, exists or contains"),
             },
-            Condition::Body(body) => one_matcher(body.matcher_count(), "contains or not_contains"),
+            Condition::Body(text) | Condition::Banner(text) => text_problem(text),
+            Condition::HostnameValid(_) | Condition::ChainValid(_) => None,
             Condition::Header(header) if header.name.is_empty() => {
                 Some(("a header assertion needs a `name`".to_owned(), None))
             }
             Condition::Header(header) => {
                 one_matcher(header.matcher_count(), "eq, contains or exists")
             }
-            Condition::Records(records) => records
-                .contains
-                .is_empty()
-                .then(|| ("`contains` must not be empty".to_owned(), None)),
+            Condition::Records(records) => {
+                one_matcher(records.matcher_count(), "contains or eq").or_else(|| {
+                    let empty = records.contains.as_ref().is_some_and(String::is_empty)
+                        || records.eq.as_ref().is_some_and(|eq| {
+                            eq.is_empty() || eq.iter().any(String::is_empty)
+                        });
+                    empty.then(|| ("records must not be empty".to_owned(), None))
+                })
+            }
         };
         if let Some((message, hint)) = problem {
             self.report(&origin, message, hint);
@@ -933,6 +992,62 @@ impl<'a> Loader<'a> {
 
     // ---- secrets --------------------------------------------------------
 
+    /// Rejects an `http` check's header that could not be sent: a name that
+    /// is not an HTTP token, or a value (secrets included, once resolved)
+    /// holding a control character such as a newline. A secret's value is
+    /// never repeated; its variable is named instead.
+    fn validate_headers(&mut self, items: &Items) {
+        for check in &items.checks {
+            let Some(http) = &check.value.http else {
+                continue;
+            };
+            for (name, value) in &http.headers {
+                let origin = check.origin.keys(&["http", "headers", name]);
+                if http::HeaderName::from_bytes(name.as_bytes()).is_err() {
+                    self.report(
+                        &origin,
+                        format!("`{name}` is not an HTTP header name"),
+                        Some(
+                            "a header name is letters, digits and !#$%&'*+-.^_`|~, such as \"X-Request-Id\""
+                                .to_owned(),
+                        ),
+                    );
+                }
+                let (text, source) = match value {
+                    Text::Literal(text) => (Some(text.as_str()), None),
+                    Text::Secret(secret) => (secret.resolved(), Some(secret.variable())),
+                };
+                if let Some(text) = text {
+                    self.header_value(&origin, text, source);
+                }
+            }
+            if let Some(token) = &http.bearer_token
+                && let Some(text) = token.resolved()
+            {
+                self.header_value(
+                    &check.origin.keys(&["http", "bearer_token"]),
+                    &format!("Bearer {text}"),
+                    Some(token.variable()),
+                );
+            }
+        }
+    }
+
+    /// Reports `text` when it cannot be an HTTP header value, naming the
+    /// environment variable it came from rather than repeating it.
+    fn header_value(&mut self, origin: &Origin, text: &str, variable: Option<&str>) {
+        if http::HeaderValue::from_str(text).is_ok() {
+            return;
+        }
+        let message = match variable {
+            Some(variable) => format!(
+                "the value of environment variable `{variable}` cannot be sent in an HTTP header: it holds a control character, such as a newline, or a character outside ASCII"
+            ),
+            None => "this value cannot be sent in an HTTP header: it holds a control character, such as a newline, or a character outside ASCII".to_owned(),
+        };
+        self.report(origin, message, None);
+    }
+
     /// Resolves every secret from the environment, then rejects `${ENV:...}`
     /// anywhere that is not a secret field.
     fn resolve_secrets(&mut self, items: &mut Items, environment: &Environment<'_>) {
@@ -955,6 +1070,21 @@ impl<'a> Loader<'a> {
             let Some(http) = &mut check.value.http else {
                 continue;
             };
+            if let Some(secret) = &mut http.bearer_token {
+                secrets.push((check.origin.keys(&["http", "bearer_token"]), secret));
+            }
+            if let Some(basic) = &mut http.basic_auth {
+                if let Text::Secret(secret) = &mut basic.username {
+                    secrets.push((
+                        check.origin.keys(&["http", "basic_auth", "username"]),
+                        secret,
+                    ));
+                }
+                secrets.push((
+                    check.origin.keys(&["http", "basic_auth", "password"]),
+                    &mut basic.password,
+                ));
+            }
             for (name, header) in &mut http.headers {
                 if let Text::Secret(secret) = header {
                     secrets.push((check.origin.keys(&["http", "headers", name]), secret));
@@ -987,6 +1117,7 @@ impl<'a> Loader<'a> {
 
         self.validate_smtp_url(items);
         self.reject_shared_token_secrets(items);
+        self.validate_headers(items);
 
         // Items that failed to deserialize are skipped: their secret fields
         // are unknown, and their error is already reported.
@@ -1172,7 +1303,58 @@ fn hint_for(message: &str) -> Option<String> {
 
 /// The candidate nearest `given` by edit distance, if any is near enough to
 /// be a likely typo.
-fn closest<'c>(given: &str, candidates: impl Iterator<Item = &'c str>) -> Option<&'c str> {
+/// Why a `body` or `banner` assertion is invalid, if it is.
+fn text_problem(text: &TextAssertion) -> Option<(String, Option<String>)> {
+    if text.matcher_count() != 1 {
+        return Some((
+            "give exactly one of contains, not_contains or regex".to_owned(),
+            None,
+        ));
+    }
+    let pattern = text.regex.as_ref()?;
+    crate::probe::regular_expression(pattern)
+        .err()
+        .map(|message| (message, None))
+}
+
+/// `path` with every dot step RFC 9535 rejects (a name holding `-` or
+/// starting with a digit, such as `.x-request-id`) in bracket notation,
+/// when it has one.
+fn bracketed(path: &str) -> Option<String> {
+    let mut fixed = String::with_capacity(path.len() + 8);
+    let mut changed = false;
+    let mut rest = path;
+    while let Some(dot) = rest.find('.') {
+        fixed.push_str(&rest[..dot]);
+        let after = &rest[dot + 1..];
+        let end = after
+            .find(|character: char| {
+                !(character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+            })
+            .unwrap_or(after.len());
+        let name = &after[..end];
+        if name.contains('-') || name.starts_with(|character: char| character.is_ascii_digit()) {
+            // A descendant step (`..name`) keeps its first dot.
+            if fixed.ends_with('.') {
+                fixed.push('.');
+            }
+            fixed.push_str("['");
+            fixed.push_str(name);
+            fixed.push_str("']");
+            changed = true;
+        } else {
+            fixed.push('.');
+            fixed.push_str(name);
+        }
+        rest = &after[end..];
+    }
+    fixed.push_str(rest);
+    changed.then_some(fixed)
+}
+
+/// The candidate nearest to `given` by edit distance, if any is close
+/// enough to be a likely typo.
+pub fn closest<'c>(given: &str, candidates: impl Iterator<Item = &'c str>) -> Option<&'c str> {
     let limit = (given.chars().count() / 3).max(2);
     candidates
         .map(|candidate| (edit_distance(given, candidate), candidate))
@@ -1230,8 +1412,12 @@ fn is_host(text: &str) -> bool {
             }))
 }
 
-/// Splits `host:port` or `[ipv6]:port`; the port is `None` when absent.
-fn host_and_port(text: &str) -> Option<(&str, Option<u16>)> {
+/// Splits a target or resolver written `host`, `host:port`, `ipv6`,
+/// `[ipv6]` or `[ipv6]:port` into its host and port; the port is `None`
+/// when absent. Returns `None` when the port is not a number from 1 to
+/// 65535.
+#[must_use]
+pub fn host_and_port(text: &str) -> Option<(&str, Option<u16>)> {
     if let Some(rest) = text.strip_prefix('[') {
         let (host, after) = rest.split_once(']')?;
         let port = match after {

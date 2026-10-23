@@ -131,6 +131,7 @@ fn info(path: &Path) -> Result<Report, Failure> {
         let _ = write!(text, "\n  {table}: {count}");
     }
     Ok(Report {
+        exit: Exit::Ok,
         json: json!({
             "path": info.path.display().to_string(),
             "size_bytes": info.size_bytes,
@@ -148,6 +149,7 @@ fn info(path: &Path) -> Result<Report, Failure> {
 async fn vacuum(store: &Store) -> Result<Report, Failure> {
     let report = store.vacuum().await.map_err(runtime_failure)?;
     Ok(Report {
+        exit: Exit::Ok,
         json: json!({
             "size_before_bytes": report.size_before,
             "size_after_bytes": report.size_after,
@@ -167,6 +169,7 @@ async fn rollup(store: &Store, since: Day) -> Result<Report, Failure> {
     // finalized the earlier days; None means nothing was left to recompute.
     let effective = report.since.map(|day| day.to_string());
     Ok(Report {
+        exit: Exit::Ok,
         json: json!({
             "requested_since": since.to_string(),
             "since": effective,

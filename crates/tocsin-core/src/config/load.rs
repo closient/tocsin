@@ -1146,6 +1146,13 @@ impl<'a> Loader<'a> {
                 self.url(&origin.keys(&[table, "url"]), url);
             }
         }
+        if value.max_in_flight == 0 {
+            self.report(
+                &origin.key("max_in_flight"),
+                "`max_in_flight` must be at least 1",
+                None,
+            );
+        }
         if let Some(pushover) = &value.pushover {
             let priorities = [
                 ("down_priority", pushover.down_priority),
@@ -1488,8 +1495,15 @@ fn interpolations(value: &Spanned<DeValue<'_>>, origin: &Origin, found: &mut Vec
 }
 
 /// A hint for a deserialization error: the nearest valid name for an
-/// unknown field or variant.
+/// unknown field or variant, or how to make a required secret.
 fn hint_for(message: &str) -> Option<String> {
+    if message.starts_with("missing field `signing_secret`") {
+        return Some(
+            "generate one with `openssl rand -hex 32`, put it in an environment \
+             variable and write `signing_secret = \"${ENV:NAME}\"`"
+                .to_owned(),
+        );
+    }
     if !(message.starts_with("unknown field") || message.starts_with("unknown variant")) {
         return None;
     }

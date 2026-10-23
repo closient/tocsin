@@ -1075,7 +1075,7 @@ fn pushover_priorities_run_from_minus_two_to_two() {
 }
 
 #[test]
-fn routes_repeat_every_four_hours_and_resolve_by_default() {
+fn routes_repeat_every_four_hours_by_default() {
     let notifier = "[[notifier]]\nid = \"ops\"\ntype = \"slack\"\n[notifier.slack]\nwebhook_url = \"${ENV:SLACK_WEBHOOK_URL}\"\n\n";
     let route =
         |extra: &str| format!("{notifier}[[route]]\nid = \"all\"\nnotifiers = [\"ops\"]\n{extra}");
@@ -1084,16 +1084,44 @@ fn routes_repeat_every_four_hours_and_resolve_by_default() {
         config.routes[0].repeat.get(),
         std::time::Duration::from_hours(4)
     );
-    assert!(config.routes[0].resolve);
 
-    let config =
-        run(&[("notify.toml", &route("repeat = \"0s\"\nresolve = false\n"))]).expect("valid");
+    let config = run(&[("notify.toml", &route("repeat = \"0s\"\n"))]).expect("valid");
     assert!(config.routes[0].repeat.get().is_zero(), "0s never repeats");
-    assert!(!config.routes[0].resolve);
 
     assert_eq!(
         errors(&[("notify.toml", &route("repeat = \"30s\"\n"))]),
         ["notify.toml:10:10: `repeat` must be at least 1m, or \"0s\" to never repeat"]
+    );
+}
+
+#[test]
+fn a_route_cannot_turn_resolves_off() {
+    // Every alert resolves: there is no fire-only route.
+    let notifier = "[[notifier]]\nid = \"ops\"\ntype = \"slack\"\n[notifier.slack]\nwebhook_url = \"${ENV:SLACK_WEBHOOK_URL}\"\n\n";
+    let rejected = only_error(&[(
+        "notify.toml",
+        &format!("{notifier}[[route]]\nid = \"all\"\nnotifiers = [\"ops\"]\nresolve = false\n"),
+    )]);
+    assert!(
+        rejected.message.starts_with("unknown field `resolve`"),
+        "{rejected}"
+    );
+}
+
+#[test]
+fn a_notifier_sends_two_at_a_time_unless_told_otherwise() {
+    let notifier = |extra: &str| {
+        format!(
+            "[[notifier]]\nid = \"ops\"\ntype = \"slack\"\n{extra}[notifier.slack]\nwebhook_url = \"${{ENV:SLACK_WEBHOOK_URL}}\"\n"
+        )
+    };
+    let config = run(&[("notify.toml", &notifier(""))]).expect("valid");
+    assert_eq!(config.notifiers[0].max_in_flight, 2);
+    let config = run(&[("notify.toml", &notifier("max_in_flight = 8\n"))]).expect("valid");
+    assert_eq!(config.notifiers[0].max_in_flight, 8);
+    assert_eq!(
+        errors(&[("notify.toml", &notifier("max_in_flight = 0\n"))]),
+        ["notify.toml:4:17: `max_in_flight` must be at least 1"]
     );
 }
 
@@ -1119,6 +1147,9 @@ fn a_webhook_signing_secret_is_required_and_redacted() {
 
     let missing = only_error(&[("notify.toml", &webhook(""))]);
     assert!(missing.message.contains("signing_secret"), "{missing}");
+    let hint = missing.hint.as_deref().unwrap_or_default();
+    assert!(hint.contains("openssl rand -hex 32"), "{missing}");
+    assert!(hint.contains("${ENV:NAME}"), "{missing}");
     let pasted = only_error(&[(
         "notify.toml",
         &webhook("signing_secret = \"PASTED-SIGNING-SECRET\"\n"),

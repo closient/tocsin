@@ -62,11 +62,7 @@ pub fn build(
             pushover::API_BASE,
             settings.api_token.expose().to_owned(),
             settings.user_key.expose().to_owned(),
-            pushover::Priorities {
-                down: settings.down_priority,
-                degraded: settings.degraded_priority,
-                resolved: settings.resolved_priority,
-            },
+            pushover::Priorities::from(settings),
         )),
         NotifierSettings::Webhook(settings) => Arc::new(webhook::Webhook::new(
             client,

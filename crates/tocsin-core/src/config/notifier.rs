@@ -24,6 +24,11 @@ pub struct Notifier {
     /// the same name.
     #[serde(rename = "type")]
     pub notifier_type: NotifierType,
+    /// The most deliveries this notifier sends at once. More wait for a
+    /// free slot, so a storm of alerts never floods the service.
+    #[serde(default = "default_max_in_flight")]
+    #[schemars(range(min = 1))]
+    pub max_in_flight: u32,
     /// `[notifier.slack]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slack: Option<SlackSettings>,
@@ -48,6 +53,10 @@ pub struct Notifier {
     /// `[notifier.alertmanager]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alertmanager: Option<AlertmanagerSettings>,
+}
+
+fn default_max_in_flight() -> u32 {
+    2
 }
 
 /// The service a notifier posts to.

@@ -13,8 +13,9 @@ windows itself.
 
 ## Identity
 
-An alert is identified by the node and the subject: `node-a/check/api`, or
-`node-a/heartbeat/backup` for a heartbeat. The fire, every repeat and the
+An alert is identified by the node, the subject's kind and the subject's
+id: `node-a/check/api`, or `node-a/heartbeat/backup` for a heartbeat. A check
+and a heartbeat may share an id; they are two alerts. The fire, every repeat and the
 resolve carry the same identity, so a receiver can pair them. A resolve also
 carries when the alert started and ended, and how long it lasted.
 
@@ -29,9 +30,9 @@ fires again with the new health, under the same identity.
 `components` and `groups` match its component, and `notify_on` is the least
 severe health that alerts. An empty filter matches everything.
 
-When several routes send one alert to the same notifier, it gets one copy.
-It resolves if any of those routes resolves (`resolve = true`, the default),
-and repeats on the shortest of their `repeat` intervals.
+When several routes send one alert to the same notifier, it gets one copy,
+repeated on the shortest of their `repeat` intervals. Every alert is
+resolved: there is no way to turn a resolve off.
 
 `repeat` (default `"4h"`, at least `"1m"`, or `"0s"` to never repeat) re-sends
 an alert while it is still firing, titled `[STILL DOWN]` or
@@ -56,14 +57,28 @@ the process. The `EventBus` that feeds the live API is a lossy broadcast;
 alerting does not use it. The tables are described in
 [storage.md](storage.md#alert-and-alert_delivery).
 
-**Ordering.** The worker is offered only each alert's oldest pending
-delivery, and sends at most one delivery per alert at a time. A resolve is
-therefore never sent before its fire has been delivered, or given up on, on
-that notifier.
+**Ordering.** Each alert has two lanes on each notifier. Messages (fire,
+repeat, resolve) go one at a time, oldest first, so a resolve is never sent
+before its fire has been delivered, or given up on. A Pushover emergency
+cancel is a delivery of its own in the second lane: it waits for every
+message queued before it, so it never cancels a ring that has not started,
+but no message ever waits for a cancel. A cancel that keeps failing is
+retried and given up on like any delivery, and the resolve goes out on time
+regardless.
 
-**Retries.** A failed send is retried after 5s, then 10s, 20s and so on,
-capped at 10 minutes, for 12 attempts (about an hour). A send that runs past
-30 seconds counts as failed. A permanent failure, such as an HTTP 4xx other
+**Retries.** A failed send is retried after a random wait of up to 5s,
+then up to 10s, 20s and so on, capped at 10 minutes, for 12 attempts (up to
+about an hour). The wait is drawn anew for each attempt (full jitter), so
+alerts that failed together do not retry together. A send that runs past
+30 seconds counts as failed. A 429 or 503 with a `Retry-After` header (in
+seconds or as a date, at most an hour) is retried after that long instead,
+and pauses the whole notifier until then: none of its other deliveries
+start, because the service has said it is not taking any.
+
+**Concurrency.** Each notifier sends at most `max_in_flight` deliveries at
+once (default 2, set per `[[notifier]]`); the rest wait their turn. A storm,
+such as every check failing when a network link drops, queues behind that
+limit instead of tripping the service's rate limit. A permanent failure, such as an HTTP 4xx other
 than 408 and 429, or a notifier that is no longer configured, is given up on
 at once. A delivery given up on is kept as `failed`, with its last error,
 for 90 days; delivered rows are kept for a week. Either way the next
@@ -71,7 +86,9 @@ delivery for that alert, such as its resolve, goes ahead.
 
 **Independence.** Each delivery runs on its own task. A notifier that hangs
 or fails holds up only its own alerts; the other notifiers' fires and
-resolves go out on time.
+resolves go out on time. A send that panics is caught: it is logged as an
+error naming the notifier, the alert and the delivery, counted as a failed
+attempt, and retried like any other failure.
 
 **Metrics.** Two counters, both labelled by notifier, are registered in the
 process's Prometheus registry; the `/metrics` endpoint arrives separately.
@@ -112,7 +129,7 @@ fails and is recorded as failed.
 | `slack`, `discord` | A message to the incoming webhook. | A message saying it recovered, and how long it lasted. |
 | `telegram` | `sendMessage` to `chat_id`. | The same, saying it recovered. |
 | `ntfy` | A POST to the topic with `Title`, `Priority` 4 when down (3 when degraded) and a tag. | Priority 3, tagged as resolved. |
-| `pushover` | `down_priority` (default 1) or `degraded_priority` (default 0). Priority 2 is an emergency: Pushover repeats it every 60s for up to an hour, tagged `tocsin:<identity>`. | `resolved_priority` (default 0); an emergency is cancelled by its tag first. |
+| `pushover` | `down_priority` (default 1) or `degraded_priority` (default 0). Priority 2 is an emergency: Pushover rings it every 60s until acknowledged, for up to an hour. | `resolved_priority` (default 0). An emergency still ringing is cancelled, below. |
 | `email` | One message per alert from `[server.email]`'s `from`, with its `reply_to`. | A message in the same thread. |
 | `webhook` | Signed JSON, below. | The same JSON with `"event": "resolve"`. |
 | `alertmanager` | `POST /api/v2/alerts`, re-posted every 60s with `endsAt` 5 minutes ahead. | `endsAt` set to when the outage ended. |
@@ -126,17 +143,39 @@ clients thread the fire, its repeats and its resolve together; subjects start
 `reply_to` may be a no-reply address (`noreply`, `no-reply`, `donotreply`
 and the like, in any case): an operator must be able to answer an alert.
 
+**Pushover emergencies.** A fire or repeat at priority 2 carries the tag
+`tocsin-` and the hex SHA-256 of the user key, a zero byte and the alert's
+identity: one tag per user and alert, revealing neither. When the alert
+resolves, or fires again at a priority that does not ring (down to
+degraded, say), tocsin queues a cancel, a `POST` to
+`/1/receipts/cancel_by_tag/<tag>.json`, as its own delivery beside the
+message. Whether a message rings is decided when it is queued, so changing
+a priority in the config does not orphan a ring already going. A resolve
+sent at priority 2 (`resolved_priority = 2`) is not tagged and rings until
+acknowledged or it expires: pick a lower priority unless that is wanted.
+
 **Alertmanager.** Alertmanager resolves a firing alert on its own once its
 `endsAt` passes without a re-post. tocsin sets `endsAt` five minutes after
 each post and re-posts every 60 seconds, whatever the route's `repeat`, so
 the alert stays firing while tocsin is up, and resolves by itself within
-five minutes if tocsin goes away. The labels are the identity and never
-change between posts: `alertname` (`TocsinCheckFailing` or
-`TocsinHeartbeatFailing`), `node`, `subject_kind`, `subject`, and
-`component` when there is one. `annotations` carry the title, the text, the
-health and the subject's name.
+five minutes if tocsin goes away. Alertmanager identifies an alert by its
+whole label set, so the labels are the identity and nothing else:
+`alertname` (`TocsinCheckFailing`, `TocsinHeartbeatFailing`, or
+`TocsinTestAlert` for `tocsin notify test`), `node`, `subject_kind` and
+`subject_id`. Everything that can change while an alert fires is an
+annotation: `summary`, `description`, `health`, `name`, `component` and
+`component_name` when there is one, and `tocsin_test` on a test alert. A
+check that moves to another component, or from degraded to down, is
+therefore still one alert in Alertmanager.
 
 ## The webhook
+
+**Breaking change:** `signing_secret` is required. A `webhook` notifier
+configured before signing existed fails `tocsin config check` until it has
+one. Generate a secret with `openssl rand -hex 32`, put it in an environment
+variable, set `signing_secret = "${ENV:NAME}"`, and have the receiver verify
+each request as below. An unsigned webhook lets anyone who learns the URL
+post fake alerts, so there is no way to opt out.
 
 Each alert is a POST of this JSON:
 

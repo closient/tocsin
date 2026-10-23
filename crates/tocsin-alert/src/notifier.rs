@@ -20,7 +20,24 @@ pub trait Notifier: Send + Sync + 'static {
     /// The destination refused or could not be reached; see
     /// [`SendError::permanent`].
     fn send<'a>(&'a self, alert: &'a Alert) -> BoxFuture<'a, Result<(), SendError>>;
+
+    /// Stops `alert`'s earlier messages from ringing, for a notifier whose
+    /// messages keep ringing until acknowledged (a Pushover emergency).
+    /// `alert` is the message that rang. The worker calls it as a delivery
+    /// of its own, queued when the alert resolves or stops ringing. Most
+    /// notifiers have nothing to cancel.
+    ///
+    /// # Errors
+    ///
+    /// As [`Notifier::send`].
+    fn cancel<'a>(&'a self, alert: &'a Alert) -> BoxFuture<'a, Result<(), SendError>> {
+        let _ = alert;
+        Box::pin(async { Ok(()) })
+    }
 }
+
+/// The longest `Retry-After` honoured; a longer one waits this long.
+pub const MAX_RETRY_AFTER: Duration = Duration::from_hours(1);
 
 /// Why a send failed, with every secret redacted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +47,10 @@ pub struct SendError {
     /// Whether trying again cannot help (a 4xx other than 408 or 429, or a
     /// notifier that is not configured).
     pub permanent: bool,
+    /// How long the destination asked to be left alone (a 429 or 503
+    /// `Retry-After`), at most [`MAX_RETRY_AFTER`]. The next attempt waits
+    /// this long instead of the backoff.
+    pub retry_after: Option<Duration>,
 }
 
 impl SendError {
@@ -39,6 +60,7 @@ impl SendError {
         SendError {
             message: message.into(),
             permanent: false,
+            retry_after: None,
         }
     }
 
@@ -48,6 +70,7 @@ impl SendError {
         SendError {
             message: message.into(),
             permanent: true,
+            retry_after: None,
         }
     }
 }
@@ -129,13 +152,25 @@ impl Redactor {
     }
 
     /// Turns a response into success or a [`SendError`]: any 2xx succeeds;
-    /// 408, 429 and 5xx are worth retrying; any other status is permanent.
+    /// 408, 429 and 5xx are worth retrying, a 429 or 503 after its
+    /// `Retry-After` if it sent one; any other status is permanent.
     ///
     /// # Errors
     ///
     /// The status is not a success.
     pub async fn check(&self, response: reqwest::Response) -> Result<String, SendError> {
         let status = response.status();
+        let retry_after = if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+        {
+            response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| retry_after(value, jiff::Timestamp::now()))
+        } else {
+            None
+        };
         let body = response.text().await.unwrap_or_default();
         if status.is_success() {
             return Ok(body);
@@ -146,7 +181,10 @@ impl Redactor {
             || status == reqwest::StatusCode::REQUEST_TIMEOUT
             || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
         Err(if retry {
-            SendError::transient(message)
+            SendError {
+                retry_after,
+                ..SendError::transient(message)
+            }
         } else {
             SendError::permanent(message)
         })
@@ -167,9 +205,42 @@ impl Redactor {
     }
 }
 
+/// A `Retry-After` value, delay-seconds or an HTTP-date, as a wait from
+/// `now`, at most [`MAX_RETRY_AFTER`]. A date already past waits nothing;
+/// a value that is neither is ignored.
+fn retry_after(value: &str, now: jiff::Timestamp) -> Option<Duration> {
+    let value = value.trim();
+    let wait = if let Ok(seconds) = value.parse::<u64>() {
+        Duration::from_secs(seconds)
+    } else {
+        let at = jiff::fmt::rfc2822::parse(value).ok()?.timestamp();
+        let millis = at.as_millisecond().saturating_sub(now.as_millisecond());
+        Duration::from_millis(u64::try_from(millis).unwrap_or(0))
+    };
+    Some(wait.min(MAX_RETRY_AFTER))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_after_takes_seconds_or_an_http_date_and_is_capped() {
+        let now: jiff::Timestamp = "2026-10-23T12:00:00Z".parse().unwrap();
+        assert_eq!(retry_after("7", now), Some(Duration::from_secs(7)));
+        assert_eq!(
+            retry_after("Fri, 23 Oct 2026 12:00:30 GMT", now),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            retry_after("Fri, 23 Oct 2026 11:00:00 GMT", now),
+            Some(Duration::ZERO),
+            "a date already past"
+        );
+        assert_eq!(retry_after("86400", now), Some(MAX_RETRY_AFTER));
+        assert_eq!(retry_after("soon", now), None);
+        assert_eq!(retry_after("-5", now), None);
+    }
 
     #[test]
     fn a_webhook_url_and_its_path_are_redacted() {

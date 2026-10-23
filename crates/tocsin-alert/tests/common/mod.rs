@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! A configuration loader, a store in a temporary folder, and notifiers that
-//! record what they are handed. The fakes answer synchronously, so a paused
-//! tokio clock only moves when every task waits on a timer or on the store.
+//! record what they are handed. The fakes answer synchronously unless given
+//! a latency, so a paused tokio clock only moves when every task waits on a
+//! timer or on the store.
 
 #![allow(dead_code, reason = "each test file uses a different subset")]
 
@@ -16,7 +17,7 @@ use tocsin_alert::{Alert, AlertEvent, Notifier, SendError};
 use tocsin_core::Health;
 use tocsin_core::config::{Config, Environment, Source, load};
 use tocsin_engine::ports::BoxFuture;
-use tocsin_store::{NewOutage, OutageChange, OutageEnd, Store};
+use tocsin_store::{NewOutage, OutageChange, OutageEnd, Store, SubjectKind};
 use tokio::sync::mpsc;
 
 /// Wall-clock time when a test starts.
@@ -88,18 +89,33 @@ pub fn notifier(id: &str) -> String {
     )
 }
 
+/// A Pushover notifier `id` in configuration whose down alerts are
+/// emergencies (priority 2) and degraded ones normal (0).
+pub fn pushover(id: &str) -> String {
+    format!(
+        "[[notifier]]\nid = \"{id}\"\ntype = \"pushover\"\n\n[notifier.pushover]\n\
+         user_key = \"${{ENV:USER_{0}}}\"\napi_token = \"${{ENV:TOKEN_{0}}}\"\n\
+         down_priority = 2\ndegraded_priority = 0\n\n",
+        id.to_uppercase()
+    )
+}
+
 /// The `api` check on the `web` component, every second, and a route
-/// sending everything to `notifiers` with `extra` route settings.
+/// sending everything to Slack `notifiers` with `extra` route settings.
 pub fn monitored(notifiers: &[&str], extra: &str) -> String {
+    let declared: String = notifiers.iter().map(|id| notifier(id)).collect();
+    monitored_by(&declared, notifiers, extra)
+}
+
+/// [`monitored`], with the notifiers declared by `declared`.
+pub fn monitored_by(declared: &str, notifiers: &[&str], extra: &str) -> String {
     let mut toml = String::from(
         "[[component]]\nid = \"web\"\nname = \"Website\"\n\n\
          [[check]]\nid = \"api\"\nname = \"Public API\"\ntype = \"tcp\"\n\
          target = \"api.example.com:443\"\ninterval = \"1s\"\ntimeout = \"500ms\"\n\
          confirm = 1\ncomponent = \"web\"\n\n",
     );
-    for id in notifiers {
-        toml.push_str(&notifier(id));
-    }
+    toml.push_str(declared);
     let list: Vec<String> = notifiers.iter().map(|id| format!("\"{id}\"")).collect();
     let _ = writeln!(
         toml,
@@ -137,16 +153,35 @@ impl Fixture {
 
 /// An alerting outage of `api` on `node-a` opening at `at`.
 pub fn down(at: i64) -> OutageChange {
+    failing("api", Health::Down, at)
+}
+
+/// An alerting outage of check `subject` on `node-a`, on the `web`
+/// component, at `health` from `at`.
+pub fn failing(subject: &str, health: Health, at: i64) -> OutageChange {
     OutageChange {
         end: None,
         open: Some(NewOutage {
             node_id: "node-a".into(),
-            check_id: "api".into(),
+            subject_kind: SubjectKind::Check,
+            check_id: subject.into(),
             component_id: Some("web".into()),
-            health: Health::Down,
+            health,
             started_at_ms: at,
             alerted: true,
         }),
+    }
+}
+
+/// `api`'s outage `id` turning `health` at `at`, as the engine reports a
+/// change of health: the old outage ends and a new one opens.
+pub fn turns(id: i64, health: Health, at: i64) -> OutageChange {
+    OutageChange {
+        end: Some(OutageEnd {
+            id,
+            ended_at_ms: at,
+        }),
+        ..failing("api", health, at)
     }
 }
 
@@ -172,6 +207,10 @@ pub enum Answer {
     Refuse,
     /// Never answer.
     Hang,
+    /// Ask, by `Retry-After`, to be left alone this long.
+    Busy(Duration),
+    /// Panic.
+    Panic,
 }
 
 /// One attempt a fake notifier saw.
@@ -180,6 +219,8 @@ pub struct Attempt {
     pub notifier: String,
     pub alert: Alert,
     pub answer: Answer,
+    /// A cancel of `alert`, not a message.
+    pub cancel: bool,
 }
 
 impl Attempt {
@@ -198,6 +239,9 @@ pub struct Fake {
     attempts: AtomicUsize,
     seen: Mutex<Vec<Attempt>>,
     sender: mpsc::UnboundedSender<Attempt>,
+    latency: Duration,
+    in_flight: AtomicUsize,
+    peak: AtomicUsize,
 }
 
 impl Fake {
@@ -212,7 +256,27 @@ impl Fake {
             attempts: AtomicUsize::new(0),
             seen: Mutex::new(Vec::new()),
             sender: sender.clone(),
+            latency: Duration::ZERO,
+            in_flight: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
         })
+    }
+
+    /// [`Fake::new`], taking `latency` to answer each attempt.
+    pub fn slow(
+        id: &str,
+        sender: &mpsc::UnboundedSender<Attempt>,
+        latency: Duration,
+        script: impl Fn(&Alert, usize) -> Answer + Send + Sync + 'static,
+    ) -> Arc<Self> {
+        let mut fake = Fake::new(id, sender, script);
+        Arc::get_mut(&mut fake).unwrap().latency = latency;
+        fake
+    }
+
+    /// The most attempts it has had in hand at once.
+    pub fn peak(&self) -> usize {
+        self.peak.load(Ordering::SeqCst)
     }
 
     /// A notifier that accepts everything.
@@ -226,25 +290,45 @@ impl Fake {
     }
 }
 
+impl Fake {
+    async fn attempt(&self, alert: &Alert, cancel: bool) -> Result<(), SendError> {
+        let held = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(held, Ordering::SeqCst);
+        let index = self.attempts.fetch_add(1, Ordering::SeqCst);
+        let answer = (self.script)(alert, index);
+        let attempt = Attempt {
+            notifier: self.id.clone(),
+            alert: alert.clone(),
+            answer,
+            cancel,
+        };
+        self.seen.lock().unwrap().push(attempt.clone());
+        let _ = self.sender.send(attempt);
+        if !self.latency.is_zero() {
+            tokio::time::sleep(self.latency).await;
+        }
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        match answer {
+            Answer::Accept => Ok(()),
+            Answer::Fail => Err(SendError::transient("HTTP 503: try later")),
+            Answer::Refuse => Err(SendError::permanent("HTTP 400: bad request")),
+            Answer::Hang => std::future::pending().await,
+            Answer::Busy(wait) => Err(SendError {
+                retry_after: Some(wait),
+                ..SendError::transient("HTTP 429: slow down")
+            }),
+            Answer::Panic => panic!("the fake notifier panicked"),
+        }
+    }
+}
+
 impl Notifier for Fake {
     fn send<'a>(&'a self, alert: &'a Alert) -> BoxFuture<'a, Result<(), SendError>> {
-        Box::pin(async move {
-            let index = self.attempts.fetch_add(1, Ordering::SeqCst);
-            let answer = (self.script)(alert, index);
-            let attempt = Attempt {
-                notifier: self.id.clone(),
-                alert: alert.clone(),
-                answer,
-            };
-            self.seen.lock().unwrap().push(attempt.clone());
-            let _ = self.sender.send(attempt);
-            match answer {
-                Answer::Accept => Ok(()),
-                Answer::Fail => Err(SendError::transient("HTTP 503: try later")),
-                Answer::Refuse => Err(SendError::permanent("HTTP 400: bad request")),
-                Answer::Hang => std::future::pending().await,
-            }
-        })
+        Box::pin(self.attempt(alert, false))
+    }
+
+    fn cancel<'a>(&'a self, alert: &'a Alert) -> BoxFuture<'a, Result<(), SendError>> {
+        Box::pin(self.attempt(alert, true))
     }
 }
 

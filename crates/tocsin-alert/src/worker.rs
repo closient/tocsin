@@ -4,20 +4,25 @@
 //!
 //! Everything it knows lives in the store, so a restart loses nothing: a
 //! delivery pending at shutdown is sent after the next start, and repeats
-//! come from the open alerts' `next_repeat_at`, not from timers. Each alert
-//! has at most one message in flight, and the outbox only offers an alert's
-//! oldest pending message, so a resolve never overtakes its fire. Each
-//! notifier sends on its own task, so a slow or failing one holds up only
-//! its own alerts.
+//! come from the open alerts' `next_repeat_at`, not from timers.
+//!
+//! Each delivery sends on its own task, so a slow or failing notifier holds
+//! up only its own alerts. An alert has at most one message and one cancel
+//! in flight, and the outbox only offers its oldest pending message, so a
+//! resolve never overtakes its fire; a cancel never holds up a message.
+//! Each notifier has at most its `max_in_flight` sends at once, so a storm
+//! of alerts queues rather than floods it. Retries back off exponentially
+//! with full jitter, and a 429 or 503 `Retry-After` pauses the notifier
+//! for as long as it asks.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tocsin_engine::ports::Clock;
 use tocsin_store::{DeliveryKind, DeliveryOutcome, DeliveryRetention, PendingDelivery, Store};
 use tokio::sync::{Notify, watch};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::task::{self, JoinHandle, JoinSet};
 
 use crate::alert::{Alert, AlertEvent};
 use crate::metrics::AlertMetrics;
@@ -32,16 +37,41 @@ pub struct Backoff {
     pub base: Duration,
     /// The longest wait.
     pub cap: Duration,
+    /// How much of the wait is random.
+    pub jitter: Jitter,
+}
+
+/// Randomness in a retry's wait, so deliveries that failed together do not
+/// retry together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Jitter {
+    /// Anywhere from nothing to the full wait ("full jitter").
+    Full,
+    /// Exactly the wait.
+    None,
 }
 
 impl Backoff {
-    /// The wait after `attempts` failed attempts (at least one).
+    /// The longest wait after `attempts` failed attempts (at least one).
     #[must_use]
     pub fn delay(self, attempts: u32) -> Duration {
         let doublings = attempts.saturating_sub(1).min(20);
         self.base
             .checked_mul(1 << doublings)
             .map_or(self.cap, |delay| delay.min(self.cap))
+    }
+
+    /// The wait after `attempts` failed attempts, jittered.
+    #[must_use]
+    pub fn wait(self, attempts: u32) -> Duration {
+        let delay = self.delay(attempts);
+        match self.jitter {
+            Jitter::None => delay,
+            Jitter::Full => {
+                let millis = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+                Duration::from_millis(fastrand::u64(0..=millis))
+            }
+        }
     }
 }
 
@@ -68,14 +98,16 @@ pub struct WorkerSettings {
 }
 
 impl Default for WorkerSettings {
-    /// Retries at 5s, 10s, 20s ... capped at 10m, twelve attempts (about an
-    /// hour); delivered rows kept a week and failed ones 90 days.
+    /// Retries after up to 5s, 10s, 20s ... capped at 10m, fully jittered,
+    /// twelve attempts (up to about an hour); delivered rows kept a week
+    /// and failed ones 90 days, pruned 2000 rows at a time.
     fn default() -> Self {
         const DAY_MS: i64 = 86_400_000;
         WorkerSettings {
             backoff: Backoff {
                 base: Duration::from_secs(5),
                 cap: Duration::from_secs(600),
+                jitter: Jitter::Full,
             },
             max_attempts: 12,
             send_timeout: Duration::from_secs(30),
@@ -85,6 +117,8 @@ impl Default for WorkerSettings {
             retention: DeliveryRetention {
                 delivered_ms: 7 * DAY_MS,
                 failed_ms: 90 * DAY_MS,
+                chunk_rows: 2000,
+                pause: Duration::from_millis(10),
             },
             stop_grace: Duration::from_secs(2),
         }
@@ -99,13 +133,34 @@ pub struct Alerter {
     task: JoinHandle<()>,
 }
 
-/// What a finished send reports back.
-struct Sent {
+/// An alert's two independent queues: its messages (fire, repeat,
+/// resolve) and its cancels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Lane {
+    Message,
+    Cancel,
+}
+
+impl Lane {
+    fn of(kind: DeliveryKind) -> Self {
+        if kind == DeliveryKind::Cancel {
+            Lane::Cancel
+        } else {
+            Lane::Message
+        }
+    }
+}
+
+/// A send in flight, kept outside its task so a panic can still be
+/// recorded.
+struct InFlight {
     delivery_id: i64,
     alert_id: i64,
+    lane: Lane,
     notifier_id: String,
+    /// The alert's identity, for logs.
+    identity: String,
     attempts: u32,
-    result: Result<(), SendError>,
 }
 
 struct Worker {
@@ -116,8 +171,14 @@ struct Worker {
     metrics: AlertMetrics,
     settings: WorkerSettings,
     wake: Arc<Notify>,
-    in_flight: JoinSet<Sent>,
-    busy: HashSet<i64>,
+    in_flight: JoinSet<Result<(), SendError>>,
+    sends: HashMap<task::Id, InFlight>,
+    busy: HashSet<(i64, Lane)>,
+    /// Sends in flight by notifier.
+    sending: HashMap<String, usize>,
+    /// Notifiers that asked, by `Retry-After`, to be left alone until then
+    /// (unix milliseconds).
+    paused_until: HashMap<String, i64>,
 }
 
 impl Alerter {
@@ -142,7 +203,10 @@ impl Alerter {
             settings,
             wake: Arc::clone(&wake),
             in_flight: JoinSet::new(),
+            sends: HashMap::new(),
             busy: HashSet::new(),
+            sending: HashMap::new(),
+            paused_until: HashMap::new(),
         };
         let task = tokio::spawn(worker.run(stopped));
         Alerter { stop, wake, task }
@@ -201,7 +265,7 @@ impl Worker {
             tokio::select! {
                 _ = stopped.changed() => break,
                 () = self.wake.notified() => {}
-                Some(joined) = self.in_flight.join_next(), if !self.in_flight.is_empty() => {
+                Some(joined) = self.in_flight.join_next_with_id(), if !self.in_flight.is_empty() => {
                     self.finish(joined).await;
                 }
                 () = tokio::time::sleep(pause) => {}
@@ -210,24 +274,49 @@ impl Worker {
         self.shut_down().await;
     }
 
-    /// Queues due repeats and starts every due message whose alert has
-    /// nothing in flight; returns when to look again.
+    /// Queues due repeats and starts every due delivery whose alert lane
+    /// has nothing in flight, while its notifier has a free slot and is not
+    /// paused; returns when to look again. Repeats are queued, a write,
+    /// only when one is due.
     async fn dispatch(&mut self, now: i64) -> tocsin_store::Result<i64> {
-        self.store.queue_repeats(now).await?;
-        let outbox = self.store.outbox().await?;
+        let mut outbox = self.store.outbox().await?;
+        if outbox
+            .next_repeat_at_ms
+            .is_some_and(|repeat_at| repeat_at <= now)
+        {
+            self.store.queue_repeats(now).await?;
+            outbox = self.store.outbox().await?;
+        }
         let mut wake_at = now.saturating_add(millis(self.settings.idle));
         if let Some(repeat_at) = outbox.next_repeat_at_ms {
             wake_at = wake_at.min(repeat_at);
         }
         for delivery in outbox.pending {
-            if self.busy.contains(&delivery.alert.id) {
+            let notifier_id = &delivery.alert.notifier_id;
+            if self
+                .busy
+                .contains(&(delivery.alert.id, Lane::of(delivery.kind)))
+            {
                 continue;
             }
             if delivery.next_attempt_at_ms > now {
                 wake_at = wake_at.min(delivery.next_attempt_at_ms);
                 continue;
             }
-            self.busy.insert(delivery.alert.id);
+            if let Some(&until) = self.paused_until.get(notifier_id) {
+                if until > now {
+                    wake_at = wake_at.min(until);
+                    continue;
+                }
+                self.paused_until.remove(notifier_id);
+            }
+            // A full notifier is looked at again when one of its sends
+            // finishes, which wakes the loop.
+            if self.sending.get(notifier_id).copied().unwrap_or_default()
+                >= self.router.max_in_flight(notifier_id)
+            {
+                continue;
+            }
             self.spawn(&delivery, now);
         }
         Ok(wake_at.max(now))
@@ -235,47 +324,58 @@ impl Worker {
 
     fn spawn(&mut self, delivery: &PendingDelivery, now: i64) {
         let alert = self.message(delivery, now);
-        let (delivery_id, alert_id, attempts) = (delivery.id, delivery.alert.id, delivery.attempts);
+        let lane = Lane::of(delivery.kind);
         let notifier = self.notifiers.get(&delivery.alert.notifier_id).cloned();
         let notifier_id = delivery.alert.notifier_id.clone();
         let send_timeout = self.settings.send_timeout;
-        self.in_flight.spawn(async move {
-            let result = match notifier {
-                None => Err(SendError::permanent(format!(
+        let meta = InFlight {
+            delivery_id: delivery.id,
+            alert_id: delivery.alert.id,
+            lane,
+            notifier_id: notifier_id.clone(),
+            identity: alert.identity(),
+            attempts: delivery.attempts,
+        };
+        self.busy.insert((meta.alert_id, lane));
+        *self.sending.entry(notifier_id.clone()).or_default() += 1;
+        let handle = self.in_flight.spawn(async move {
+            let Some(notifier) = notifier else {
+                return Err(SendError::permanent(format!(
                     "notifier `{notifier_id}` is no longer configured"
-                ))),
-                Some(notifier) => tokio::time::timeout(send_timeout, notifier.send(&alert))
-                    .await
-                    .unwrap_or_else(|_| {
-                        Err(SendError::transient(format!(
-                            "no answer within {}s",
-                            send_timeout.as_secs()
-                        )))
-                    }),
+                )));
             };
-            Sent {
-                delivery_id,
-                alert_id,
-                notifier_id,
-                attempts,
-                result,
-            }
+            let send = match lane {
+                Lane::Message => notifier.send(&alert),
+                Lane::Cancel => notifier.cancel(&alert),
+            };
+            tokio::time::timeout(send_timeout, send)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(SendError::transient(format!(
+                        "no answer within {}s",
+                        send_timeout.as_secs()
+                    )))
+                })
         });
+        self.sends.insert(handle.id(), meta);
     }
 
-    /// The message a pending delivery stands for.
+    /// The message a pending delivery stands for; for a cancel, the fire
+    /// that rang.
     fn message(&self, delivery: &PendingDelivery, now: i64) -> Alert {
         let stored = &delivery.alert;
         Alert {
             event: match delivery.kind {
-                DeliveryKind::Fire => AlertEvent::Fire,
+                DeliveryKind::Fire | DeliveryKind::Cancel => AlertEvent::Fire,
                 DeliveryKind::Repeat => AlertEvent::Repeat,
                 DeliveryKind::Resolve => AlertEvent::Resolve,
             },
             node_id: stored.node_id.clone(),
             subject_kind: stored.subject_kind,
             subject_id: stored.subject_id.clone(),
-            subject_name: self.router.subject_name(&stored.subject_id),
+            subject_name: self
+                .router
+                .subject_name(stored.subject_kind, &stored.subject_id),
             component_id: stored.component_id.clone(),
             component_name: stored
                 .component_id
@@ -292,51 +392,41 @@ impl Worker {
         }
     }
 
-    /// Records how a send went.
-    async fn finish(&mut self, joined: Result<Sent, tokio::task::JoinError>) {
-        let sent = match joined {
-            Ok(sent) => sent,
-            Err(error) => {
-                // The row stays pending; its alert is not marked free, so it
-                // waits for a restart rather than spinning on a panic.
-                tracing::error!(%error, "an alert send panicked");
-                return;
+    /// Records how a send went. A send that panicked counts as a failed
+    /// attempt, retried with backoff like any other.
+    async fn finish(&mut self, joined: Result<(task::Id, Result<(), SendError>), task::JoinError>) {
+        let (id, result) = match joined {
+            Ok((id, result)) => (id, Some(Ok(result))),
+            Err(error) => (error.id(), (!error.is_cancelled()).then_some(Err(error))),
+        };
+        let Some(sent) = self.sends.remove(&id) else {
+            return;
+        };
+        self.busy.remove(&(sent.alert_id, sent.lane));
+        if let Some(sending) = self.sending.get_mut(&sent.notifier_id) {
+            *sending = sending.saturating_sub(1);
+        }
+        let result = match result {
+            // Cancelled at shutdown: the row stays pending.
+            None => return,
+            Some(Ok(Ok(()))) => Ok(()),
+            Some(Ok(Err(error))) => Err(error),
+            Some(Err(panic)) => {
+                tracing::error!(
+                    notifier = %sent.notifier_id,
+                    alert = %sent.identity,
+                    delivery = sent.delivery_id,
+                    error = %panic,
+                    "an alert send panicked"
+                );
+                Err(SendError::transient("the send panicked"))
             }
         };
-        self.busy.remove(&sent.alert_id);
         let now = self.clock.now_ms();
         let attempts = sent.attempts.saturating_add(1);
-        let outcome = match sent.result {
+        let outcome = match result {
             Ok(()) => DeliveryOutcome::Delivered,
-            Err(error) => {
-                self.metrics.attempt_failed(&sent.notifier_id);
-                if error.permanent || attempts >= self.settings.max_attempts {
-                    self.metrics.abandoned(&sent.notifier_id);
-                    tracing::warn!(
-                        notifier = %sent.notifier_id,
-                        delivery = sent.delivery_id,
-                        attempts,
-                        error = %error.message,
-                        "alert delivery failed for good"
-                    );
-                    DeliveryOutcome::Failed {
-                        error: error.message,
-                    }
-                } else {
-                    let at_ms = now.saturating_add(millis(self.settings.backoff.delay(attempts)));
-                    tracing::info!(
-                        notifier = %sent.notifier_id,
-                        delivery = sent.delivery_id,
-                        attempts,
-                        error = %error.message,
-                        "alert delivery failed; will retry"
-                    );
-                    DeliveryOutcome::Retry {
-                        at_ms,
-                        error: error.message,
-                    }
-                }
-            }
+            Err(error) => self.failed(&sent, attempts, error, now),
         };
         if let Err(error) = self
             .store
@@ -348,6 +438,57 @@ impl Worker {
         }
     }
 
+    /// What a failed attempt becomes: a retry after the backoff, or after
+    /// the destination's `Retry-After`, which also pauses its notifier; or
+    /// a failure for good.
+    fn failed(
+        &mut self,
+        sent: &InFlight,
+        attempts: u32,
+        error: SendError,
+        now: i64,
+    ) -> DeliveryOutcome {
+        self.metrics.attempt_failed(&sent.notifier_id);
+        if error.permanent || attempts >= self.settings.max_attempts {
+            self.metrics.abandoned(&sent.notifier_id);
+            tracing::warn!(
+                notifier = %sent.notifier_id,
+                alert = %sent.identity,
+                delivery = sent.delivery_id,
+                attempts,
+                error = %error.message,
+                "alert delivery failed for good"
+            );
+            return DeliveryOutcome::Failed {
+                error: error.message,
+            };
+        }
+        let wait = if let Some(retry_after) = error.retry_after {
+            let until = now.saturating_add(millis(retry_after));
+            let paused = self
+                .paused_until
+                .entry(sent.notifier_id.clone())
+                .or_insert(until);
+            *paused = (*paused).max(until);
+            retry_after
+        } else {
+            self.settings.backoff.wait(attempts)
+        };
+        tracing::info!(
+            notifier = %sent.notifier_id,
+            alert = %sent.identity,
+            delivery = sent.delivery_id,
+            attempts,
+            wait_ms = millis(wait),
+            error = %error.message,
+            "alert delivery failed; will retry"
+        );
+        DeliveryOutcome::Retry {
+            at_ms: now.saturating_add(millis(wait)),
+            error: error.message,
+        }
+    }
+
     /// Lets sends in flight finish within the grace, then abandons the
     /// rest; their rows stay pending.
     async fn shut_down(mut self) {
@@ -356,7 +497,7 @@ impl Worker {
         while !self.in_flight.is_empty() {
             tokio::select! {
                 () = &mut grace => break,
-                Some(joined) = self.in_flight.join_next() => self.finish(joined).await,
+                Some(joined) = self.in_flight.join_next_with_id() => self.finish(joined).await,
             }
         }
         let abandoned = self.in_flight.len();
@@ -380,5 +521,21 @@ mod tests {
         let delays: Vec<u64> = (1..=9).map(|n| backoff.delay(n).as_secs()).collect();
         assert_eq!(delays, [5, 10, 20, 40, 80, 160, 320, 600, 600]);
         assert_eq!(backoff.delay(u32::MAX).as_secs(), 600);
+    }
+
+    #[test]
+    fn full_jitter_spreads_waits_over_the_whole_delay() {
+        let backoff = WorkerSettings::default().backoff;
+        assert_eq!(backoff.jitter, Jitter::Full);
+        let waits: Vec<Duration> = (0..200).map(|_| backoff.wait(4)).collect();
+        let delay = backoff.delay(4);
+        assert!(waits.iter().all(|wait| *wait <= delay));
+        assert!(waits.iter().any(|wait| *wait < delay / 2));
+        assert!(waits.iter().any(|wait| *wait > delay / 2));
+        let exact = Backoff {
+            jitter: Jitter::None,
+            ..backoff
+        };
+        assert_eq!(exact.wait(4), delay);
     }
 }

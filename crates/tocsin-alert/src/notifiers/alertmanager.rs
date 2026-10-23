@@ -6,8 +6,13 @@
 //! alert not re-posted before its `endsAt` resolves on its own. tocsin sends
 //! a firing alert's `endsAt` [`FIRING_HOLD`] after sending it, and re-posts
 //! it every [`REPOST_INTERVAL`], well inside that hold; the resolve sets
-//! `endsAt` to when the outage ended. The labels are the alert's identity
-//! and never change between the fire, its re-posts and its resolve.
+//! `endsAt` to when the outage ended.
+//!
+//! Alertmanager identifies an alert by its whole label set, so the labels
+//! hold the identity and nothing else: `alertname`, `node`, `subject_kind`
+//! and `subject_id`, fixed when the alert opens. Anything that can change
+//! while it fires, such as the component or the health, is an annotation;
+//! a changed label would open a second alert and strand the first.
 
 use std::time::Duration;
 
@@ -47,25 +52,42 @@ impl Alertmanager {
     }
 }
 
-/// The alert's labels: its identity, the same on every post.
+/// The alert's labels: its identity, the same on every post. A test alert
+/// has an `alertname` of its own, so it never pairs with a real one.
 #[must_use]
 pub fn labels(alert: &Alert) -> Map<String, Value> {
-    let alertname = match alert.subject_kind {
-        SubjectKind::Check => "TocsinCheckFailing",
-        SubjectKind::Heartbeat => "TocsinHeartbeatFailing",
+    let alertname = match (alert.test, alert.subject_kind) {
+        (true, _) => "TocsinTestAlert",
+        (false, SubjectKind::Check) => "TocsinCheckFailing",
+        (false, SubjectKind::Heartbeat) => "TocsinHeartbeatFailing",
     };
     let mut labels = Map::new();
     labels.insert("alertname".into(), alertname.into());
     labels.insert("node".into(), alert.node_id.clone().into());
     labels.insert("subject_kind".into(), alert.subject_kind.as_str().into());
-    labels.insert("subject".into(), alert.subject_id.clone().into());
+    labels.insert("subject_id".into(), alert.subject_id.clone().into());
+    labels
+}
+
+/// The alert's annotations: everything about it that may change while it
+/// fires.
+#[must_use]
+pub fn annotations(alert: &Alert) -> Map<String, Value> {
+    let mut annotations = Map::new();
+    annotations.insert("summary".into(), alert.title().into());
+    annotations.insert("description".into(), alert.body().into());
+    annotations.insert("health".into(), alert.health.as_str().into());
+    annotations.insert("name".into(), alert.subject_name.clone().into());
     if let Some(component) = &alert.component_id {
-        labels.insert("component".into(), component.clone().into());
+        annotations.insert("component".into(), component.clone().into());
+    }
+    if let Some(name) = &alert.component_name {
+        annotations.insert("component_name".into(), name.clone().into());
     }
     if alert.test {
-        labels.insert("tocsin_test".into(), "true".into());
+        annotations.insert("tocsin_test".into(), "true".into());
     }
-    labels
+    annotations
 }
 
 /// The body posted for `alert`: a list holding one alert.
@@ -79,12 +101,7 @@ pub fn payload(alert: &Alert) -> Value {
     };
     json!([{
         "labels": labels(alert),
-        "annotations": {
-            "summary": alert.title(),
-            "description": alert.body(),
-            "health": alert.health.as_str(),
-            "name": alert.subject_name,
-        },
+        "annotations": annotations(alert),
         "startsAt": rfc3339(alert.started_at_ms),
         "endsAt": rfc3339(ends_at),
     }])

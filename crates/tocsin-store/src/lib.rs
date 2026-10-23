@@ -36,8 +36,8 @@ use tocsin_core::incident::{Actor, Incident, IncidentEdit, NewIncident, NewUpdat
 use tocsin_core::release::{DeployStamp, NewRelease, Release, Timeline};
 
 pub use crate::alert::{
-    AlertRouting, AlertTarget, DeliveryKind, DeliveryOutcome, DeliveryRetention, FailedDelivery,
-    OutageAlerts, Outbox, PendingDelivery, StoredAlert, SubjectKind,
+    AlertRouting, AlertTarget, DeliveryKind, DeliveryOutcome, DeliveryPrune, DeliveryRetention,
+    FailedDelivery, OutageAlerts, Outbox, PendingDelivery, StoredAlert, SubjectKind,
 };
 use crate::checkpoint::Checkpointer;
 pub use crate::day::Day;
@@ -101,7 +101,10 @@ pub struct NewCheckResult {
 pub struct NewOutage {
     /// The node that saw it.
     pub node_id: String,
-    /// The failing check.
+    /// Whether `check_id` names a check or a heartbeat: the two have
+    /// separate id spaces.
+    pub subject_kind: SubjectKind,
+    /// The failing check or heartbeat.
     pub check_id: String,
     /// The component the check belongs to, if any.
     pub component_id: Option<String>,
@@ -245,6 +248,14 @@ impl Store {
         &self.path
     }
 
+    /// How many writes (inserts and write jobs) have been queued to the
+    /// writer since the store opened, for tests and diagnostics: a caller
+    /// that should not write can be checked for it.
+    #[must_use]
+    pub fn writes_queued(&self) -> u64 {
+        self.writer.queued()
+    }
+
     /// Appends a check result; resolves with its id once committed.
     ///
     /// # Errors
@@ -315,7 +326,8 @@ impl Store {
     /// transaction, queues the alerting deliveries the change causes: a fire
     /// for every alert already firing for the identity and for every target
     /// in `routing` (given when the engine decided the change alerts), or on
-    /// a recovery, a resolve for every firing alert whose route asks for one.
+    /// a recovery, a resolve for every firing alert; an alert that rang and
+    /// stops ringing gets a cancel as well.
     ///
     /// # Errors
     ///
@@ -370,20 +382,52 @@ impl Store {
             .await
     }
 
-    /// Deletes finished deliveries older than `retention` allows, and ended
-    /// alerts left with none. Resolves with how many deliveries it deleted.
+    /// Deletes finished deliveries older than `retention` allows, then
+    /// ended alerts left with none. Both deletes run in chunks of
+    /// `retention.chunk_rows` through the writer, `retention.pause` apart,
+    /// so writes queued meanwhile go through between chunks.
     ///
     /// # Errors
     ///
-    /// The write fails.
+    /// A write fails. A pass that fails part-way is finished by the next
+    /// one.
     pub async fn prune_deliveries(
         &self,
         retention: DeliveryRetention,
         now_ms: i64,
-    ) -> Result<usize> {
-        self.writer
-            .run(move |conn| alert::prune(conn, retention, now_ms))
-            .await
+    ) -> Result<DeliveryPrune> {
+        let limit = retention.chunk_rows.max(1);
+        let full = usize::try_from(limit).unwrap_or(usize::MAX);
+        let mut report = DeliveryPrune::default();
+        loop {
+            let removed = self
+                .writer
+                .run(move |conn| alert::prune_deliveries_chunk(conn, retention, now_ms, limit))
+                .await?;
+            if removed > 0 {
+                report.deliveries += removed;
+                report.chunks += 1;
+            }
+            if removed < full {
+                break;
+            }
+            tokio::time::sleep(retention.pause).await;
+        }
+        loop {
+            let removed = self
+                .writer
+                .run(move |conn| alert::prune_alerts_chunk(conn, limit))
+                .await?;
+            if removed > 0 {
+                report.alerts += removed;
+                report.chunks += 1;
+            }
+            if removed < full {
+                break;
+            }
+            tokio::time::sleep(retention.pause).await;
+        }
+        Ok(report)
     }
 
     /// Deliveries that failed for good, newest first.

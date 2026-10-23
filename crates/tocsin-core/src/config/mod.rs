@@ -427,17 +427,10 @@ pub struct Route {
     /// this says, so Alertmanager never times the alert out.
     #[serde(default = "default_repeat")]
     pub repeat: Duration,
-    /// Whether a recovery sends a resolve.
-    #[serde(default = "default_resolve")]
-    pub resolve: bool,
 }
 
 fn default_repeat() -> Duration {
     Duration::from_secs(4 * 60 * 60)
-}
-
-fn default_resolve() -> bool {
-    true
 }
 
 /// `[[token]]`: a bearer token for the write API.

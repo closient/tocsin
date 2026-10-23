@@ -10,13 +10,7 @@ use tocsin_core::config::{self, NotifierType};
 use tocsin_store::{AlertRouting, AlertTarget, SubjectKind};
 
 use crate::notifiers::alertmanager::REPOST_INTERVAL;
-
-/// A check or heartbeat, as alerts name it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Subject {
-    kind: SubjectKind,
-    name: String,
-}
+use crate::notifiers::pushover::Priorities;
 
 #[derive(Debug, Clone)]
 struct CompiledRoute {
@@ -28,7 +22,6 @@ struct CompiledRoute {
     heartbeats: HashSet<String>,
     notify_on: Health,
     repeat_ms: Option<i64>,
-    resolve: bool,
 }
 
 impl CompiledRoute {
@@ -64,9 +57,15 @@ impl CompiledRoute {
 /// Routes alerts, and names their subjects and components.
 #[derive(Debug, Clone, Default)]
 pub struct Router {
-    subjects: HashMap<String, Subject>,
+    /// Display names by kind and id: a check and a heartbeat may share an
+    /// id.
+    subjects: HashMap<(SubjectKind, String), String>,
     components: HashMap<String, (String, Option<String>)>,
     notifier_types: HashMap<String, NotifierType>,
+    /// Each Pushover notifier's priorities, which say what keeps ringing.
+    pushover: HashMap<String, Priorities>,
+    /// Each notifier's `max_in_flight`.
+    max_in_flight: HashMap<String, usize>,
     routes: Vec<CompiledRoute>,
 }
 
@@ -79,28 +78,15 @@ impl Router {
     #[must_use]
     pub fn new(config: &config::Config) -> Self {
         let mut subjects = HashMap::new();
-        // Heartbeats first, so a check sharing an id wins.
         for heartbeat in &config.heartbeats {
             let id = heartbeat.id.as_str().to_owned();
             let name = heartbeat.name.clone().unwrap_or_else(|| id.clone());
-            subjects.insert(
-                id,
-                Subject {
-                    kind: SubjectKind::Heartbeat,
-                    name,
-                },
-            );
+            subjects.insert((SubjectKind::Heartbeat, id), name);
         }
         for check in &config.checks {
             let id = check.id.as_str().to_owned();
             let name = check.name.clone().unwrap_or_else(|| id.clone());
-            subjects.insert(
-                id,
-                Subject {
-                    kind: SubjectKind::Check,
-                    name,
-                },
-            );
+            subjects.insert((SubjectKind::Check, id), name);
         }
         let components = config
             .components
@@ -123,6 +109,27 @@ impl Router {
             .iter()
             .map(|notifier| (notifier.id.as_str().to_owned(), notifier.notifier_type))
             .collect();
+        let pushover = config
+            .notifiers
+            .iter()
+            .filter_map(|notifier| {
+                let settings = notifier.pushover.as_ref()?;
+                (notifier.notifier_type == NotifierType::Pushover)
+                    .then(|| (notifier.id.as_str().to_owned(), Priorities::from(settings)))
+            })
+            .collect();
+        let max_in_flight = config
+            .notifiers
+            .iter()
+            .map(|notifier| {
+                (
+                    notifier.id.as_str().to_owned(),
+                    usize::try_from(notifier.max_in_flight)
+                        .unwrap_or(usize::MAX)
+                        .max(1),
+                )
+            })
+            .collect();
         let set = |ids: &[config::Id]| ids.iter().map(|id| id.as_str().to_owned()).collect();
         let routes = config
             .routes
@@ -140,32 +147,31 @@ impl Router {
                 heartbeats: set(&route.heartbeats),
                 notify_on: Health::from(route.notify_on),
                 repeat_ms: Some(millis(route.repeat.get())).filter(|ms| *ms > 0),
-                resolve: route.resolve,
             })
             .collect();
         Router {
             subjects,
             components,
             notifier_types,
+            pushover,
+            max_in_flight,
             routes,
         }
     }
 
-    /// Whether `subject_id` is a check or a heartbeat. An id the
-    /// configuration no longer has is taken for a check.
-    #[must_use]
-    pub fn subject_kind(&self, subject_id: &str) -> SubjectKind {
-        self.subjects
-            .get(subject_id)
-            .map_or(SubjectKind::Check, |subject| subject.kind)
-    }
-
     /// The check or heartbeat's display name, or its id.
     #[must_use]
-    pub fn subject_name(&self, subject_id: &str) -> String {
+    pub fn subject_name(&self, kind: SubjectKind, subject_id: &str) -> String {
         self.subjects
-            .get(subject_id)
-            .map_or_else(|| subject_id.to_owned(), |subject| subject.name.clone())
+            .get(&(kind, subject_id.to_owned()))
+            .map_or_else(|| subject_id.to_owned(), Clone::clone)
+    }
+
+    /// The most deliveries `notifier_id` may send at once; one for a
+    /// notifier the configuration no longer has.
+    #[must_use]
+    pub fn max_in_flight(&self, notifier_id: &str) -> usize {
+        self.max_in_flight.get(notifier_id).copied().unwrap_or(1)
     }
 
     /// The component's display name.
@@ -176,19 +182,21 @@ impl Router {
             .map(|(name, _)| name.clone())
     }
 
-    /// Where an alert for `subject_id` at `health` goes: one target per
-    /// notifier, however many routes name it. A notifier resolves if any
-    /// matching route resolves, and repeats on the shortest interval among
-    /// them; an Alertmanager notifier re-posts at least every
-    /// [`REPOST_INTERVAL`] so Alertmanager never times the alert out.
+    /// Where an alert for the `kind` `subject_id` at `health` goes: one
+    /// target per notifier, however many routes name it, repeating on the
+    /// shortest interval among them; an Alertmanager notifier re-posts at
+    /// least every [`REPOST_INTERVAL`] so Alertmanager never times the
+    /// alert out. It also lists every notifier whose message at `health`
+    /// keeps ringing until acknowledged, so an alert that rang is cancelled
+    /// once it no longer does.
     #[must_use]
     pub fn routing(
         &self,
+        kind: SubjectKind,
         subject_id: &str,
         component_id: Option<&str>,
         health: Health,
     ) -> AlertRouting {
-        let kind = self.subject_kind(subject_id);
         let group = component_id
             .and_then(|component| self.components.get(component))
             .and_then(|(_, group)| group.as_deref());
@@ -202,7 +210,6 @@ impl Router {
                     .iter_mut()
                     .find(|target| &target.notifier_id == notifier)
                 {
-                    target.resolve |= route.resolve;
                     target.repeat_ms = match (target.repeat_ms, route.repeat_ms) {
                         (Some(a), Some(b)) => Some(a.min(b)),
                         (a, b) => a.or(b),
@@ -211,7 +218,6 @@ impl Router {
                     targets.push(AlertTarget {
                         notifier_id: notifier.clone(),
                         route_id: route.id.clone(),
-                        resolve: route.resolve,
                         repeat_ms: route.repeat_ms,
                     });
                 }
@@ -223,9 +229,13 @@ impl Router {
                 target.repeat_ms = Some(target.repeat_ms.map_or(repost, |ms| ms.min(repost)));
             }
         }
-        AlertRouting {
-            subject_kind: kind,
-            targets,
-        }
+        let mut ringing: Vec<String> = self
+            .pushover
+            .iter()
+            .filter(|(_, priorities)| priorities.rings(health))
+            .map(|(id, _)| id.clone())
+            .collect();
+        ringing.sort();
+        AlertRouting { targets, ringing }
     }
 }

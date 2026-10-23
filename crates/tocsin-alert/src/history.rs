@@ -62,8 +62,12 @@ impl History for AlertingHistory {
                 .as_ref()
                 .filter(|open| open.alerted)
                 .map(|open| {
-                    self.router
-                        .routing(&open.check_id, open.component_id.as_deref(), open.health)
+                    self.router.routing(
+                        open.subject_kind,
+                        &open.check_id,
+                        open.component_id.as_deref(),
+                        open.health,
+                    )
                 });
             let alerts = self
                 .store

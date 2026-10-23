@@ -14,7 +14,7 @@ use common::{FakeHistory, FakeNotices, FakeRunner, Step, T0, at, check, componen
 use tocsin_core::Health::{self, Degraded, Down, Up};
 use tocsin_core::state::{ComponentStatus, JITTER_DIVISOR, jitter};
 use tocsin_engine::{ComponentChange, Engine, Notice};
-use tocsin_store::Outage;
+use tocsin_store::{Outage, SubjectKind};
 
 const MINUTE: Duration = Duration::from_secs(60);
 
@@ -414,6 +414,7 @@ async fn an_open_outage_resumes_after_a_restart() {
     let open = |id, check: &str| Outage {
         id,
         node_id: "node-a".into(),
+        subject_kind: SubjectKind::Check,
         check_id: check.into(),
         component_id: None,
         health: Down,

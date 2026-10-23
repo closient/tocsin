@@ -9,6 +9,7 @@
 
 use std::fmt;
 use std::str::FromStr;
+use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use tocsin_core::Health;
@@ -77,6 +78,11 @@ pub enum DeliveryKind {
     Repeat,
     /// The alert ended.
     Resolve,
+    /// Stops a message that keeps ringing until acknowledged (a Pushover
+    /// emergency): queued when the alert re-fires at a health that does not
+    /// ring, and on the resolve. It is a lane of its own, so a cancel that
+    /// keeps failing never holds up the alert's messages.
+    Cancel,
 }
 
 impl DeliveryKind {
@@ -87,6 +93,7 @@ impl DeliveryKind {
             DeliveryKind::Fire => "fire",
             DeliveryKind::Repeat => "repeat",
             DeliveryKind::Resolve => "resolve",
+            DeliveryKind::Cancel => "cancel",
         }
     }
 }
@@ -99,6 +106,7 @@ impl FromStr for DeliveryKind {
             "fire" => Ok(DeliveryKind::Fire),
             "repeat" => Ok(DeliveryKind::Repeat),
             "resolve" => Ok(DeliveryKind::Resolve),
+            "cancel" => Ok(DeliveryKind::Cancel),
             other => Err(UnknownValue(other.to_owned())),
         }
     }
@@ -111,8 +119,6 @@ pub struct AlertTarget {
     pub notifier_id: String,
     /// The first route that matched.
     pub route_id: String,
-    /// Whether the recovery sends a resolve.
-    pub resolve: bool,
     /// How often to re-send while the alert fires (milliseconds), if ever.
     pub repeat_ms: Option<i64>,
 }
@@ -121,10 +127,12 @@ pub struct AlertTarget {
 /// [`Store::change_outage_alerting`](crate::Store::change_outage_alerting).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlertRouting {
-    /// Whether the outage's subject is a check or a heartbeat.
-    pub subject_kind: SubjectKind,
     /// The notifiers that get a new alert.
     pub targets: Vec<AlertTarget>,
+    /// Every notifier whose message at the outage's health keeps ringing
+    /// until acknowledged (a Pushover emergency), target or not. An alert
+    /// that rang on a notifier not in this list gets a cancel.
+    pub ringing: Vec<String>,
 }
 
 /// What [`Store::change_outage_alerting`](crate::Store::change_outage_alerting)
@@ -161,15 +169,19 @@ pub struct StoredAlert {
     pub started_at_ms: i64,
     /// When it ended, or `None` while it fires.
     pub ended_at_ms: Option<i64>,
+    /// Whether its last message keeps ringing until acknowledged (a
+    /// Pushover emergency) and has not been cancelled yet.
+    pub ringing: bool,
 }
 
-/// The oldest pending delivery of one alert: the only one of its deliveries
-/// that may be sent.
+/// A pending delivery that may be sent now: the oldest pending message of
+/// its alert, or its oldest pending cancel once every message queued before
+/// that cancel is finished.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingDelivery {
     /// Its id.
     pub id: i64,
-    /// Fire, repeat or resolve.
+    /// Fire, repeat, resolve or cancel.
     pub kind: DeliveryKind,
     /// The alert's health when it was queued.
     pub health: Health,
@@ -184,9 +196,10 @@ pub struct PendingDelivery {
 /// The outbox as the delivery worker sees it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Outbox {
-    /// The head of each alert's pending deliveries, soonest first.
+    /// The head of each alert's pending messages and of its pending
+    /// cancels, soonest first.
     pub pending: Vec<PendingDelivery>,
-    /// The soonest repeat due on an alert with nothing pending, if any.
+    /// The soonest repeat due on an alert with no message pending, if any.
     pub next_repeat_at_ms: Option<i64>,
 }
 
@@ -214,7 +227,7 @@ pub enum DeliveryOutcome {
 pub struct FailedDelivery {
     /// Its id.
     pub id: i64,
-    /// Fire, repeat or resolve.
+    /// Fire, repeat, resolve or cancel.
     pub kind: DeliveryKind,
     /// Attempts made.
     pub attempts: u32,
@@ -229,13 +242,36 @@ pub struct FailedDelivery {
 }
 
 /// How long [`Store::prune_deliveries`](crate::Store::prune_deliveries)
-/// keeps finished deliveries.
+/// keeps finished deliveries, and how it deletes them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeliveryRetention {
     /// Delivered rows older than this go (milliseconds).
     pub delivered_ms: i64,
     /// Failed rows older than this go (milliseconds).
     pub failed_ms: i64,
+    /// Most rows one DELETE removes, so queued writes never wait long.
+    pub chunk_rows: u32,
+    /// Pause between chunks, letting queued writes through.
+    pub pause: Duration,
+}
+
+/// What one [`Store::prune_deliveries`](crate::Store::prune_deliveries)
+/// pass deleted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DeliveryPrune {
+    /// Finished deliveries deleted.
+    pub deliveries: usize,
+    /// Ended alerts deleted, once none of their deliveries was left.
+    pub alerts: usize,
+    /// DELETE statements that removed rows.
+    pub chunks: usize,
+}
+
+/// An alert's identity: the node, and the check or heartbeat it saw.
+struct Identity {
+    node_id: String,
+    subject_kind: SubjectKind,
+    subject_id: String,
 }
 
 /// Applies `change` and queues the deliveries it causes, in one
@@ -248,24 +284,33 @@ pub(crate) fn change_outage(
 ) -> Result<OutageAlerts> {
     let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let identity = match (&change.open, &change.end) {
-        (Some(open), _) => Some((open.node_id.clone(), open.check_id.clone())),
+        (Some(open), _) => Some(Identity {
+            node_id: open.node_id.clone(),
+            subject_kind: open.subject_kind,
+            subject_id: open.check_id.clone(),
+        }),
         (None, Some(end)) => transaction
-            .prepare_cached("SELECT node_id, check_id FROM outage WHERE id = ?1")?
-            .query_row(params![end.id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .prepare_cached("SELECT node_id, subject_kind, check_id FROM outage WHERE id = ?1")?
+            .query_row(params![end.id], |row| {
+                Ok(Identity {
+                    node_id: row.get(0)?,
+                    subject_kind: parse_column(1, &row.get::<_, String>(1)?)?,
+                    subject_id: row.get(2)?,
+                })
+            })
             .optional()?,
         (None, None) => None,
     };
     let id = apply_outage_change(&transaction, change)?;
-    let queued = if let Some((node_id, subject_id)) = identity {
-        let open_alerts = open_alerts(&transaction, &node_id, &subject_id)?;
+    let queued = if let Some(identity) = identity {
+        let open_alerts = open_alerts(&transaction, &identity)?;
         match &change.open {
             Some(open) if open.alerted => fire_alerts(
                 &transaction,
                 &FiringOutage {
                     id,
                     open,
-                    node_id: &node_id,
-                    subject_id: &subject_id,
+                    identity: &identity,
                 },
                 &open_alerts,
                 routing,
@@ -290,13 +335,13 @@ pub(crate) fn change_outage(
 struct FiringOutage<'a> {
     id: i64,
     open: &'a NewOutage,
-    node_id: &'a str,
-    subject_id: &'a str,
+    identity: &'a Identity,
 }
 
 /// The engine decided this change alerts: every alert already firing
 /// re-fires with the new health, and every target without one starts
-/// firing. Returns the deliveries queued.
+/// firing. An alert that rang and no longer rings at the new health gets a
+/// cancel first. Returns the deliveries queued.
 fn fire_alerts(
     transaction: &Connection,
     outage: &FiringOutage<'_>,
@@ -304,12 +349,26 @@ fn fire_alerts(
     routing: Option<&AlertRouting>,
     now_ms: i64,
 ) -> Result<usize> {
+    let rings = |notifier_id: &str| {
+        routing.is_some_and(|routing| routing.ringing.iter().any(|id| id == notifier_id))
+    };
     let mut queued = 0;
     for alert in open_alerts {
+        let ringing = rings(&alert.notifier_id);
+        if alert.ringing && !ringing {
+            queue(
+                transaction,
+                alert.id,
+                DeliveryKind::Cancel,
+                alert.health,
+                now_ms,
+            )?;
+            queued += 1;
+        }
         transaction
             .prepare_cached(
                 "UPDATE alert SET outage_id = ?2, health = ?3, component_id = ?4,
-                     next_repeat_at = ?5 + repeat_ms
+                     next_repeat_at = ?5 + repeat_ms, ringing = ?6
                  WHERE id = ?1",
             )?
             .execute(params![
@@ -317,7 +376,8 @@ fn fire_alerts(
                 outage.id,
                 outage.open.health.as_str(),
                 outage.open.component_id,
-                now_ms
+                now_ms,
+                ringing,
             ])?;
         drop_pending_repeats(transaction, alert.id)?;
         queue(
@@ -337,25 +397,24 @@ fn fire_alerts(
         {
             continue;
         }
-        let subject_kind = routing.map_or(SubjectKind::Check, |r| r.subject_kind);
         transaction
             .prepare_cached(
                 "INSERT INTO alert (node_id, subject_kind, subject_id, component_id,
-                     notifier_id, route_id, outage_id, health, started_at, resolve,
+                     notifier_id, route_id, outage_id, health, started_at, ringing,
                      repeat_ms, next_repeat_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12 + ?11)",
             )?
             .execute(params![
-                outage.node_id,
-                subject_kind.as_str(),
-                outage.subject_id,
+                outage.identity.node_id,
+                outage.identity.subject_kind.as_str(),
+                outage.identity.subject_id,
                 outage.open.component_id,
                 target.notifier_id,
                 target.route_id,
                 outage.id,
                 outage.open.health.as_str(),
                 outage.open.started_at_ms,
-                target.resolve,
+                rings(&target.notifier_id),
                 target.repeat_ms,
                 now_ms,
             ])?;
@@ -372,12 +431,12 @@ fn fire_alerts(
     Ok(queued)
 }
 
-/// A recovery: every alert firing for the identity ends, and
-/// resolves where its route asks. An outage that opens without
-/// alerting cannot follow one that alerted (the engine keeps an
-/// alerted episode alerted until it recovers), but if it ever
-/// did, its alerts end here too rather than fire forever.
-/// Returns the deliveries queued.
+/// A recovery: every alert firing for the identity ends and resolves, and
+/// one that rang gets a cancel beside its resolve. An outage that opens
+/// without alerting cannot follow one that alerted (the engine keeps an
+/// alerted episode alerted until it recovers), but if it ever did, its
+/// alerts end here too rather than fire forever. Returns the deliveries
+/// queued.
 fn end_alerts(
     transaction: &Connection,
     open_alerts: &[OpenAlert],
@@ -388,21 +447,30 @@ fn end_alerts(
     for alert in open_alerts {
         transaction
             .prepare_cached(
-                "UPDATE alert SET ended_at = max(?2, started_at), next_repeat_at = NULL
+                "UPDATE alert SET ended_at = max(?2, started_at), next_repeat_at = NULL,
+                     ringing = 0
                  WHERE id = ?1",
             )?
             .execute(params![alert.id, ended_at_ms])?;
         drop_pending_repeats(transaction, alert.id)?;
-        if alert.resolve {
+        if alert.ringing {
             queue(
                 transaction,
                 alert.id,
-                DeliveryKind::Resolve,
+                DeliveryKind::Cancel,
                 alert.health,
                 now_ms,
             )?;
             queued += 1;
         }
+        queue(
+            transaction,
+            alert.id,
+            DeliveryKind::Resolve,
+            alert.health,
+            now_ms,
+        )?;
+        queued += 1;
     }
     Ok(queued)
 }
@@ -411,22 +479,30 @@ struct OpenAlert {
     id: i64,
     notifier_id: String,
     health: Health,
-    resolve: bool,
+    ringing: bool,
 }
 
-fn open_alerts(conn: &Connection, node_id: &str, subject_id: &str) -> Result<Vec<OpenAlert>> {
+fn open_alerts(conn: &Connection, identity: &Identity) -> Result<Vec<OpenAlert>> {
     let mut statement = conn.prepare_cached(
-        "SELECT id, notifier_id, health, resolve FROM alert
-         WHERE node_id = ?1 AND subject_id = ?2 AND ended_at IS NULL ORDER BY id",
+        "SELECT id, notifier_id, health, ringing FROM alert
+         WHERE node_id = ?1 AND subject_kind = ?2 AND subject_id = ?3 AND ended_at IS NULL
+         ORDER BY id",
     )?;
-    let rows = statement.query_map(params![node_id, subject_id], |row| {
-        Ok(OpenAlert {
-            id: row.get(0)?,
-            notifier_id: row.get(1)?,
-            health: parse_column(2, &row.get::<_, String>(2)?)?,
-            resolve: row.get(3)?,
-        })
-    })?;
+    let rows = statement.query_map(
+        params![
+            identity.node_id,
+            identity.subject_kind.as_str(),
+            identity.subject_id
+        ],
+        |row| {
+            Ok(OpenAlert {
+                id: row.get(0)?,
+                notifier_id: row.get(1)?,
+                health: parse_column(2, &row.get::<_, String>(2)?)?,
+                ringing: row.get(3)?,
+            })
+        },
+    )?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
@@ -456,7 +532,7 @@ fn drop_pending_repeats(conn: &Connection, alert_id: i64) -> Result<()> {
 }
 
 const ALERT_COLUMNS: &str = "a.id, a.node_id, a.subject_kind, a.subject_id, a.component_id,
-    a.notifier_id, a.route_id, a.health, a.started_at, a.ended_at";
+    a.notifier_id, a.route_id, a.health, a.started_at, a.ended_at, a.ringing";
 
 fn stored_alert(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<StoredAlert> {
     Ok(StoredAlert {
@@ -470,17 +546,26 @@ fn stored_alert(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<Store
         health: parse_column(first + 7, &row.get::<_, String>(first + 7)?)?,
         started_at_ms: row.get(first + 8)?,
         ended_at_ms: row.get(first + 9)?,
+        ringing: row.get(first + 10)?,
     })
 }
 
-/// The head of every alert's pending deliveries, and the next repeat due.
+/// Every pending delivery that may be sent, and the next repeat due. A
+/// message may go once every message queued before it is finished, so a
+/// resolve never overtakes its fire; a cancel may go once every message
+/// queued before it is finished, and no message waits for a cancel.
 pub(crate) fn outbox(conn: &Connection) -> Result<Outbox> {
     let mut statement = conn.prepare_cached(&format!(
         "SELECT d.id, d.kind, d.health, d.attempts, d.next_attempt_at, {ALERT_COLUMNS}
          FROM alert_delivery d JOIN alert a ON a.id = d.alert_id
          WHERE d.status = 'pending'
            AND d.id = (SELECT min(p.id) FROM alert_delivery p
-                       WHERE p.alert_id = d.alert_id AND p.status = 'pending')
+                       WHERE p.alert_id = d.alert_id AND p.status = 'pending'
+                         AND (p.kind = 'cancel') = (d.kind = 'cancel'))
+           AND (d.kind <> 'cancel'
+                OR NOT EXISTS (SELECT 1 FROM alert_delivery p
+                               WHERE p.alert_id = d.alert_id AND p.status = 'pending'
+                                 AND p.kind <> 'cancel' AND p.id < d.id))
          ORDER BY d.next_attempt_at, d.id"
     ))?;
     let pending = statement
@@ -500,7 +585,8 @@ pub(crate) fn outbox(conn: &Connection) -> Result<Outbox> {
             "SELECT min(next_repeat_at) FROM alert a
              WHERE ended_at IS NULL AND next_repeat_at IS NOT NULL
                AND NOT EXISTS (SELECT 1 FROM alert_delivery p
-                               WHERE p.alert_id = a.id AND p.status = 'pending')",
+                               WHERE p.alert_id = a.id AND p.status = 'pending'
+                                 AND p.kind <> 'cancel')",
         )?
         .query_row([], |row| row.get(0))?;
     Ok(Outbox {
@@ -509,8 +595,8 @@ pub(crate) fn outbox(conn: &Connection) -> Result<Outbox> {
     })
 }
 
-/// Queues a repeat for every firing alert that is due one and has nothing
-/// pending, and schedules its next. Returns how many it queued.
+/// Queues a repeat for every firing alert that is due one and has no
+/// message pending, and schedules its next. Returns how many it queued.
 pub(crate) fn queue_repeats(conn: &mut Connection, now_ms: i64) -> Result<usize> {
     let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let due: Vec<(i64, Health)> = transaction
@@ -518,7 +604,8 @@ pub(crate) fn queue_repeats(conn: &mut Connection, now_ms: i64) -> Result<usize>
             "SELECT id, health FROM alert a
              WHERE ended_at IS NULL AND next_repeat_at <= ?1
                AND NOT EXISTS (SELECT 1 FROM alert_delivery p
-                               WHERE p.alert_id = a.id AND p.status = 'pending')",
+                               WHERE p.alert_id = a.id AND p.status = 'pending'
+                                 AND p.kind <> 'cancel')",
         )?
         .query_map(params![now_ms], |row| {
             Ok((row.get(0)?, parse_column(1, &row.get::<_, String>(1)?)?))
@@ -576,32 +663,42 @@ pub(crate) fn finish(
     Ok(())
 }
 
-/// Deletes finished deliveries older than `retention` allows, then ended
-/// alerts left with none. Returns how many deliveries it deleted.
-pub(crate) fn prune(
-    conn: &mut Connection,
+/// Deletes up to `limit` finished deliveries older than `retention` allows.
+/// Returns how many it deleted.
+pub(crate) fn prune_deliveries_chunk(
+    conn: &Connection,
     retention: DeliveryRetention,
     now_ms: i64,
+    limit: u32,
 ) -> Result<usize> {
-    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let deleted = transaction
+    Ok(conn
         .prepare_cached(
-            "DELETE FROM alert_delivery
-             WHERE (status = 'delivered' AND finished_at < ?1)
-                OR (status = 'failed' AND finished_at < ?2)",
+            "DELETE FROM alert_delivery WHERE id IN (
+                 SELECT id FROM alert_delivery
+                 WHERE (status = 'delivered' AND finished_at < ?1)
+                    OR (status = 'failed' AND finished_at < ?2)
+                 LIMIT ?3
+             )",
         )?
         .execute(params![
             now_ms.saturating_sub(retention.delivered_ms),
-            now_ms.saturating_sub(retention.failed_ms)
-        ])?;
-    transaction
+            now_ms.saturating_sub(retention.failed_ms),
+            limit,
+        ])?)
+}
+
+/// Deletes up to `limit` ended alerts left with no deliveries. Returns how
+/// many it deleted.
+pub(crate) fn prune_alerts_chunk(conn: &Connection, limit: u32) -> Result<usize> {
+    Ok(conn
         .prepare_cached(
-            "DELETE FROM alert WHERE ended_at IS NOT NULL
-               AND NOT EXISTS (SELECT 1 FROM alert_delivery d WHERE d.alert_id = alert.id)",
+            "DELETE FROM alert WHERE id IN (
+                 SELECT id FROM alert WHERE ended_at IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM alert_delivery d WHERE d.alert_id = alert.id)
+                 LIMIT ?1
+             )",
         )?
-        .execute([])?;
-    transaction.commit()?;
-    Ok(deleted)
+        .execute(params![limit])?)
 }
 
 /// Deliveries that failed for good, newest first.

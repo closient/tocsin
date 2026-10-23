@@ -956,6 +956,13 @@
           ],
           "description": "Unique among notifiers in every file."
         },
+        "max_in_flight": {
+          "default": 2,
+          "description": "The most deliveries this notifier sends at once. More wait for a\nfree slot, so a storm of alerts never floods the service.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
         "name": {
           "description": "Display name; the id is used when it is absent.",
           "type": [
@@ -1362,11 +1369,6 @@
           ],
           "default": "4h",
           "description": "How often to send an alert again while it is still firing; `\"0s\"`\nnever repeats. Alertmanager notifiers re-post every minute whatever\nthis says, so Alertmanager never times the alert out."
-        },
-        "resolve": {
-          "default": true,
-          "description": "Whether a recovery sends a resolve.",
-          "type": "boolean"
         }
       },
       "required": [

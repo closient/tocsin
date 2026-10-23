@@ -43,7 +43,6 @@ notifiers = ["ops-slack", "ops-email", "incident-bot"]
 notify_on = "degraded"
 # Re-sent every 4 hours while still failing; a resolve follows the recovery.
 repeat = "4h"
-resolve = true
 
 # Only customer-facing outages page someone.
 [[route]]

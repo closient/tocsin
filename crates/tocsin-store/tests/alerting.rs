@@ -4,11 +4,12 @@
 //! transaction, in an order that never lets a resolve overtake its fire.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use tocsin_core::Health;
 use tocsin_store::{
-    AlertRouting, AlertTarget, DeliveryKind, DeliveryOutcome, DeliveryRetention, NewOutage,
-    OutageChange, OutageEnd, Store, SubjectKind,
+    AlertRouting, AlertTarget, DeliveryKind, DeliveryOutcome, DeliveryPrune, DeliveryRetention,
+    NewOutage, OutageChange, OutageEnd, Store, SubjectKind,
 };
 
 const T0: i64 = 1_800_000_000_000;
@@ -30,25 +31,33 @@ fn open() -> Fixture {
     }
 }
 
-fn target(notifier: &str, resolve: bool, repeat_ms: Option<i64>) -> AlertTarget {
+fn target(notifier: &str, repeat_ms: Option<i64>) -> AlertTarget {
     AlertTarget {
         notifier_id: notifier.into(),
         route_id: "ops".into(),
-        resolve,
         repeat_ms,
     }
 }
 
 fn routing(targets: Vec<AlertTarget>) -> AlertRouting {
     AlertRouting {
-        subject_kind: SubjectKind::Check,
         targets,
+        ringing: Vec::new(),
+    }
+}
+
+/// Routing whose `ringing` notifiers keep ringing at the outage's health.
+fn ringing(targets: Vec<AlertTarget>, ringing: &[&str]) -> AlertRouting {
+    AlertRouting {
+        targets,
+        ringing: ringing.iter().map(|id| (*id).to_owned()).collect(),
     }
 }
 
 fn outage(health: Health, started_at_ms: i64, alerted: bool) -> NewOutage {
     NewOutage {
         node_id: "node-a".into(),
+        subject_kind: SubjectKind::Check,
         check_id: "api".into(),
         component_id: Some("web".into()),
         health,
@@ -131,10 +140,7 @@ async fn a_recovery_resolves_the_alert_its_outage_fired_with_the_same_identity()
         &store,
         None,
         outage(Health::Down, T0, true),
-        routing(vec![
-            target("slack", true, None),
-            target("pager", true, None),
-        ]),
+        routing(vec![target("slack", None), target("pager", None)]),
     )
     .await;
     assert_eq!(recover(&store, id, T0 + 90_000).await, 2);
@@ -174,7 +180,7 @@ async fn a_resolve_waits_until_its_fire_is_delivered_or_has_failed() {
         &store,
         None,
         outage(Health::Down, T0, true),
-        routing(vec![target("slack", true, None)]),
+        routing(vec![target("slack", None)]),
     )
     .await;
     recover(&store, id, T0 + 1_000).await;
@@ -241,7 +247,7 @@ async fn a_health_change_refires_the_same_alert_and_reaches_new_targets() {
         &store,
         None,
         outage(Health::Degraded, T0, true),
-        routing(vec![target("slack", true, None)]),
+        routing(vec![target("slack", None)]),
     )
     .await;
     drain(&store, T0).await;
@@ -250,10 +256,7 @@ async fn a_health_change_refires_the_same_alert_and_reaches_new_targets() {
         &store,
         Some(degraded),
         outage(Health::Down, T0 + 60_000, true),
-        routing(vec![
-            target("slack", true, None),
-            target("pager", true, None),
-        ]),
+        routing(vec![target("slack", None), target("pager", None)]),
     )
     .await;
     let sent = drain(&store, T0 + 60_000).await;
@@ -304,32 +307,13 @@ async fn a_health_change_refires_the_same_alert_and_reaches_new_targets() {
 }
 
 #[tokio::test]
-async fn a_route_with_resolve_off_ends_the_alert_without_a_resolve() {
-    let Fixture { _dir, store, .. } = open();
-    let id = open_outage(
-        &store,
-        None,
-        outage(Health::Down, T0, true),
-        routing(vec![target("slack", false, None)]),
-    )
-    .await;
-    drain(&store, T0).await;
-    assert_eq!(recover(&store, id, T0 + 1_000).await, 0);
-    assert_eq!(
-        store.alerts().await.unwrap()[0].ended_at_ms,
-        Some(T0 + 1_000)
-    );
-    assert_eq!(store.outbox().await.unwrap().pending.len(), 0);
-}
-
-#[tokio::test]
 async fn repeats_are_queued_from_the_open_alert_until_it_resolves() {
     let Fixture { _dir, store, .. } = open();
     let id = open_outage(
         &store,
         None,
         outage(Health::Down, T0, true),
-        routing(vec![target("slack", true, Some(3_600_000))]),
+        routing(vec![target("slack", Some(3_600_000))]),
     )
     .await;
     // Nothing repeats while the fire is pending.
@@ -371,7 +355,7 @@ async fn queued_deliveries_survive_a_restart() {
         &store,
         None,
         outage(Health::Down, T0, true),
-        routing(vec![target("slack", true, None)]),
+        routing(vec![target("slack", None)]),
     )
     .await;
     recover(&store, id, T0 + 1_000).await;
@@ -390,7 +374,7 @@ async fn a_failed_outage_change_queues_nothing() {
         &store,
         None,
         outage(Health::Down, T0, true),
-        routing(vec![target("slack", true, None)]),
+        routing(vec![target("slack", None)]),
     )
     .await;
     drain(&store, T0).await;
@@ -400,7 +384,7 @@ async fn a_failed_outage_change_queues_nothing() {
         end: None,
         open: Some(outage(Health::Down, T0 + 1, true)),
     };
-    let routed = routing(vec![target("pager", true, None)]);
+    let routed = routing(vec![target("pager", None)]);
     assert!(
         store
             .change_outage_alerting(change, Some(routed), T0 + 1)
@@ -418,7 +402,7 @@ async fn pruning_drops_old_finished_deliveries_and_their_ended_alerts() {
         &store,
         None,
         outage(Health::Down, T0, true),
-        routing(vec![target("slack", true, None)]),
+        routing(vec![target("slack", None)]),
     )
     .await;
     recover(&store, id, T0 + 1_000).await;
@@ -426,18 +410,257 @@ async fn pruning_drops_old_finished_deliveries_and_their_ended_alerts() {
     let retention = DeliveryRetention {
         delivered_ms: 10_000,
         failed_ms: 100_000,
+        chunk_rows: 2_000,
+        pause: Duration::ZERO,
     };
     assert_eq!(
         store.prune_deliveries(retention, T0 + 5_000).await.unwrap(),
-        0
+        DeliveryPrune::default()
     );
     assert_eq!(store.alerts().await.unwrap().len(), 1);
+    let pruned = store
+        .prune_deliveries(retention, T0 + 20_000)
+        .await
+        .unwrap();
+    assert_eq!((pruned.deliveries, pruned.alerts), (2, 1));
+    assert_eq!(store.alerts().await.unwrap().len(), 0);
+}
+
+/// An outage for `kind` named `backup`.
+fn backup(kind: SubjectKind, health: Health, started_at_ms: i64) -> NewOutage {
+    NewOutage {
+        subject_kind: kind,
+        check_id: "backup".into(),
+        component_id: None,
+        ..outage(health, started_at_ms, true)
+    }
+}
+
+#[tokio::test]
+async fn a_check_and_a_heartbeat_sharing_an_id_fire_and_resolve_independently() {
+    let Fixture { _dir, store, .. } = open();
+    let check = open_outage(
+        &store,
+        None,
+        backup(SubjectKind::Check, Health::Down, T0),
+        routing(vec![target("slack", None)]),
+    )
+    .await;
+    let heartbeat = open_outage(
+        &store,
+        None,
+        backup(SubjectKind::Heartbeat, Health::Down, T0 + 1_000),
+        routing(vec![target("slack", None)]),
+    )
+    .await;
+    let sent = drain(&store, T0 + 1_000).await;
+    let alerts = store.alerts().await.unwrap();
+    assert_eq!(alerts.len(), 2, "one alert per kind, not one shared");
     assert_eq!(
-        store
-            .prune_deliveries(retention, T0 + 20_000)
-            .await
-            .unwrap(),
-        2
+        (alerts[0].subject_kind, alerts[1].subject_kind),
+        (SubjectKind::Check, SubjectKind::Heartbeat)
+    );
+    assert_eq!(
+        sent.iter()
+            .map(|(_, kind, _, alert)| (*kind, *alert))
+            .collect::<Vec<_>>(),
+        vec![
+            (DeliveryKind::Fire, alerts[0].id),
+            (DeliveryKind::Fire, alerts[1].id)
+        ]
+    );
+
+    // The heartbeat recovering resolves its own alert and leaves the
+    // check's firing.
+    assert_eq!(recover(&store, heartbeat, T0 + 2_000).await, 1);
+    let sent = drain(&store, T0 + 2_000).await;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        (sent[0].1, sent[0].3),
+        (DeliveryKind::Resolve, alerts[1].id)
+    );
+    let alerts = store.alerts().await.unwrap();
+    assert_eq!(alerts[0].ended_at_ms, None);
+    assert_eq!(alerts[1].ended_at_ms, Some(T0 + 2_000));
+
+    assert_eq!(recover(&store, check, T0 + 3_000).await, 1);
+    let sent = drain(&store, T0 + 3_000).await;
+    assert_eq!(
+        (sent[0].1, sent[0].3),
+        (DeliveryKind::Resolve, alerts[0].id)
+    );
+}
+
+/// Finishes the pending delivery of `kind` as `outcome`.
+async fn finish(store: &Store, kind: DeliveryKind, outcome: DeliveryOutcome, now: i64) {
+    let outbox = store.outbox().await.unwrap();
+    let head = outbox
+        .pending
+        .iter()
+        .find(|head| head.kind == kind)
+        .unwrap_or_else(|| panic!("no pending {kind:?} in {:?}", outbox.pending));
+    store.finish_delivery(head.id, outcome, now).await.unwrap();
+}
+
+/// The kinds the outbox offers, sorted by name: which may go matters here,
+/// not the order they are listed in.
+fn pending_kinds(outbox: &tocsin_store::Outbox) -> Vec<DeliveryKind> {
+    let mut kinds: Vec<_> = outbox.pending.iter().map(|head| head.kind).collect();
+    kinds.sort_by_key(|kind| kind.as_str());
+    kinds
+}
+
+#[tokio::test]
+async fn a_downgrade_from_ringing_queues_a_cancel_that_never_blocks_a_message() {
+    let Fixture { _dir, store, .. } = open();
+    let down = open_outage(
+        &store,
+        None,
+        outage(Health::Down, T0, true),
+        ringing(vec![target("pushover", None)], &["pushover"]),
+    )
+    .await;
+    drain(&store, T0).await;
+    assert!(store.alerts().await.unwrap()[0].ringing);
+
+    // Down (an emergency) becomes Degraded (not one): the cancel is queued
+    // at the downgrade, beside the re-fire, and neither waits for the other.
+    let degraded = open_outage(
+        &store,
+        Some(down),
+        outage(Health::Degraded, T0 + 60_000, true),
+        routing(vec![target("pushover", None)]),
+    )
+    .await;
+    assert!(!store.alerts().await.unwrap()[0].ringing);
+    let outbox = store.outbox().await.unwrap();
+    assert_eq!(
+        pending_kinds(&outbox),
+        vec![DeliveryKind::Cancel, DeliveryKind::Fire]
+    );
+    let cancel = outbox
+        .pending
+        .iter()
+        .find(|head| head.kind == DeliveryKind::Cancel)
+        .unwrap();
+    assert_eq!(cancel.health, Health::Down, "it cancels what rang");
+
+    // A cancel that keeps failing holds up nothing: the fire, and the
+    // resolve after it, go out while it retries.
+    finish(
+        &store,
+        DeliveryKind::Cancel,
+        DeliveryOutcome::Retry {
+            at_ms: T0 + 999_000,
+            error: "500".into(),
+        },
+        T0 + 60_000,
+    )
+    .await;
+    finish(
+        &store,
+        DeliveryKind::Fire,
+        DeliveryOutcome::Delivered,
+        T0 + 60_000,
+    )
+    .await;
+    // Recovering after the downgrade queues no second cancel: nothing
+    // rings any more.
+    assert_eq!(recover(&store, degraded, T0 + 120_000).await, 1);
+    let outbox = store.outbox().await.unwrap();
+    assert_eq!(
+        pending_kinds(&outbox),
+        vec![DeliveryKind::Cancel, DeliveryKind::Resolve]
+    );
+    finish(
+        &store,
+        DeliveryKind::Resolve,
+        DeliveryOutcome::Delivered,
+        T0 + 120_000,
+    )
+    .await;
+    // The cancel fails for good on its own record.
+    finish(
+        &store,
+        DeliveryKind::Cancel,
+        DeliveryOutcome::Failed {
+            error: "500".into(),
+        },
+        T0 + 999_000,
+    )
+    .await;
+    let failed = store.failed_deliveries(10).await.unwrap();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(
+        (failed[0].kind, failed[0].attempts),
+        (DeliveryKind::Cancel, 2)
+    );
+    assert_eq!(store.outbox().await.unwrap().pending.len(), 0);
+}
+
+#[tokio::test]
+async fn a_cancel_waits_for_the_ringing_message_it_cancels() {
+    let Fixture { _dir, store, .. } = open();
+    let id = open_outage(
+        &store,
+        None,
+        outage(Health::Down, T0, true),
+        ringing(vec![target("pushover", None)], &["pushover"]),
+    )
+    .await;
+    // The emergency is still pending when the outage recovers: cancelling
+    // first would leave it ringing once it lands.
+    assert_eq!(recover(&store, id, T0 + 1_000).await, 2);
+    let outbox = store.outbox().await.unwrap();
+    assert_eq!(pending_kinds(&outbox), vec![DeliveryKind::Fire]);
+    finish(
+        &store,
+        DeliveryKind::Fire,
+        DeliveryOutcome::Delivered,
+        T0 + 1_000,
+    )
+    .await;
+    let outbox = store.outbox().await.unwrap();
+    assert_eq!(
+        pending_kinds(&outbox),
+        vec![DeliveryKind::Cancel, DeliveryKind::Resolve]
+    );
+}
+
+#[tokio::test]
+async fn a_large_prune_deletes_in_chunks() {
+    let Fixture { _dir, store, .. } = open();
+    for cycle in 0..40 {
+        let at = T0 + cycle * 10;
+        let id = open_outage(
+            &store,
+            None,
+            outage(Health::Down, at, true),
+            routing(vec![target("slack", None)]),
+        )
+        .await;
+        recover(&store, id, at + 5).await;
+        drain(&store, at + 5).await;
+    }
+    assert_eq!(store.alerts().await.unwrap().len(), 40);
+    let retention = DeliveryRetention {
+        delivered_ms: 1_000,
+        failed_ms: 1_000,
+        chunk_rows: 7,
+        pause: Duration::from_millis(1),
+    };
+    let pruned = store
+        .prune_deliveries(retention, T0 + 100_000)
+        .await
+        .unwrap();
+    // 80 deliveries in chunks of 7 is 12 deletes; 40 alerts is 6.
+    assert_eq!(
+        pruned,
+        DeliveryPrune {
+            deliveries: 80,
+            alerts: 40,
+            chunks: 12 + 6,
+        }
     );
     assert_eq!(store.alerts().await.unwrap().len(), 0);
 }

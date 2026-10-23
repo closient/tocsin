@@ -263,7 +263,7 @@ every kind of event from an index.
 
 ### `alert` and `alert_delivery`
 
-The alerting outbox, added by 0004 (see [alerting.md](alerting.md)). Rows are
+The alerting outbox, added by 0005 (see [alerting.md](alerting.md)). Rows are
 written in the same transaction as the outage change that causes them, so an
 outage that alerted always has its deliveries queued and a recovery always
 has its resolve queued, across restarts and however far the delivery worker

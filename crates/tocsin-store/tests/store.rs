@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use rusqlite::{Connection, params};
 use tocsin_core::Health;
 use tocsin_store::{
-    Day, LastUp, NewCheckResult, NewOutage, OutageChange, OutageEnd, Retention, Store,
+    Day, LastUp, NewCheckResult, NewOutage, OutageChange, OutageEnd, Retention, Store, SubjectKind,
     latest_schema_version,
 };
 
@@ -204,6 +204,7 @@ async fn schema_rejects_values_outside_the_enums() {
         .store
         .open_outage(NewOutage {
             node_id: "node-a".into(),
+            subject_kind: SubjectKind::Check,
             check_id: "web".into(),
             component_id: None,
             health: Health::Up,
@@ -219,6 +220,7 @@ async fn an_outage_only_ever_gets_ended_once() {
     let fixture = open();
     let outage = || NewOutage {
         node_id: "node-a".into(),
+        subject_kind: SubjectKind::Check,
         check_id: "web".into(),
         component_id: Some("website".into()),
         health: Health::Down,
@@ -265,6 +267,7 @@ async fn open_outages_lists_only_this_nodes_unended_outages() {
     let fixture = open();
     let outage = |node: &str, check: &str, health| NewOutage {
         node_id: node.into(),
+        subject_kind: SubjectKind::Check,
         check_id: check.into(),
         component_id: None,
         health,
@@ -321,6 +324,7 @@ async fn changing_an_outage_ends_and_opens_together_or_not_at_all() {
     let fixture = open();
     let outage = |check: &str, health, started_at_ms| NewOutage {
         node_id: "node-a".into(),
+        subject_kind: SubjectKind::Check,
         check_id: check.into(),
         component_id: None,
         health,
@@ -413,6 +417,7 @@ async fn last_up_is_the_latest_up_result_since_the_last_outage() {
         .store
         .open_outage(NewOutage {
             node_id: "node-a".into(),
+            subject_kind: SubjectKind::Check,
             check_id: "api".into(),
             component_id: None,
             health: Health::Down,

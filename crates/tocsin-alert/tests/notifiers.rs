@@ -9,6 +9,7 @@ use std::time::Duration;
 use axum::body::Bytes;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tocsin_alert::notifiers::alertmanager::Alertmanager;
 use tocsin_alert::notifiers::discord::Discord;
 use tocsin_alert::notifiers::email::Email;
@@ -272,7 +273,7 @@ async fn pushover_maps_priorities_for_the_fire_and_its_resolve() {
 }
 
 #[tokio::test]
-async fn an_emergency_pushover_alert_is_cancelled_by_its_resolve() {
+async fn an_emergency_pushover_alert_is_tagged_and_cancelled_by_its_tag() {
     let (base, mut requests) = accepting().await;
     let pushover = Pushover::new(
         client(),
@@ -285,21 +286,66 @@ async fn an_emergency_pushover_alert_is_cancelled_by_its_resolve() {
             resolved: 0,
         },
     );
-    fire_then_resolve(&pushover).await;
+    // An FQDN node: dots and slashes in the identity.
+    let fire = Alert {
+        node_id: "node-a.example.com".into(),
+        ..alert(AlertEvent::Fire)
+    };
+    let resolve = Alert {
+        node_id: "node-a.example.com".into(),
+        ..alert(AlertEvent::Resolve)
+    };
+    pushover.send(&fire).await.unwrap();
+    pushover.cancel(&fire).await.unwrap();
+    pushover.send(&resolve).await.unwrap();
 
-    let fire = requests.recv().await.unwrap();
-    let cancel = requests.recv().await.unwrap();
-    let resolve = requests.recv().await.unwrap();
-    assert_eq!(fire.field("priority"), "2");
-    assert_eq!(fire.field("tags"), format!("tocsin:{IDENTITY}"));
-    assert!(fire.field("retry").parse::<u32>().unwrap() >= 30);
-    // The tag is one path segment, its slashes escaped.
-    assert_eq!(
-        cancel.path,
-        "/1/receipts/cancel_by_tag/tocsin:node-a%2Fcheck%2Fapi.json"
+    let (fired, cancel, resolved) = (
+        requests.recv().await.unwrap(),
+        requests.recv().await.unwrap(),
+        requests.recv().await.unwrap(),
     );
+    // What Pushover's cancel_by_tag needs: the tag the emergency carried,
+    // as the last path segment, before `.json`.
+    let tag = format!(
+        "tocsin-{}",
+        hex::encode(Sha256::digest(b"user-key\0node-a.example.com/check/api"))
+    );
+    assert_eq!(pushover.tag(&fire), tag);
+    assert_eq!(fired.path, "/1/messages.json");
+    assert_eq!(fired.field("priority"), "2");
+    assert_eq!(fired.field("tags"), tag);
+    assert!(fired.field("retry").parse::<u32>().unwrap() >= 30);
+    assert_eq!(cancel.method, Method::POST);
+    assert_eq!(cancel.path, format!("/1/receipts/cancel_by_tag/{tag}.json"));
     assert_eq!(cancel.field("token"), "app-token");
-    assert_eq!(resolve.field("priority"), "0");
+    // The resolve is a message of its own; it neither cancels nor is tagged.
+    assert_eq!(resolved.path, "/1/messages.json");
+    assert_eq!(resolved.field("priority"), "0");
+    assert!(url::form_urlencoded::parse(&resolved.body).all(|(key, _)| key != "tags"));
+}
+
+#[tokio::test]
+async fn a_pushover_tag_belongs_to_one_user_and_one_alert() {
+    let pushover = |user: &str| {
+        Pushover::new(
+            client(),
+            "http://127.0.0.1:9",
+            "app-token".into(),
+            user.into(),
+            Priorities::default(),
+        )
+    };
+    let api = alert(AlertEvent::Fire);
+    let web = Alert {
+        subject_id: "web".into(),
+        ..alert(AlertEvent::Fire)
+    };
+    assert_ne!(pushover("alice").tag(&api), pushover("bob").tag(&api));
+    assert_ne!(pushover("alice").tag(&api), pushover("alice").tag(&web));
+    assert_eq!(
+        pushover("alice").tag(&api),
+        pushover("alice").tag(&alert(AlertEvent::Resolve))
+    );
 }
 
 #[tokio::test]
@@ -355,11 +401,45 @@ async fn alertmanager_holds_the_alert_open_and_ends_it_on_resolve() {
     assert_eq!(fire[0]["labels"], resolve[0]["labels"]);
     assert_eq!(fire[0]["labels"]["alertname"], "TocsinCheckFailing");
     assert_eq!(fire[0]["labels"]["node"], "node-a");
-    assert_eq!(fire[0]["labels"]["subject"], "api");
+    assert_eq!(fire[0]["labels"]["subject_kind"], "check");
+    assert_eq!(fire[0]["labels"]["subject_id"], "api");
+    assert_eq!(fire[0]["annotations"]["component"], "web");
     assert_eq!(fire[0]["startsAt"], resolve[0]["startsAt"]);
     // Firing: held open five minutes past the post, re-posted before then.
     assert_eq!(fire[0]["endsAt"], "2027-01-15T08:05:00.000Z");
     assert_eq!(resolve[0]["endsAt"], "2027-01-15T08:01:30.000Z");
+}
+
+#[tokio::test]
+async fn alertmanager_labels_are_identity_only_and_survive_a_component_change() {
+    let (base, mut requests) = accepting().await;
+    let alertmanager = Alertmanager::new(client(), &format!("{base}/"), None);
+    let before = alert(AlertEvent::Fire);
+    let after = Alert {
+        event: AlertEvent::Repeat,
+        component_id: Some("api".into()),
+        component_name: Some("API".into()),
+        health: Health::Degraded,
+        subject_name: "Public API v2".into(),
+        ..alert(AlertEvent::Fire)
+    };
+    alertmanager.send(&before).await.unwrap();
+    alertmanager.send(&after).await.unwrap();
+
+    let (first, second) = two(&mut requests).await;
+    let (first, second) = (first.json(), second.json());
+    // Alertmanager keys an alert by its label set: a changed label would
+    // open a second alert and leave the first to time out.
+    assert_eq!(
+        serde_json::to_string(&first[0]["labels"]).unwrap(),
+        serde_json::to_string(&second[0]["labels"]).unwrap()
+    );
+    let mut keys: Vec<&String> = first[0]["labels"].as_object().unwrap().keys().collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["alertname", "node", "subject_id", "subject_kind"]);
+    assert_eq!(first[0]["annotations"]["component"], "web");
+    assert_eq!(second[0]["annotations"]["component"], "api");
+    assert_eq!(second[0]["annotations"]["health"], "degraded");
 }
 
 #[tokio::test]

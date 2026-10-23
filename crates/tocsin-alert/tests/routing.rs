@@ -41,8 +41,8 @@ fn router(notifiers: &[&str], routes: &str) -> Router {
     Router::new(&config(&toml))
 }
 
-/// (notifier, route, resolve, repeat) for every target, by notifier.
-fn targets(routing: &AlertRouting) -> Vec<(&str, &str, bool, Option<i64>)> {
+/// (notifier, route, repeat) for every target, by notifier.
+fn targets(routing: &AlertRouting) -> Vec<(&str, &str, Option<i64>)> {
     let mut targets: Vec<_> = routing
         .targets
         .iter()
@@ -50,7 +50,6 @@ fn targets(routing: &AlertRouting) -> Vec<(&str, &str, bool, Option<i64>)> {
             (
                 target.notifier_id.as_str(),
                 target.route_id.as_str(),
-                target.resolve,
                 target.repeat_ms,
             )
         })
@@ -59,8 +58,14 @@ fn targets(routing: &AlertRouting) -> Vec<(&str, &str, bool, Option<i64>)> {
     targets
 }
 
-fn notified(router: &Router, subject: &str, component: &str, health: Health) -> Vec<String> {
-    let routing = router.routing(subject, Some(component), health);
+fn notified(
+    router: &Router,
+    kind: SubjectKind,
+    subject: &str,
+    component: &str,
+    health: Health,
+) -> Vec<String> {
+    let routing = router.routing(kind, subject, Some(component), health);
     targets(&routing)
         .into_iter()
         .map(|(notifier, ..)| notifier.to_owned())
@@ -79,34 +84,62 @@ fn a_route_matches_its_checks_heartbeats_components_and_groups() {
     );
 
     assert_eq!(
-        notified(&router, "home", "web", Health::Down),
+        notified(&router, SubjectKind::Check, "home", "web", Health::Down),
         ["all", "ongroup"]
     );
     assert_eq!(
-        notified(&router, "rest", "api", Health::Down),
+        notified(&router, SubjectKind::Check, "rest", "api", Health::Down),
         ["all", "oncomponent", "ongroup"]
     );
     assert_eq!(
-        notified(&router, "queue", "jobs", Health::Down),
+        notified(&router, SubjectKind::Check, "queue", "jobs", Health::Down),
         ["all", "oncheck"]
     );
-    // A heartbeat matches `heartbeats`, never `checks`, by the same id
-    // the engine reports it under.
+    // A heartbeat matches `heartbeats`, never `checks`.
     assert_eq!(
-        notified(&router, "backup", "jobs", Health::Down),
+        notified(
+            &router,
+            SubjectKind::Heartbeat,
+            "backup",
+            "jobs",
+            Health::Down
+        ),
         ["all", "onbeat"]
     );
+}
+
+#[test]
+fn a_check_and_a_heartbeat_sharing_an_id_route_by_their_kind() {
+    let router = router(
+        &["oncheck", "onbeat"],
+        "[[check]]\nid = \"backup\"\nname = \"Backup host\"\ntype = \"tcp\"\n\
+         target = \"backup.example.com:22\"\ncomponent = \"jobs\"\n\n\
+         [[route]]\nid = \"check\"\nnotifiers = [\"oncheck\"]\nchecks = [\"backup\"]\n\n\
+         [[route]]\nid = \"heartbeat\"\nnotifiers = [\"onbeat\"]\nheartbeats = [\"backup\"]\n",
+    );
+
+    // The engine says which `backup` failed; the router never guesses.
     assert_eq!(
-        router
-            .routing("backup", Some("jobs"), Health::Down)
-            .subject_kind,
-        SubjectKind::Heartbeat
+        notified(
+            &router,
+            SubjectKind::Heartbeat,
+            "backup",
+            "jobs",
+            Health::Down
+        ),
+        ["onbeat"]
     );
     assert_eq!(
-        router
-            .routing("queue", Some("jobs"), Health::Down)
-            .subject_kind,
-        SubjectKind::Check
+        notified(&router, SubjectKind::Check, "backup", "jobs", Health::Down),
+        ["oncheck"]
+    );
+    assert_eq!(
+        router.subject_name(SubjectKind::Heartbeat, "backup"),
+        "Nightly backup"
+    );
+    assert_eq!(
+        router.subject_name(SubjectKind::Check, "backup"),
+        "Backup host"
     );
 }
 
@@ -118,9 +151,12 @@ fn a_route_waits_for_its_notify_on_health() {
          [[route]]\nid = \"chat\"\nnotifiers = [\"chat\"]\nnotify_on = \"degraded\"\n",
     );
 
-    assert_eq!(notified(&router, "home", "web", Health::Degraded), ["chat"]);
     assert_eq!(
-        notified(&router, "home", "web", Health::Down),
+        notified(&router, SubjectKind::Check, "home", "web", Health::Degraded),
+        ["chat"]
+    );
+    assert_eq!(
+        notified(&router, SubjectKind::Check, "home", "web", Health::Down),
         ["chat", "pager"]
     );
 }
@@ -129,16 +165,16 @@ fn a_route_waits_for_its_notify_on_health() {
 fn routes_naming_one_notifier_merge_into_one_target() {
     let router = router(
         &["slack"],
-        "[[route]]\nid = \"daily\"\nnotifiers = [\"slack\"]\nrepeat = \"1d\"\nresolve = true\n\n\
-         [[route]]\nid = \"hourly\"\nnotifiers = [\"slack\"]\nrepeat = \"1h\"\nresolve = false\n\n\
-         [[route]]\nid = \"quiet\"\nnotifiers = [\"slack\"]\nrepeat = \"0s\"\nresolve = false\n",
+        "[[route]]\nid = \"daily\"\nnotifiers = [\"slack\"]\nrepeat = \"1d\"\n\n\
+         [[route]]\nid = \"hourly\"\nnotifiers = [\"slack\"]\nrepeat = \"1h\"\n\n\
+         [[route]]\nid = \"quiet\"\nnotifiers = [\"slack\"]\nrepeat = \"0s\"\n",
     );
 
-    // One alert per notifier: the first route names it, any route's
-    // resolve sends one, and the shortest repeat wins, over "never" too.
+    // One alert per notifier: the first route names it, and the shortest
+    // repeat wins, over "never" too.
     assert_eq!(
-        targets(&router.routing("home", Some("web"), Health::Down)),
-        [("slack", "daily", true, Some(HOUR_MS))]
+        targets(&router.routing(SubjectKind::Check, "home", Some("web"), Health::Down)),
+        [("slack", "daily", Some(HOUR_MS))]
     );
 }
 
@@ -154,10 +190,10 @@ fn an_alertmanager_target_reposts_at_least_every_minute() {
             ),
         );
         assert_eq!(
-            targets(&router.routing("home", Some("web"), Health::Down)),
+            targets(&router.routing(SubjectKind::Check, "home", Some("web"), Health::Down)),
             [
-                ("am", "ops", true, Some(MINUTE_MS)),
-                ("slack", "ops", true, slack_repeat),
+                ("am", "ops", Some(MINUTE_MS)),
+                ("slack", "ops", slack_repeat),
             ],
             "repeat = {repeat}"
         );

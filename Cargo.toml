@@ -22,6 +22,7 @@ askama = { version = "0.16", default-features = false, features = ["derive", "st
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 base64 = "0.23"
 clap = { version = "4.5", features = ["derive", "env"] }
+fastrand = "2.3"
 gethostname = "1.1"
 hex = "0.4"
 hmac = "0.12"

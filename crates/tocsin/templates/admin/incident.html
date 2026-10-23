@@ -39,15 +39,15 @@
   <div class="actions"><button type="submit">Post update</button></div>
 </form>
 
-{%- if let Some(status) = resolve_as %}
+{%- if let Some(resolve) = resolve %}
 <h2>Resolve</h2>
 <form class="stack" method="post" action="/admin/incidents/{{ incident.id }}/updates">
   <input type="hidden" name="csrf" value="{{ csrf }}">
-  <input type="hidden" name="status" value="{{ status }}">
+  <input type="hidden" name="status" value="{{ resolve.status }}">
   <label>Closing message <span class="hint">Markdown</span>
-    <textarea name="message" rows="3" required>This incident has been resolved.</textarea>
+    <textarea name="message" rows="3" required>{{ resolve.message }}</textarea>
   </label>
-  <div class="actions"><button type="submit" class="secondary">Mark {{ status }}</button></div>
+  <div class="actions"><button type="submit" class="secondary">Mark {{ resolve.status }}</button></div>
 </form>
 {%- endif %}
 

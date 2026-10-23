@@ -18,13 +18,16 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::time::{Duration, Instant, SystemTime};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ring::signature::{RSA_PKCS1_2048_8192_SHA256, RsaPublicKeyComponents};
 use serde::Deserialize;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::watch;
+
+use crate::net::{http_client, since_epoch};
 
 /// The header Access puts the token in.
 pub const TOKEN_HEADER: &str = "cf-access-jwt-assertion";
@@ -37,6 +40,13 @@ const REFRESH_COOLDOWN: Duration = Duration::from_secs(60);
 /// Keys older than this are refetched; Access rotates them every six weeks
 /// and publishes the next one ahead of time.
 const MAX_KEY_AGE: Duration = Duration::from_hours(1);
+/// How long past [`MAX_KEY_AGE`] cached keys are still used while refetches
+/// fail. Beyond it a revoked key could still be trusted, so tokens are
+/// refused until a fetch succeeds.
+const KEY_GRACE: Duration = Duration::from_hours(1);
+/// The first wait between fetches while no keys have ever been fetched; it
+/// doubles after each failure, up to [`REFRESH_COOLDOWN`].
+const STARTUP_BACKOFF: Duration = Duration::from_secs(1);
 /// Longest token accepted; real ones are about a kilobyte.
 const MAX_TOKEN_LENGTH: usize = 16 * 1024;
 /// Largest key document accepted.
@@ -56,6 +66,9 @@ pub enum Rejection {
     UnknownKey(String),
     /// The keys could not be fetched and none are cached.
     KeysUnavailable,
+    /// The cached keys are past [`MAX_KEY_AGE`] plus [`KEY_GRACE`] and
+    /// cannot be refetched.
+    KeysStale,
     /// The signature does not verify with the named key.
     Signature,
     /// `iss` is not this team.
@@ -77,6 +90,7 @@ impl fmt::Display for Rejection {
             Rejection::Algorithm(alg) => write!(formatter, "algorithm {alg:?} is not RS256"),
             Rejection::UnknownKey(kid) => write!(formatter, "unknown key id {kid:?}"),
             Rejection::KeysUnavailable => formatter.write_str("signing keys unavailable"),
+            Rejection::KeysStale => formatter.write_str("signing keys too old to trust"),
             Rejection::Signature => formatter.write_str("bad signature"),
             Rejection::Issuer => formatter.write_str("wrong issuer"),
             Rejection::Audience => formatter.write_str("wrong audience"),
@@ -91,20 +105,48 @@ impl fmt::Display for Rejection {
 pub struct Verifier {
     issuer: String,
     audience: String,
+    keys: Arc<KeyCache>,
+}
+
+/// The team's keys, refreshed by one background task at a time.
+///
+/// Verification never waits on a fetch when it has a usable key: a key
+/// past [`MAX_KEY_AGE`] is still used, within [`KEY_GRACE`], while a
+/// spawned task refetches. Only a request that has no usable key (an
+/// unknown `kid`, nothing fetched yet, or keys past the grace) waits, and
+/// then for the one fetch in flight rather than starting its own.
+struct KeyCache {
     certs_url: String,
     client: reqwest::Client,
     keys: RwLock<Keys>,
-    /// When the last fetch started; held while fetching so concurrent
-    /// requests for an unknown key wait for one fetch instead of each
-    /// starting their own.
-    last_fetch: Mutex<Option<Instant>>,
-    cooldown: Duration,
+    fetches: Mutex<Fetches>,
+    /// Bumped when a fetch finishes, successful or not.
+    finished: watch::Sender<u64>,
+    limits: Limits,
 }
 
 #[derive(Default)]
 struct Keys {
     by_id: HashMap<String, RsaPublicKeyComponents<Vec<u8>>>,
     fetched: Option<Instant>,
+}
+
+/// Fetch bookkeeping; never held across an `await`.
+#[derive(Default)]
+struct Fetches {
+    in_flight: bool,
+    last_started: Option<Instant>,
+    /// Failures in a row, for the backoff before the first success.
+    failures: u32,
+}
+
+/// The timings, constants in production and shortened by tests.
+#[derive(Clone, Copy)]
+struct Limits {
+    cooldown: Duration,
+    max_age: Duration,
+    grace: Duration,
+    backoff: Duration,
 }
 
 #[derive(Deserialize)]
@@ -159,23 +201,26 @@ impl Verifier {
             .unwrap_or(team_domain);
         let issuer = format!("https://{team}.cloudflareaccess.com");
         let certs_url = format!("{issuer}/cdn-cgi/access/certs");
-        // reqwest is built without a default provider; this is the one.
-        // Installing twice is harmless, so the result is ignored.
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let client = reqwest::Client::builder()
-            .timeout(FETCH_TIMEOUT)
+        let client = http_client(FETCH_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
-            .user_agent(concat!("tocsin/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|error| format!("cannot start HTTP client: {error}"))?;
         Ok(Verifier {
             issuer,
             audience: audience.to_owned(),
-            certs_url,
-            client,
-            keys: RwLock::new(Keys::default()),
-            last_fetch: Mutex::new(None),
-            cooldown: REFRESH_COOLDOWN,
+            keys: Arc::new(KeyCache {
+                certs_url,
+                client,
+                keys: RwLock::default(),
+                fetches: Mutex::default(),
+                finished: watch::Sender::new(0),
+                limits: Limits {
+                    cooldown: REFRESH_COOLDOWN,
+                    max_age: MAX_KEY_AGE,
+                    grace: KEY_GRACE,
+                    backoff: STARTUP_BACKOFF,
+                },
+            }),
         })
     }
 
@@ -183,15 +228,47 @@ impl Verifier {
     /// the issuer, audience and every other check stay exactly as built.
     #[cfg(test)]
     pub fn with_certs_url(mut self, url: impl Into<String>) -> Self {
-        self.certs_url = url.into();
+        self.cache().certs_url = url.into();
         self
     }
 
     /// Changes the shortest gap between key fetches. Tests only.
     #[cfg(test)]
     pub fn with_cooldown(mut self, cooldown: Duration) -> Self {
-        self.cooldown = cooldown;
+        self.cache().limits.cooldown = cooldown;
         self
+    }
+
+    /// Changes how old keys may get before a refetch (`max_age`) and how
+    /// much longer they are used while refetches fail (`grace`). Tests only.
+    #[cfg(test)]
+    pub fn with_key_age(mut self, max_age: Duration, grace: Duration) -> Self {
+        let limits = &mut self.cache().limits;
+        limits.max_age = max_age;
+        limits.grace = grace;
+        self
+    }
+
+    /// Changes the first wait between fetches before any succeeds. Tests
+    /// only.
+    #[cfg(test)]
+    pub fn with_backoff(mut self, backoff: Duration) -> Self {
+        self.cache().limits.backoff = backoff;
+        self
+    }
+
+    /// Waits for the fetch in flight, if any, to finish. Tests only.
+    #[cfg(test)]
+    pub async fn settle(&self) {
+        let mut finished = self.keys.finished.subscribe();
+        if self.keys.fetches().in_flight {
+            let _ = finished.changed().await;
+        }
+    }
+
+    #[cfg(test)]
+    fn cache(&mut self) -> &mut KeyCache {
+        Arc::get_mut(&mut self.keys).expect("configured before use")
     }
 
     /// The `iss` every token must carry.
@@ -230,7 +307,7 @@ impl Verifier {
         let signature = URL_SAFE_NO_PAD
             .decode(signature_part)
             .map_err(|_| Rejection::Malformed("signature is not base64url"))?;
-        let key = self.key(&kid).await?;
+        let key = KeyCache::key(&self.keys, &kid).await?;
         let signed = &token[..header_part.len() + 1 + payload_part.len()];
         key.verify(&RSA_PKCS1_2048_8192_SHA256, signed.as_bytes(), &signature)
             .map_err(|_| Rejection::Signature)?;
@@ -247,7 +324,7 @@ impl Verifier {
         if !audience_matches {
             return Err(Rejection::Audience);
         }
-        let now = seconds(now);
+        let now = since_epoch(now).as_secs_f64();
         let leeway = LEEWAY.as_secs_f64();
         match claims.exp {
             Some(exp) if exp.is_finite() && now < exp + leeway => {}
@@ -264,48 +341,118 @@ impl Verifier {
             _ => Err(Rejection::NoEmail),
         }
     }
+}
 
-    /// The key named `kid`, refetching the team's keys when it is unknown
-    /// or the cache is old.
-    async fn key(&self, kid: &str) -> Result<RsaPublicKeyComponents<Vec<u8>>, Rejection> {
-        {
-            let keys = self.keys.read().await;
-            let fresh = keys
-                .fetched
-                .is_some_and(|fetched| fetched.elapsed() < MAX_KEY_AGE);
-            if fresh && let Some(key) = keys.by_id.get(kid) {
-                return Ok(key.clone());
+impl KeyCache {
+    /// The key named `kid`.
+    async fn key(
+        this: &Arc<Self>,
+        kid: &str,
+    ) -> Result<RsaPublicKeyComponents<Vec<u8>>, Rejection> {
+        let limits = this.limits;
+        let mut finished = this.finished.subscribe();
+        match this.lookup(kid) {
+            Lookup::Fresh(key) => return Ok(key),
+            Lookup::Stale(key) => {
+                // Usable while one task refetches in the background.
+                Self::start_fetch(this);
+                return Ok(key);
             }
+            Lookup::Missing => {}
         }
-        self.refresh().await;
-        let keys = self.keys.read().await;
-        match keys.by_id.get(kid) {
-            Some(key) => Ok(key.clone()),
-            None if keys.fetched.is_none() => Err(Rejection::KeysUnavailable),
-            None => Err(Rejection::UnknownKey(kid.to_owned())),
+        // No usable key: wait for a fetch, ours or one already in flight.
+        Self::start_fetch(this);
+        if this.fetches().in_flight {
+            let _ = tokio::time::timeout(2 * FETCH_TIMEOUT, finished.changed()).await;
+        }
+        match this.lookup(kid) {
+            Lookup::Fresh(key) | Lookup::Stale(key) => Ok(key),
+            Lookup::Missing => {
+                let keys = this.read_keys();
+                match keys.fetched {
+                    None => Err(Rejection::KeysUnavailable),
+                    Some(fetched) if fetched.elapsed() >= limits.max_age + limits.grace => {
+                        tracing::error!(
+                            age_seconds = fetched.elapsed().as_secs(),
+                            url = %this.certs_url,
+                            "refusing Cloudflare Access tokens: the signing keys could not be refetched and are too old to trust"
+                        );
+                        Err(Rejection::KeysStale)
+                    }
+                    Some(_) => Err(Rejection::UnknownKey(kid.to_owned())),
+                }
+            }
         }
     }
 
-    /// Fetches the keys unless a fetch started within the cooldown. On
-    /// failure the cached keys stay, and the failure is logged.
-    async fn refresh(&self) {
-        let mut last_fetch = self.last_fetch.lock().await;
-        if last_fetch.is_some_and(|at| at.elapsed() < self.cooldown) {
-            return;
+    /// `kid` among the cached keys, by how far it can be trusted.
+    fn lookup(&self, kid: &str) -> Lookup {
+        let keys = self.read_keys();
+        let (Some(fetched), Some(key)) = (keys.fetched, keys.by_id.get(kid)) else {
+            return Lookup::Missing;
+        };
+        let age = fetched.elapsed();
+        if age < self.limits.max_age {
+            Lookup::Fresh(key.clone())
+        } else if age < self.limits.max_age + self.limits.grace {
+            Lookup::Stale(key.clone())
+        } else {
+            Lookup::Missing
         }
-        *last_fetch = Some(Instant::now());
-        match self.fetch().await {
-            Ok(by_id) => {
-                tracing::info!(keys = by_id.len(), url = %self.certs_url, "fetched Cloudflare Access keys");
-                *self.keys.write().await = Keys {
-                    by_id,
-                    fetched: Some(Instant::now()),
-                };
+    }
+
+    /// Spawns a fetch unless one is in flight or the last one started too
+    /// recently: within the cooldown once keys exist, and within a backoff
+    /// doubling from [`STARTUP_BACKOFF`] up to the cooldown before then.
+    fn start_fetch(this: &Arc<Self>) {
+        let have_keys = this.read_keys().fetched.is_some();
+        {
+            let mut fetches = this.fetches();
+            let gap = if have_keys {
+                this.limits.cooldown
+            } else {
+                // 1s after the first failure, 2s after the second, ...
+                let doublings = fetches.failures.saturating_sub(1).min(16);
+                this.limits
+                    .backoff
+                    .saturating_mul(1 << doublings)
+                    .min(this.limits.cooldown)
+            };
+            if fetches.in_flight || fetches.last_started.is_some_and(|at| at.elapsed() < gap) {
+                return;
             }
-            Err(error) => {
-                tracing::error!(%error, url = %self.certs_url, "cannot fetch Cloudflare Access keys");
-            }
+            fetches.in_flight = true;
+            fetches.last_started = Some(Instant::now());
         }
+        let cache = Arc::clone(this);
+        tokio::spawn(async move {
+            // Clears `in_flight` and wakes waiters even if the fetch panics.
+            let mut guard = FetchGuard {
+                cache: &cache,
+                succeeded: false,
+            };
+            match cache.fetch().await {
+                Ok(by_id) => {
+                    tracing::info!(keys = by_id.len(), url = %cache.certs_url, "fetched Cloudflare Access keys");
+                    *cache.keys.write().unwrap_or_else(PoisonError::into_inner) = Keys {
+                        by_id,
+                        fetched: Some(Instant::now()),
+                    };
+                    guard.succeeded = true;
+                }
+                Err(error) => {
+                    tracing::error!(%error, url = %cache.certs_url, "cannot fetch Cloudflare Access keys");
+                }
+            }
+        });
+    }
+
+    fn read_keys(&self) -> std::sync::RwLockReadGuard<'_, Keys> {
+        self.keys.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn fetches(&self) -> std::sync::MutexGuard<'_, Fetches> {
+        self.fetches.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     async fn fetch(&self) -> Result<HashMap<String, RsaPublicKeyComponents<Vec<u8>>>, String> {
@@ -347,6 +494,38 @@ impl Verifier {
     }
 }
 
+/// How far a cached key can be trusted.
+enum Lookup {
+    /// Younger than the maximum age.
+    Fresh(RsaPublicKeyComponents<Vec<u8>>),
+    /// Older, but within the grace: used while a refetch runs.
+    Stale(RsaPublicKeyComponents<Vec<u8>>),
+    /// Not cached, or too old to use.
+    Missing,
+}
+
+/// Ends a fetch: clears `in_flight`, counts the outcome for the backoff,
+/// and wakes the requests waiting on it.
+struct FetchGuard<'a> {
+    cache: &'a KeyCache,
+    succeeded: bool,
+}
+
+impl Drop for FetchGuard<'_> {
+    fn drop(&mut self) {
+        {
+            let mut fetches = self.cache.fetches();
+            fetches.in_flight = false;
+            fetches.failures = if self.succeeded {
+                0
+            } else {
+                fetches.failures.saturating_add(1)
+            };
+        }
+        self.cache.finished.send_modify(|count| *count += 1);
+    }
+}
+
 fn decode_json<T: for<'de> Deserialize<'de>>(
     part: &str,
     what: &'static str,
@@ -355,10 +534,4 @@ fn decode_json<T: for<'de> Deserialize<'de>>(
         .decode(part)
         .map_err(|_| Rejection::Malformed(what))?;
     serde_json::from_slice(&bytes).map_err(|_| Rejection::Malformed(what))
-}
-
-/// Seconds since the epoch; before it reads as zero.
-fn seconds(now: SystemTime) -> f64 {
-    now.duration_since(UNIX_EPOCH)
-        .map_or(0.0, |since| since.as_secs_f64())
 }

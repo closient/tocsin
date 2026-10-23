@@ -589,6 +589,16 @@ impl<'a> Loader<'a> {
                 );
             }
         }
+        // DNS names are case-insensitive but a token's `iss` is compared
+        // exactly: Access issues it in lowercase, so the team is kept so.
+        if let Some(team) = items
+            .server
+            .as_mut()
+            .and_then(|server| server.value.auth.as_mut())
+            .and_then(|auth| auth.team_domain.as_mut())
+        {
+            team.make_ascii_lowercase();
+        }
     }
 
     fn validate_server(&mut self, server: &Item<Server>) {
@@ -622,6 +632,13 @@ impl<'a> Loader<'a> {
         }
         if let Some(auth) = &value.auth {
             self.validate_auth(&origin.key("auth"), auth);
+            if auth.mode != AuthMode::None && value.public_url.is_none() {
+                self.report(
+                    &origin.keys(&["auth", "mode"]),
+                    "the admin page needs `[server] public_url`: its forms are accepted only from that origin",
+                    Some("add `public_url = \"https://status.example.com\"` under `[server]`, the address people open".to_owned()),
+                );
+            }
         }
         let Some(email) = &value.email else { return };
         for (key, address) in [("from", &email.from), ("reply_to", &email.reply_to)] {
@@ -726,7 +743,10 @@ impl<'a> Loader<'a> {
                 ),
             ),
             Some(team) => {
-                let name = team.strip_suffix(".cloudflareaccess.com").unwrap_or(team);
+                let lowercase = team.to_ascii_lowercase();
+                let name = lowercase
+                    .strip_suffix(".cloudflareaccess.com")
+                    .unwrap_or(&lowercase);
                 if !is_label(name) {
                     self.report(
                         &origin.key("team_domain"),

@@ -17,34 +17,27 @@ pub struct Layout {
     pub title: String,
     /// The stylesheet's URL, with its content hash.
     pub stylesheet: &'static str,
-    /// htmx's URL, or `None` for a page with no script.
-    pub script: Option<&'static str>,
     /// The signed-in person, shown in the header.
     pub signed_in: Option<String>,
-    /// A CSRF token htmx sends with every request from the page.
-    pub csrf: Option<String>,
 }
 
 impl Layout {
-    /// A public page: no script, nobody signed in.
+    /// A public page: nobody signed in.
     pub fn public(title: impl Into<String>) -> Self {
         Layout {
             title: title.into(),
             stylesheet: assets::url("tocsin.css"),
-            script: None,
             signed_in: None,
-            csrf: None,
         }
     }
 
-    /// A page for a signed-in person, with htmx and their CSRF token.
+    /// A page for a signed-in person, who is named in the header. Admin
+    /// pages load no script: their forms are plain posts.
     pub fn admin(title: impl Into<String>, admin: &Admin) -> Self {
         Layout {
             title: title.into(),
             stylesheet: assets::url("tocsin.css"),
-            script: Some(assets::url("htmx.min.js")),
             signed_in: Some(admin.email.clone()),
-            csrf: Some(admin.csrf.clone()),
         }
     }
 }

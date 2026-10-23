@@ -15,7 +15,7 @@ use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use serde::Deserialize;
 use tocsin_core::incident::{
     FieldError, Impact, Incident, IncidentKind, IncidentStatus, NewIncident, NewUpdate,
@@ -32,13 +32,24 @@ use crate::http::incidents;
 const PAGE_SIZE: u32 = 25;
 
 /// The admin routes. Merged only when `[server.auth]` turns them on.
+///
+/// Forms are plain posts: success answers 303 to the page to show next,
+/// and invalid input comes back as the page with errors and a 422. Each
+/// path a form posts to also answers `GET` with a 303 to the page it
+/// belongs to, so a reload, a bookmark or Back on it lands on a page.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/admin", get(|| async { Redirect::permanent("/admin/") }))
         .route("/admin/", get(index))
-        .route("/admin/incidents", post(create))
+        .route(
+            "/admin/incidents",
+            get(|| async { Redirect::to("/admin/") }).post(create),
+        )
         .route("/admin/incidents/{id}", get(detail))
-        .route("/admin/incidents/{id}/updates", post(update))
+        .route(
+            "/admin/incidents/{id}/updates",
+            get(to_incident).post(update),
+        )
 }
 
 /// One option of a select or checkbox group.
@@ -88,6 +99,28 @@ struct UpdateView {
     created_by: String,
 }
 
+/// The form that ends an incident: the terminal status for its kind and a
+/// closing message to start from.
+struct Resolve {
+    status: &'static str,
+    message: &'static str,
+}
+
+impl Resolve {
+    fn for_kind(kind: IncidentKind) -> Self {
+        match kind {
+            IncidentKind::Incident => Resolve {
+                status: IncidentStatus::Resolved.as_str(),
+                message: "This incident has been resolved.",
+            },
+            IncidentKind::Maintenance => Resolve {
+                status: IncidentStatus::Completed.as_str(),
+                message: "This maintenance has been completed.",
+            },
+        }
+    }
+}
+
 #[derive(Template)]
 #[template(path = "admin/incident.html")]
 struct IncidentPage {
@@ -97,8 +130,8 @@ struct IncidentPage {
     created_at: String,
     updates: Vec<UpdateView>,
     statuses: Vec<Choice>,
-    /// The status that ends this incident, when it is not over.
-    resolve_as: Option<&'static str>,
+    /// How to end this incident, when it is not over.
+    resolve: Option<Resolve>,
     message: String,
     errors: Vec<FieldError>,
 }
@@ -153,7 +186,7 @@ async fn index_page(
     ));
     let page = IndexPage {
         layout: Layout::admin("Incidents", admin),
-        csrf: admin.csrf.clone(),
+        csrf: admin.csrf_token(),
         incidents: incidents.iter().map(row).collect(),
         next_before,
         form,
@@ -250,6 +283,12 @@ async fn detail(
     .await
 }
 
+/// `GET` on the path the update form posts to: the incident's page.
+async fn to_incident(id: Result<Path<i64>, PathRejection>) -> Result<Redirect, HtmlError> {
+    let id = id.map_err(|_| HtmlError::not_found())?.0;
+    Ok(Redirect::to(&format!("/admin/incidents/{id}")))
+}
+
 async fn update(
     State(state): State<AppState>,
     id: Result<Path<i64>, PathRejection>,
@@ -296,13 +335,10 @@ async fn incident_page(
         .await
         .map_err(|error| HtmlError::internal(&error))?
         .ok_or_else(HtmlError::not_found)?;
-    let resolve_as = (!incident.status.is_terminal()).then_some(match incident.kind {
-        IncidentKind::Incident => IncidentStatus::Resolved.as_str(),
-        IncidentKind::Maintenance => IncidentStatus::Completed.as_str(),
-    });
+    let resolve = (!incident.status.is_terminal()).then(|| Resolve::for_kind(incident.kind));
     let page = IncidentPage {
         layout: Layout::admin(incident.title.clone(), admin),
-        csrf: admin.csrf.clone(),
+        csrf: admin.csrf_token(),
         created_at: incident.created_at.to_string(),
         updates: incident
             .updates
@@ -320,7 +356,7 @@ async fn incident_page(
             .filter(|value| value.allowed_for(incident.kind))
             .map(|value| choice(value.as_str(), value.as_str(), *value == incident.status))
             .collect(),
-        resolve_as,
+        resolve,
         message,
         errors,
         incident,

@@ -6,16 +6,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="same-origin">
-{%- if layout.script.is_some() %}
-<meta name="htmx-config" content='{"responseHandling":[{"code":"204","swap":false},{"code":".*","swap":true}],"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"historyCacheSize":0,"refreshOnHistoryMiss":true,"selfRequestsOnly":true}'>
-{%- endif %}
 <title>{{ layout.title }} · tocsin</title>
 <link rel="stylesheet" href="{{ layout.stylesheet }}">
-{%- if let Some(script) = layout.script %}
-<script src="{{ script }}" defer></script>
-{%- endif %}
 </head>
-<body{% if let Some(token) = layout.csrf %} hx-boost="true" hx-headers='{"X-CSRF-Token": "{{ token }}"}'{% endif %}>
+<body>
 <header class="site">
   <a class="home" href="{% if layout.signed_in.is_some() %}/admin/{% else %}/{% endif %}">tocsin</a>
   {%- if let Some(who) = layout.signed_in %}

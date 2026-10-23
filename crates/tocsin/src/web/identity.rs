@@ -15,6 +15,7 @@
 //! them does not exist until auth is configured.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use axum::extract::{ConnectInfo, FromRequest, FromRequestParts, Request};
@@ -38,7 +39,8 @@ pub struct AdminAuth {
     source: Source,
     allow: AllowList,
     csrf: csrf::Key,
-    public_origin: Option<String>,
+    /// `[server] public_url`'s origin, the only one forms are taken from.
+    public_origin: String,
 }
 
 enum Source {
@@ -90,7 +92,7 @@ impl AdminAuth {
     /// # Errors
     ///
     /// A part that needs the system (the HTTP client, the random source)
-    /// cannot start.
+    /// cannot start, or `[server] public_url` is missing.
     pub fn from_config(config: &Config) -> Result<Option<Self>, String> {
         let Some(auth) = &config.server.auth else {
             return Ok(None);
@@ -125,7 +127,10 @@ impl AdminAuth {
             .public_url
             .as_deref()
             .and_then(|public_url| url::Url::parse(public_url).ok())
-            .map(|public_url| public_url.origin().ascii_serialization());
+            .map(|public_url| public_url.origin().ascii_serialization())
+            .ok_or(
+                "the admin page needs a valid `[server] public_url`, which the loader requires",
+            )?;
         Ok(AdminAuth {
             source,
             allow: AllowList::new(auth),
@@ -140,6 +145,15 @@ impl AdminAuth {
     pub fn with_verifier(verifier: Verifier, config: &Config) -> Self {
         let auth = config.server.auth.clone().unwrap_or_default();
         Self::new(Source::Access(Box::new(verifier)), &auth, config).unwrap()
+    }
+
+    /// The Cloudflare Access verifier, if that is the mode. Tests only.
+    #[cfg(test)]
+    pub fn verifier(&self) -> Option<&Verifier> {
+        match &self.source {
+            Source::Access(verifier) => Some(verifier),
+            Source::Header { .. } => None,
+        }
     }
 
     /// The email address the proxy vouches for, lowercased, if it is
@@ -214,14 +228,18 @@ fn unauthenticated(reason: &str) -> HtmlError {
 pub struct Admin {
     /// Their email address, lowercased.
     pub email: String,
-    /// A CSRF token for forms on the page being rendered.
-    pub csrf: String,
+    auth: Arc<AdminAuth>,
 }
 
 impl Admin {
     /// Who to record as the author of a change.
     pub fn actor(&self) -> Actor {
         Actor::person(&self.email)
+    }
+
+    /// A CSRF token for the forms on a page being rendered for them.
+    pub fn csrf_token(&self) -> String {
+        self.auth.csrf.issue(&self.email, SystemTime::now())
     }
 }
 
@@ -233,8 +251,10 @@ impl FromRequestParts<AppState> for Admin {
             return Err(HtmlError::not_found());
         };
         let email = auth.identify(parts).await?;
-        let csrf = auth.csrf.issue(&email, SystemTime::now());
-        Ok(Admin { email, csrf })
+        Ok(Admin {
+            email,
+            auth: Arc::clone(auth),
+        })
     }
 }
 
@@ -253,10 +273,8 @@ impl FromRequest<AppState> for AdminForm {
     async fn from_request(request: Request, state: &AppState) -> Result<Self, HtmlError> {
         let (mut parts, body) = request.into_parts();
         let admin = Admin::from_request_parts(&mut parts, state).await?;
-        let Some(auth) = &state.admin else {
-            return Err(HtmlError::not_found());
-        };
-        if let Err(reason) = csrf::same_origin(&parts.headers, auth.public_origin.as_deref()) {
+        let auth = &admin.auth;
+        if let Err(reason) = csrf::same_origin(&parts.headers, &auth.public_origin) {
             tracing::warn!(reason, email = %admin.email, "admin form refused: cross-origin");
             return Err(HtmlError::new(
                 StatusCode::FORBIDDEN,
@@ -282,9 +300,7 @@ impl FromRequest<AppState> for AdminForm {
             .await
             .map_err(|_| HtmlError::new(StatusCode::PAYLOAD_TOO_LARGE, "The form is too large."))?;
         let fields = Fields::parse(&body);
-        let token = fields
-            .get(csrf::FIELD)
-            .or_else(|| single_header(&parts.headers, csrf::HEADER));
+        let token = fields.get(csrf::FIELD);
         if !token.is_some_and(|token| auth.csrf.verify(&admin.email, token, SystemTime::now())) {
             tracing::warn!(email = %admin.email, "admin form refused: missing or invalid CSRF token");
             return Err(HtmlError::new(

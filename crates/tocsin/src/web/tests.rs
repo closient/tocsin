@@ -5,22 +5,22 @@
 //! and create → update → resolve over a real socket.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Method, Request, StatusCode, header};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ring::rand::SystemRandom;
 use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair, RsaPublicKeyComponents};
 use serde_json::{Value, json};
 use tocsin_core::config::{Config, Environment, Source};
-use tocsin_core::incident::{Actor, Impact, IncidentKind, NewIncident};
+use tocsin_core::incident::{Actor, Impact, IncidentKind, NewIncident, Timestamp};
 use tocsin_store::Store;
 use tower::ServiceExt;
 
@@ -34,12 +34,13 @@ const OTHER_KEY: &[u8] = include_bytes!("testdata/other.pk8");
 const TEAM: &str = "acme";
 const AUDIENCE: &str = "4714c1358e65fe4b408ad6d432a5f878f08194bdb4752441fd56faefa9b2b6f2";
 const HOST: &str = "status.example.com";
-const ORIGIN: &str = "http://status.example.com";
+/// `[server] public_url`'s origin: the site as people open it.
+const ORIGIN: &str = "https://status.example.com";
 const ALICE: &str = "alice@example.com";
 
 fn config(auth: &str) -> Config {
     let text = format!(
-        "[server]\n\n[server.auth]\n{auth}\n\n\
+        "[server]\npublic_url = \"{ORIGIN}/\"\n\n[server.auth]\n{auth}\n\n\
          [[component]]\nid = \"api\"\nname = \"API\"\n\n\
          [[component]]\nid = \"web\"\nname = \"Web\"\n"
     );
@@ -226,20 +227,36 @@ struct KeyServer {
     url: String,
     keys: Arc<Mutex<Vec<Value>>>,
     hits: Arc<AtomicUsize>,
+    /// Answer 500 instead of the keys.
+    failing: Arc<AtomicBool>,
+    /// Milliseconds to wait before answering.
+    delay: Arc<AtomicU64>,
 }
 
 impl KeyServer {
     async fn start(keys: Vec<Value>) -> Self {
         let keys = Arc::new(Mutex::new(keys));
         let hits = Arc::new(AtomicUsize::new(0));
+        let failing = Arc::new(AtomicBool::new(false));
+        let delay = Arc::new(AtomicU64::new(0));
         let app = {
             let (keys, hits) = (Arc::clone(&keys), Arc::clone(&hits));
+            let (failing, delay) = (Arc::clone(&failing), Arc::clone(&delay));
             Router::new().route(
                 "/cdn-cgi/access/certs",
                 axum::routing::get(move || {
                     hits.fetch_add(1, Ordering::SeqCst);
                     let body = json!({"keys": *keys.lock().unwrap()});
-                    async move { axum::Json(body) }
+                    let failing = failing.load(Ordering::SeqCst);
+                    let delay = Duration::from_millis(delay.load(Ordering::SeqCst));
+                    async move {
+                        tokio::time::sleep(delay).await;
+                        if failing {
+                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                        } else {
+                            axum::Json(body).into_response()
+                        }
+                    }
                 }),
             )
         };
@@ -249,7 +266,22 @@ impl KeyServer {
             listener.local_addr().unwrap()
         );
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        KeyServer { url, keys, hits }
+        KeyServer {
+            url,
+            keys,
+            hits,
+            failing,
+            delay,
+        }
+    }
+
+    fn fail(&self, failing: bool) {
+        self.failing.store(failing, Ordering::SeqCst);
+    }
+
+    fn delay(&self, delay: Duration) {
+        self.delay
+            .store(u64::try_from(delay.as_millis()).unwrap(), Ordering::SeqCst);
     }
 
     fn hits(&self) -> usize {
@@ -459,6 +491,122 @@ async fn access_refuses_everything_while_the_keys_are_unreachable() {
     ));
 }
 
+#[tokio::test]
+async fn access_backs_off_from_one_second_until_keys_are_first_fetched() {
+    let server = KeyServer::start(vec![jwk("k1", SIGNING_KEY)]).await;
+    server.fail(true);
+    let backoff = Duration::from_millis(200);
+    let verifier = server
+        .verifier()
+        .with_backoff(backoff)
+        .with_cooldown(Duration::from_millis(500));
+    let token = sign(SIGNING_KEY, &rs256("k1"), &claims(ALICE));
+    let unavailable = |result| matches!(result, Err(Rejection::KeysUnavailable));
+    let margin = Duration::from_millis(50);
+
+    assert!(unavailable(verify(&verifier, &token).await));
+    assert!(unavailable(verify(&verifier, &token).await));
+    assert_eq!(server.hits(), 1, "no retry within the first backoff");
+    tokio::time::sleep(backoff + margin).await;
+    assert!(unavailable(verify(&verifier, &token).await));
+    assert_eq!(server.hits(), 2, "retried after the first backoff");
+    // The gap doubles: 400ms after the second failure.
+    tokio::time::sleep(backoff + margin).await;
+    assert!(unavailable(verify(&verifier, &token).await));
+    assert_eq!(server.hits(), 2, "the gap has doubled");
+    tokio::time::sleep(backoff).await;
+    assert!(unavailable(verify(&verifier, &token).await));
+    assert_eq!(server.hits(), 3);
+    // Doubled again it would be 800ms, but the cooldown caps it at 500ms.
+    tokio::time::sleep(Duration::from_millis(500) + margin).await;
+    server.fail(false);
+    assert_eq!(verify(&verifier, &token).await.unwrap(), ALICE);
+    assert_eq!(server.hits(), 4);
+}
+
+#[tokio::test]
+async fn access_uses_stale_keys_without_waiting_while_one_task_refetches() {
+    let server = KeyServer::start(vec![jwk("k1", SIGNING_KEY)]).await;
+    let max_age = Duration::from_millis(100);
+    let verifier = Arc::new(
+        server
+            .verifier()
+            .with_cooldown(Duration::ZERO)
+            .with_key_age(max_age, Duration::from_secs(60)),
+    );
+    let token = sign(SIGNING_KEY, &rs256("k1"), &claims(ALICE));
+    assert_eq!(verify(&verifier, &token).await.unwrap(), ALICE);
+    assert_eq!(server.hits(), 1);
+
+    // The keys are past their age and the key server is slow: requests
+    // keep using the cached key, and only one of them starts a fetch.
+    server.delay(Duration::from_secs(1));
+    tokio::time::sleep(max_age + Duration::from_millis(20)).await;
+    let started = Instant::now();
+    let requests: Vec<_> = (0..10)
+        .map(|_| {
+            let (verifier, token) = (Arc::clone(&verifier), token.clone());
+            tokio::spawn(async move { verify(&verifier, &token).await })
+        })
+        .collect();
+    for request in requests {
+        assert_eq!(request.await.unwrap().unwrap(), ALICE);
+    }
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "verification waited {:?} on the fetch",
+        started.elapsed()
+    );
+    verifier.settle().await;
+    assert_eq!(server.hits(), 2, "one fetch for all ten requests");
+}
+
+#[tokio::test]
+async fn access_refuses_keys_past_their_age_and_grace_when_refetches_fail() {
+    let server = KeyServer::start(vec![jwk("k1", SIGNING_KEY)]).await;
+    let (max_age, grace) = (Duration::from_millis(150), Duration::from_millis(300));
+    let verifier = server
+        .verifier()
+        .with_cooldown(Duration::ZERO)
+        .with_key_age(max_age, grace);
+    let token = sign(SIGNING_KEY, &rs256("k1"), &claims(ALICE));
+    assert_eq!(verify(&verifier, &token).await.unwrap(), ALICE);
+
+    // Access is unreachable. Within the grace the cached key still works,
+    // and a refetch is attempted.
+    server.fail(true);
+    tokio::time::sleep(max_age + Duration::from_millis(30)).await;
+    assert_eq!(verify(&verifier, &token).await.unwrap(), ALICE);
+    verifier.settle().await;
+    assert_eq!(server.hits(), 2);
+
+    // Past the grace nothing is trusted, however valid the token.
+    tokio::time::sleep(grace).await;
+    assert!(matches!(
+        verify(&verifier, &token).await,
+        Err(Rejection::KeysStale)
+    ));
+
+    // Once Access answers again, tokens are accepted again.
+    server.fail(false);
+    assert_eq!(verify(&verifier, &token).await.unwrap(), ALICE);
+}
+
+#[test]
+fn a_mixed_case_team_builds_the_issuer_access_signs() {
+    for team in ["MyTeam", "MyTeam.CloudflareAccess.com"] {
+        let config = config(&format!(
+            "mode = \"cloudflare_access\"\nteam_domain = \"{team}\"\naudience = \"{AUDIENCE}\""
+        ));
+        let admin = AdminAuth::from_config(&config).unwrap().unwrap();
+        assert_eq!(
+            admin.verifier().unwrap().issuer(),
+            "https://myteam.cloudflareaccess.com",
+            "{team}"
+        );
+    }
+}
+
 /// A site in `cloudflare_access` mode whose verifier reads `server`.
 fn access_site(server: &KeyServer) -> Site {
     let config = config(&format!(
@@ -579,6 +727,35 @@ async fn trusted_header_is_accepted_from_a_trusted_proxy() {
 }
 
 #[tokio::test]
+async fn trusted_header_matches_an_ipv4_mapped_peer_against_either_family() {
+    // A dual-stack listener sees an IPv4 proxy as ::ffff:10.1.2.3.
+    let mapped = "[::ffff:10.1.2.3]:41000";
+    for (networks, admitted) in [
+        (r#"["10.0.0.0/8"]"#, true),
+        (r#"["::ffff:10.0.0.0/104"]"#, true),
+        (r#"["::/0"]"#, true),
+        (r#"["::ffff:11.0.0.0/104"]"#, false),
+        (r#"["11.0.0.0/8"]"#, false),
+    ] {
+        let config = config(&format!(
+            "mode = \"trusted_header\"\ntrusted_proxies = {networks}"
+        ));
+        let admin = AdminAuth::from_config(&config).unwrap();
+        let site = site(config, admin);
+        let request = from(mapped, Method::GET, "/admin/")
+            .header("x-forwarded-email", ALICE)
+            .body(Body::empty())
+            .unwrap();
+        let expected = if admitted {
+            StatusCode::OK
+        } else {
+            StatusCode::UNAUTHORIZED
+        };
+        assert_eq!(send(&site.router, request).await.0, expected, "{networks}");
+    }
+}
+
+#[tokio::test]
 async fn trusted_header_reads_only_the_configured_header() {
     let site = header_site("header = \"X-Auth-Request-Email\"");
     let request = from(PROXY, Method::GET, "/admin/")
@@ -685,7 +862,10 @@ async fn forms_from_another_origin_are_refused() {
     let token = csrf_token(&site, ALICE).await;
     for origin in [
         "https://evil.example",
-        "http://status.example.com.evil.example",
+        "https://status.example.com.evil.example",
+        // The right host over plain http, or on another port.
+        "http://status.example.com",
+        "https://status.example.com:8443",
         "null",
     ] {
         let (status, _) = send(
@@ -713,47 +893,139 @@ async fn forms_from_another_origin_are_refused() {
     assert_eq!(send(&site.router, request).await.0, StatusCode::FORBIDDEN);
     assert_eq!(incident_count(&site.state).await, 0);
 
-    // The same form from this site goes through.
-    let (status, response) = send(
-        &site.router,
-        post_form("/admin/incidents", ORIGIN, new_incident(&token)),
-    )
-    .await;
-    assert_eq!(status, StatusCode::SEE_OTHER);
-    assert_eq!(response.headers()[header::LOCATION], "/admin/incidents/1");
-}
-
-#[tokio::test]
-async fn forms_accept_the_token_htmx_sends_as_a_header() {
-    let site = header_site("");
-    let token = csrf_token(&site, ALICE).await;
-    let body = form(&[
-        ("title", "API errors"),
-        ("impact", "major"),
-        ("status", "investigating"),
-        ("message", "Looking into it."),
-    ]);
+    // An Origin naming the request's own Host is not enough: only
+    // `public_url` counts, so a proxy rewriting Host changes nothing.
     let request = from(PROXY, Method::POST, "/admin/incidents")
+        .header(header::HOST, "tocsin.internal:8080")
         .header("x-forwarded-email", ALICE)
-        .header(header::ORIGIN, ORIGIN)
-        .header("hx-request", "true")
-        .header("x-csrf-token", &token)
+        .header(header::ORIGIN, "http://tocsin.internal:8080")
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-        .body(Body::from(body))
+        .body(Body::from(new_incident(&token)))
         .unwrap();
-    assert_eq!(send(&site.router, request).await.0, StatusCode::SEE_OTHER);
+    assert_eq!(send(&site.router, request).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(incident_count(&site.state).await, 0);
+
+    // The same form from this site goes through, with or without the
+    // default port spelled out.
+    for (origin, id) in [(ORIGIN, 1), ("https://status.example.com:443", 2)] {
+        let (status, response) = send(
+            &site.router,
+            post_form("/admin/incidents", origin, new_incident(&token)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{origin}");
+        assert_eq!(
+            response.headers()[header::LOCATION],
+            format!("/admin/incidents/{id}").as_str()
+        );
+    }
 }
 
 #[tokio::test]
-async fn admin_pages_carry_the_csrf_token_for_htmx() {
+async fn admin_pages_are_plain_forms_with_no_script() {
     let site = header_site("");
     let request = from(PROXY, Method::GET, "/admin/")
         .header("x-forwarded-email", ALICE)
         .body(Body::empty())
         .unwrap();
     let page = text(send(&site.router, request).await.1).await;
-    let token = hidden_csrf(&page);
-    assert!(page.contains(&format!(r#"hx-headers='{{"X-CSRF-Token": "{token}"}}'"#)));
+    assert_ne!(hidden_csrf(&page), "");
+    // No boosted forms whose failures go unseen, and nothing to handle them.
+    assert!(!page.contains("hx-"), "{page}");
+    assert!(!page.contains("<script"), "{page}");
+}
+
+#[tokio::test]
+async fn get_on_a_form_path_answers_with_a_page_never_json() {
+    let site = header_site("");
+    for (uri, expected) in [
+        ("/admin/incidents", Some("/admin/")),
+        ("/admin/incidents/7/updates", Some("/admin/incidents/7")),
+        ("/admin/incidents/seven/updates", None),
+    ] {
+        let request = from(PROXY, Method::GET, uri)
+            .header("x-forwarded-email", ALICE)
+            .body(Body::empty())
+            .unwrap();
+        let (status, response) = send(&site.router, request).await;
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .map(|value| value.to_str().unwrap().to_owned());
+        if let Some(location) = expected {
+            assert_eq!(status, StatusCode::SEE_OTHER, "{uri}");
+            assert_eq!(response.headers()[header::LOCATION], location, "{uri}");
+        } else {
+            assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+            assert!(
+                content_type
+                    .as_deref()
+                    .is_some_and(|value| value.starts_with("text/html")),
+                "{uri}: {content_type:?}"
+            );
+        }
+        assert!(
+            !content_type.is_some_and(|value| value.contains("json")),
+            "{uri}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_resolve_form_starts_from_wording_for_the_kind() {
+    let site = header_site("");
+    for (kind, status, message) in [
+        (
+            IncidentKind::Incident,
+            "resolved",
+            "This incident has been resolved.",
+        ),
+        (
+            IncidentKind::Maintenance,
+            "completed",
+            "This maintenance has been completed.",
+        ),
+    ] {
+        let scheduled = (kind == IncidentKind::Maintenance).then_some((
+            Timestamp::from_millis(4_000_000_000_000),
+            Timestamp::from_millis(4_000_003_600_000),
+        ));
+        let incident = incidents::open(
+            &site.state,
+            NewIncident {
+                kind,
+                title: "Database upgrade".into(),
+                impact: Impact::Minor,
+                components: Vec::new(),
+                status: None,
+                message: "Planned.".into(),
+                scheduled_start: scheduled.map(|(start, _)| start),
+                scheduled_end: scheduled.map(|(_, end)| end),
+            },
+            Actor::person(ALICE),
+        )
+        .await
+        .unwrap();
+        let request = from(
+            PROXY,
+            Method::GET,
+            &format!("/admin/incidents/{}", incident.id),
+        )
+        .header("x-forwarded-email", ALICE)
+        .body(Body::empty())
+        .unwrap();
+        let page = text(send(&site.router, request).await.1).await;
+        assert!(
+            page.contains(&format!(
+                r#"<input type="hidden" name="status" value="{status}">"#
+            )),
+            "{kind:?}"
+        );
+        assert!(
+            page.contains(&format!("required>{message}</textarea>")),
+            "{kind:?}: {page}"
+        );
+    }
 }
 
 // --- Allow-lists ---------------------------------------------------------
@@ -944,7 +1216,6 @@ async fn pages_carry_security_headers() {
     assert_eq!(headers[header::CACHE_CONTROL], "no-store");
     let page = text(response).await;
     // Everything the page loads is its own, under a content hash.
-    assert!(page.contains(super::assets::url("htmx.min.js")));
     assert!(page.contains(super::assets::url("tocsin.css")));
     assert!(!page.contains("https://"));
     // Refusals are pages too, with the same headers.
@@ -1040,7 +1311,8 @@ impl Browser {
             .client
             .post(format!("{}{path}", self.base))
             .header("x-forwarded-email", ALICE)
-            .header(header::ORIGIN, &self.base)
+            // The browser is on the public site; the proxy forwards here.
+            .header(header::ORIGIN, ORIGIN)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(form(fields))
             .send()
@@ -1103,6 +1375,14 @@ async fn admin_creates_updates_and_resolves_over_http() {
     ];
     let (status, _, page) = browser.post("/admin/incidents/1/updates", &resolve).await;
     assert_eq!(status, StatusCode::OK);
+    // A reload of a form's address lands on a page, not the JSON API.
+    for (path, lands_on) in [
+        ("/admin/incidents", "/admin/"),
+        ("/admin/incidents/1/updates", "/admin/incidents/1"),
+    ] {
+        let (status, landed, _) = browser.get(path).await;
+        assert_eq!((status, landed.as_str()), (StatusCode::OK, lands_on));
+    }
     assert!(
         !page.contains("<h2>Resolve</h2>"),
         "a resolved incident offers no resolve form"

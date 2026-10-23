@@ -250,10 +250,15 @@ impl Cidr {
 
     /// Whether `address` is inside the network. An IPv4 address mapped
     /// into IPv6 (`::ffff:10.0.0.1`), as a dual-stack socket reports an
-    /// IPv4 peer, is compared as the IPv4 address it is.
+    /// IPv4 peer, matches either as the IPv4 address it is (`10.0.0.0/8`)
+    /// or as itself (`::ffff:10.0.0.0/104`, `::/0`).
     #[must_use]
     pub fn contains(&self, address: IpAddr) -> bool {
-        let address = address.to_canonical();
+        self.contains_exactly(address) || self.contains_exactly(address.to_canonical())
+    }
+
+    /// Whether `address`, in its own family, is inside the network.
+    fn contains_exactly(&self, address: IpAddr) -> bool {
         let same_family = matches!(
             (self.network, address),
             (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_))
@@ -592,6 +597,17 @@ mod tests {
         let ula = Cidr::parse("fd00::/8").unwrap();
         assert!(ula.contains("fd12::1".parse().unwrap()));
         assert!(!ula.contains("10.0.0.1".parse().unwrap()));
+        // A mapped peer also matches an IPv6 network written for it.
+        let mapped: IpAddr = "::ffff:10.1.2.3".parse().unwrap();
+        assert!(Cidr::parse("::/0").unwrap().contains(mapped));
+        assert!(Cidr::parse("::ffff:10.0.0.0/104").unwrap().contains(mapped));
+        assert!(!Cidr::parse("::ffff:11.0.0.0/104").unwrap().contains(mapped));
+        // A plain IPv4 peer is still matched by IPv4 entries only.
+        assert!(
+            !Cidr::parse("::ffff:10.0.0.0/104")
+                .unwrap()
+                .contains("10.1.2.3".parse().unwrap())
+        );
         let error = Cidr::parse("10.0.0.1/8").unwrap_err();
         assert!(error.contains("`10.0.0.0/8`"), "{error}");
         for bad in [

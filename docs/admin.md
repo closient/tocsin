@@ -27,7 +27,8 @@ The keys are in [config.md](config.md#serverauth).
 1. In Zero Trust, add a self-hosted application for the status host with
    the path `admin`, and a policy for the people who run incidents.
 2. Copy the application's **Application Audience (AUD) Tag**.
-3. Configure tocsin:
+3. Configure tocsin. `public_url` is required whenever `[server.auth]` is
+   on: forms are accepted only from that origin.
 
    ```toml
    [server]
@@ -42,10 +43,18 @@ The keys are in [config.md](config.md#serverauth).
 
 tocsin fetches the keys from
 `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs` on the first
-request, again every hour, and when a token names a key it does not have
-(at most once a minute). Until the first fetch succeeds every admin
-request is refused; after that, a failed fetch keeps the last keys. Either
-way the server log says why.
+request, again once they are an hour old, and when a token names a key it
+does not have (at most once a minute). One background fetch runs at a
+time and no request waits on a refresh: while it runs, requests keep using
+the keys already held.
+
+- Until the first fetch succeeds every admin request is refused, and
+  fetches back off from one second, doubling to once a minute.
+- After that, a failed fetch keeps the last keys for one more hour. Keys
+  older than two hours are not trusted at all: every admin request is
+  refused, and each one logs an error, until a fetch succeeds.
+
+Either way the server log says why.
 
 The `Cf-Access-Authenticated-User-Email` header and the `CF_Authorization`
 cookie are never read: anything that reaches tocsin without going through
@@ -54,6 +63,9 @@ Access, such as a request to the origin's address, can send them.
 ### A trusted header
 
 ```toml
+[server]
+public_url = "https://status.example.com"
+
 [server.auth]
 mode = "trusted_header"
 header = "X-Forwarded-Email"          # the default
@@ -63,7 +75,9 @@ allowed_emails = ["alice@example.com"]
 
 The proxy must strip the header from incoming requests and set it itself.
 tocsin checks the TCP peer, never `X-Forwarded-For`, `X-Real-IP` or
-`Forwarded`, so only the proxy's own connections count. List the narrowest
+`Forwarded`, so only the proxy's own connections count. On a dual-stack
+listener an IPv4 proxy connects as `::ffff:10.0.0.5`; it matches either
+`10.0.0.5/32` or `::ffff:10.0.0.5/128`. List the narrowest
 networks that hold the proxy: anything else that can connect from inside
 them can name any person.
 
@@ -74,10 +88,11 @@ them can name any person.
 | A request that skipped the proxy names a person. | Access mode: only a token signed by the team's keys counts; the email header and cookie are ignored. Header mode: the header is ignored unless the socket peer is in `trusted_proxies`. |
 | A forged or altered Access token. | RS256 only; `none`, HMAC and other algorithms are refused before any key is looked up. The signature, `iss` (the team), `aud` (this application), `exp` and `nbf` are all checked, with 30 seconds of clock leeway. |
 | A token minted for another Access application of the same team. | `aud` must contain the configured audience. |
-| A flood of tokens naming unknown keys. | Keys are refetched at most once a minute. |
+| A flood of tokens naming unknown keys. | Keys are refetched at most once a minute, by one task at a time. |
+| Access unreachable, so the keys cannot be refreshed. | The last keys are kept for an hour past their age, then refused: a key Cloudflare has revoked stops working within two hours. |
 | Someone the proxy admits who should not run incidents. | `allowed_emails` / `allowed_domains`: 403. |
-| A page on another site submits a form with the person's session. | Two checks, both required: `Origin` (or `Referer`) must be this site and `Sec-Fetch-Site`, when sent, `same-origin`; and a token bound to the person, `HMAC-SHA256` with a per-process key, valid for 12 hours, sent as the `csrf` field or the `X-CSRF-Token` header. |
-| Script in an incident's title or message. | askama escapes every value; messages are rendered by pulldown-cmark and cleaned by ammonia, and only that output is marked safe. The Content-Security-Policy allows only this site's own script and stylesheet, with no inline code. |
+| A page on another site submits a form with the person's session. | Two checks, both required: `Origin` (or `Referer`) must be the origin of `[server] public_url` (scheme, host and port; the request's `Host` is never consulted) and `Sec-Fetch-Site`, when sent, `same-origin`; and a token bound to the person, `HMAC-SHA256` with a per-process key, valid for 12 hours, sent as the `csrf` form field. |
+| Script in an incident's title or message. | askama escapes every value; messages are rendered by pulldown-cmark and cleaned by ammonia, and only that output is marked safe. The Content-Security-Policy allows only this site's own script and stylesheet, with no inline code; admin pages load no script at all. |
 | Framing, sniffing, caching of admin pages. | `X-Frame-Options: DENY`, `frame-ancestors 'none'`, `nosniff`, `Cache-Control: no-store`. |
 
 Not covered: anyone who can reach tocsin from inside `trusted_proxies`, or
@@ -107,7 +122,8 @@ page and release pages will follow the same pattern. The pieces live in
 - **Assets** live in `crates/tocsin/static/`. Add the file to `FILES` in
   `assets.rs` and link it with `assets::url("name")`; it is served at
   `/static/<hash>/<name>` and cached for a year. No page loads anything
-  from another origin: htmx is vendored, and the CSP forbids the rest.
+  from another origin: htmx is vendored for the status page's live
+  updates, and the CSP forbids the rest.
 - **Identity**: a handler that needs a signed-in person takes
   `identity::Admin`; one that writes takes `identity::AdminForm`, which
   adds the Origin and CSRF checks and parses the form:
@@ -119,8 +135,12 @@ page and release pages will follow the same pattern. The pieces live in
 
   Both answer 404 while `[server.auth]` is off, 401 to someone the proxy
   did not vouch for and 403 to someone not on the allow-lists. A form
-  includes `<input type="hidden" name="csrf" value="{{ csrf }}">`; htmx
-  requests carry the token from `hx-headers` on `<body>`.
+  includes `<input type="hidden" name="csrf" value="{{ csrf }}">`, from
+  `admin.csrf_token()`.
+- **Forms are plain HTML forms**, without htmx: a write answers `303 See
+  Other` to the page it changed, or re-renders the form with `422` and the
+  errors. Give every POST path a GET that redirects to its page, so a
+  reload of the address bar lands on a page.
 - **Routes** go in the page's module and are merged in `web::router`,
   which adds the security headers to every response.
 - **Tests** go in `web/tests.rs`, driving the router with `tower::oneshot`

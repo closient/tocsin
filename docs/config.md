@@ -78,7 +78,7 @@ Fields marked **may be secret** take either a value written in the file or an en
 | Key | Type | Default | |
 |-----|------|---------|-|
 | `listen` | `"ip:port"` | `"127.0.0.1:8080"` | Address the web server listens on: an IP address, not a hostname, such as `"0.0.0.0:8080"` or `"[::]:8080"`. |
-| `public_url` | URL | none | Where people reach the status page; used in links and emails. `http://` or `https://`. |
+| `public_url` | URL | none | Where people reach the status page; used in links and emails. `http://` or `https://`. Required when `[server.auth]` is on. |
 | `node_id` | string | the hostname | This node's name in every result it records. No whitespace. |
 | `data_dir` | path | none | Folder for the SQLite database. A relative path is relative to the config folder. `tocsin serve --data` overrides it; one of the two is required. |
 | `retention_days` | integer | `90` | Whole UTC days of raw check results kept before today; daily rollups are kept forever. At least 1. See [storage.md](storage.md#retention). |
@@ -119,9 +119,11 @@ error, so a forgotten `mode` line cannot leave the page silently off.
 
 `cloudflare_access` checks the token Access signs, never the
 `Cf-Access-Authenticated-User-Email` header: anything that reaches tocsin
-without passing through Access could send that header. Set
-`[server] public_url` when the proxy rewrites `Host`; forms are accepted
-only from that origin.
+without passing through Access could send that header.
+
+Any `mode` other than `none` requires `[server] public_url`: the admin
+forms are accepted only from its origin (scheme, host and port), never by
+comparing against the request's `Host`.
 
 ## `[page]`
 

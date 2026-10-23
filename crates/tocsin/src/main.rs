@@ -18,6 +18,7 @@ mod export;
 mod http;
 mod incident;
 mod lock;
+mod net;
 mod output;
 mod probe;
 mod serve;

@@ -862,6 +862,9 @@ mode = "cloudflare_access"
 team_domain = "acme"
 audience = "4714c1358e65fe4b408ad6d432a5f878f08194bdb4752441fd56faefa9b2b6f2"
 allowed_domains = ["example.com"]
+
+[server]
+public_url = "https://status.example.com"
 "#,
     )])
     .unwrap();
@@ -875,6 +878,9 @@ allowed_domains = ["example.com"]
 mode = "trusted_header"
 trusted_proxies = ["127.0.0.1", "fd00::/8"]
 allowed_emails = ["alice@example.com"]
+
+[server]
+public_url = "https://status.example.com"
 "#,
     )])
     .unwrap();
@@ -893,17 +899,17 @@ fn admin_auth_needs_the_settings_its_mode_relies_on() {
     assert_eq!(
         errors(&[(
             "tocsin.toml",
-            "[server]\nlisten = \"127.0.0.1:8080\"\n\n[server.auth]\nmode = \"cloudflare_access\"\n",
+            "[server]\nlisten = \"127.0.0.1:8080\"\npublic_url = \"https://status.example.com\"\n\n[server.auth]\nmode = \"cloudflare_access\"\n",
         )]),
         [
-            "tocsin.toml:4:1: `mode = \"cloudflare_access\"` needs `team_domain`",
-            "tocsin.toml:4:1: `mode = \"cloudflare_access\"` needs `audience`",
+            "tocsin.toml:5:1: `mode = \"cloudflare_access\"` needs `team_domain`",
+            "tocsin.toml:5:1: `mode = \"cloudflare_access\"` needs `audience`",
         ]
     );
     assert_eq!(
         errors(&[(
             "tocsin.toml",
-            "[server.auth]\nmode = \"trusted_header\"\ntrusted_proxies = []\n",
+            "[server.auth]\nmode = \"trusted_header\"\ntrusted_proxies = []\n\n[server]\npublic_url = \"https://status.example.com\"\n",
         )]),
         [
             "tocsin.toml:1:1: `mode = \"trusted_header\"` needs `trusted_proxies`, the networks your proxy connects from"
@@ -923,6 +929,9 @@ audience = "aud"
 trusted_proxies = ["10.0.0.0/8"]
 allowed_emails = ["Alice <alice@example.com>"]
 allowed_domains = ["@example.com"]
+
+[server]
+public_url = "https://status.example.com"
 "#,
         )]),
         [
@@ -946,6 +955,9 @@ allowed_domains = ["@example.com"]
 mode = "trusted_header"
 header = "Cf-Access-Authenticated-User-Email"
 trusted_proxies = ["10.0.0.1/8"]
+
+[server]
+public_url = "https://status.example.com"
 "#,
         )]),
         [
@@ -960,8 +972,40 @@ trusted_proxies = ["10.0.0.1/8"]
 mode = "trusted_header"
 header = "Cf-Access-Authenticated-User-Email"
 trusted_proxies = ["10.0.0.0/8"]
+
+[server]
+public_url = "https://status.example.com"
 "#,
         )]),
         ["tocsin.toml:3:10: `Cf-Access-Authenticated-User-Email` proves nothing on its own"]
     );
+}
+
+#[test]
+fn an_admin_page_needs_the_public_url_its_forms_are_checked_against() {
+    assert_eq!(
+        errors(&[(
+            "tocsin.toml",
+            "[server.auth]\nmode = \"trusted_header\"\ntrusted_proxies = [\"10.0.0.0/8\"]\n",
+        )]),
+        [
+            "tocsin.toml:2:8: the admin page needs `[server] public_url`: its forms are accepted only from that origin"
+        ]
+    );
+}
+
+#[test]
+fn a_team_domain_is_kept_in_lowercase() {
+    // Access issues `iss` in lowercase; a mixed-case team would never match.
+    for team in ["MyTeam", "MyTeam.CloudflareAccess.com"] {
+        let config = run(&[(
+            "tocsin.toml",
+            &format!(
+                "[server.auth]\nmode = \"cloudflare_access\"\nteam_domain = \"{team}\"\naudience = \"aud\"\n\n[server]\npublic_url = \"https://status.example.com\"\n"
+            ),
+        )])
+        .unwrap();
+        let domain = config.server.auth.unwrap().team_domain.unwrap();
+        assert_eq!(domain, team.to_ascii_lowercase(), "{team}");
+    }
 }

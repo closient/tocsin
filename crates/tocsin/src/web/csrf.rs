@@ -4,14 +4,14 @@
 //!
 //! Two independent checks, both required:
 //! - **Origin**: the browser's `Origin` (or, failing that, `Referer`) must
-//!   be this site, and `Sec-Fetch-Site`, when sent, must be `same-origin`.
+//!   be `[server] public_url`'s origin, and `Sec-Fetch-Site`, when sent,
+//!   must be `same-origin`.
 //! - **Token**: a synchronizer token bound to the signed-in identity,
 //!   `<expiry>.<HMAC-SHA256(key, identity, expiry)>`, sent as the `csrf`
-//!   form field or the `X-CSRF-Token` header (htmx sends the header from
-//!   `hx-headers` on `<body>`). The key is random per process, so tokens
-//!   die with a restart; the page reloads with a fresh one.
+//!   form field. The key is random per process, so tokens die with a
+//!   restart; the page reloads with a fresh one.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use axum::http::{HeaderMap, header};
 use base64::Engine;
@@ -19,10 +19,10 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ring::hmac;
 use ring::rand::{SecureRandom, SystemRandom};
 
+use crate::net::since_epoch;
+
 /// The form field carrying the token.
 pub const FIELD: &str = "csrf";
-/// The header carrying the token on htmx requests.
-pub const HEADER: &str = "x-csrf-token";
 
 /// How long a token is good for: a working day with a page left open.
 const LIFETIME: Duration = Duration::from_hours(12);
@@ -46,7 +46,7 @@ impl Key {
 
     /// A token for `identity`, good until [`LIFETIME`] after `now`.
     pub fn issue(&self, identity: &str, now: SystemTime) -> String {
-        let expiry = seconds(now) + LIFETIME.as_secs();
+        let expiry = (since_epoch(now) + LIFETIME).as_secs();
         let tag = hmac::sign(&self.0, &message(identity, expiry));
         format!("{expiry}.{}", URL_SAFE_NO_PAD.encode(tag.as_ref()))
     }
@@ -63,7 +63,8 @@ impl Key {
         let (Ok(expiry), Ok(tag)) = (expiry.parse::<u64>(), URL_SAFE_NO_PAD.decode(tag)) else {
             return false;
         };
-        expiry > seconds(now) && hmac::verify(&self.0, &message(identity, expiry), &tag).is_ok()
+        expiry > since_epoch(now).as_secs()
+            && hmac::verify(&self.0, &message(identity, expiry), &tag).is_ok()
     }
 }
 
@@ -73,21 +74,18 @@ fn message(identity: &str, expiry: u64) -> Vec<u8> {
     format!("tocsin-csrf-v1\0{identity}\0{expiry}").into_bytes()
 }
 
-fn seconds(now: SystemTime) -> u64 {
-    now.duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
-}
-
 /// Checks that a write came from a page on this site.
 ///
-/// `public_origin` is `[server] public_url`'s origin; without it, the
-/// request's own `Host` is the site, which is right unless the proxy
-/// rewrites `Host` (then set `public_url`).
+/// `public_origin` is `[server] public_url`'s origin, which the loader
+/// requires whenever the admin page is on. The claimed origin must match it
+/// in scheme, host and port: `http://` never stands in for `https://`, and
+/// an explicit default port (`:443`) is the same origin as none. The
+/// request's `Host` is never consulted, since a proxy may rewrite it.
 ///
 /// # Errors
 ///
 /// Why the request looks cross-site, for the log.
-pub fn same_origin(headers: &HeaderMap, public_origin: Option<&str>) -> Result<(), &'static str> {
+pub fn same_origin(headers: &HeaderMap, public_origin: &str) -> Result<(), &'static str> {
     if let Some(site) = headers.get("sec-fetch-site")
         && site.as_bytes() != b"same-origin"
     {
@@ -102,24 +100,7 @@ pub fn same_origin(headers: &HeaderMap, public_origin: Option<&str>) -> Result<(
     };
     // `null` and anything else that is not a URL fails to parse.
     let claimed = url::Url::parse(claimed).map_err(|_| "Origin is not a URL")?;
-    if !matches!(claimed.scheme(), "http" | "https") {
-        return Err("Origin is not http or https");
-    }
-    let matches = if let Some(expected) = public_origin {
-        claimed.origin().ascii_serialization() == expected
-    } else {
-        let host = headers
-            .get(header::HOST)
-            .and_then(|host| host.to_str().ok())
-            .ok_or("no Host")?;
-        let authority = match (claimed.host_str(), claimed.port()) {
-            (Some(name), Some(port)) => format!("{name}:{port}"),
-            (Some(name), None) => name.to_owned(),
-            (None, _) => return Err("Origin has no host"),
-        };
-        authority.eq_ignore_ascii_case(host)
-    };
-    if matches {
+    if claimed.origin().ascii_serialization() == public_origin {
         Ok(())
     } else {
         Err("Origin is another site")

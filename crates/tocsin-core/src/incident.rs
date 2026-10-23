@@ -332,7 +332,8 @@ pub struct NewIncident {
     /// Defaults to `incident`.
     #[serde(default = "default_kind")]
     pub kind: IncidentKind,
-    /// One line, not empty.
+    /// One line, not empty, at most 200 characters.
+    #[schema(max_length = 200)]
     pub title: String,
     /// Defaults to `none`.
     #[serde(default = "default_impact")]
@@ -378,8 +379,9 @@ pub struct NewUpdate {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IncidentEdit {
-    /// A new title, not empty.
+    /// A new title, not empty, at most 200 characters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(max_length = 200)]
     pub title: Option<String>,
     /// A new impact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -470,11 +472,23 @@ fn check_text(path: &str, text: &str, errors: &mut Vec<FieldError>) {
     }
 }
 
+/// The longest title, in characters. The `max_length` on each title field's
+/// schema repeats it for the OpenAPI document.
+pub const MAX_TITLE_LENGTH: usize = 200;
+
 /// A title is one line: besides being non-empty, it holds no control
 /// characters (CR, LF, tab, ...) and no Unicode line or paragraph
-/// separator, any of which would break the line it is printed on.
+/// separator, any of which would break the line it is printed on. It is at
+/// most [`MAX_TITLE_LENGTH`] characters.
 fn check_title(path: &str, title: &str, errors: &mut Vec<FieldError>) {
     check_text(path, title, errors);
+    let length = title.chars().count();
+    if length > MAX_TITLE_LENGTH {
+        errors.push(FieldError::new(
+            path,
+            format!("must be at most {MAX_TITLE_LENGTH} characters; this is {length}"),
+        ));
+    }
     if let Some(found) = title
         .chars()
         .find(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
@@ -824,6 +838,29 @@ mod tests {
             ..new_incident()
         };
         assert_eq!(unicode.validate(&known), Ok(()));
+    }
+
+    #[test]
+    fn a_title_is_at_most_200_characters_on_create_and_on_edit() {
+        // Characters, not bytes: 200 two-byte characters fit.
+        let longest = NewIncident {
+            title: "é".repeat(MAX_TITLE_LENGTH),
+            ..new_incident()
+        };
+        assert_eq!(longest.validate(&known), Ok(()));
+        let long = "x".repeat(MAX_TITLE_LENGTH + 1);
+        let incident = NewIncident {
+            title: long.clone(),
+            ..new_incident()
+        };
+        let errors = incident.validate(&known).unwrap_err();
+        assert_eq!(paths(errors.clone()), ["title"]);
+        assert!(errors[0].message.contains("at most 200"), "{errors:?}");
+        let edit = IncidentEdit {
+            title: Some(long),
+            ..IncidentEdit::default()
+        };
+        assert_eq!(paths(edit.validate(&known).unwrap_err()), ["title"]);
     }
 
     #[test]

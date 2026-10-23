@@ -91,6 +91,7 @@ fn api() -> Api {
         admin: None,
         live: Arc::new(tocsin_engine::Snapshot::default()),
         heartbeats: HeartbeatHandle::default(),
+        config_status: crate::reload::steady_status(),
     };
     Api {
         _dir: dir,
@@ -992,4 +993,22 @@ async fn a_ping_that_cannot_be_stored_is_500_and_changes_nothing() {
         []
     );
     engine.shutdown().await;
+}
+
+/// A failed reload's errors name files and environment variables, so the
+/// status needs a `status:read` token; its 200 is the reload tests'.
+#[tokio::test]
+async fn the_config_status_needs_a_status_read_token() {
+    let api = api();
+    let (status, error, headers) = api
+        .send(Method::GET, "/api/v1/config/status", None, None)
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error["error"], "unauthorized");
+    assert_eq!(headers[header::WWW_AUTHENTICATE], "Bearer");
+    let (status, error, _) = api
+        .send(Method::GET, "/api/v1/config/status", Some(ONCALL), None)
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(!error.to_string().contains("loaded_at"), "{error}");
 }

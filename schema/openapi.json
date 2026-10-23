@@ -212,6 +212,52 @@
         ]
       }
     },
+    "/api/v1/config/status": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "summary": "When the running configuration was loaded, and whether the last reload\nput its configuration in place. After a failed one, `ok` is false,\n`errors` says why, and the configuration from `loaded_at` is still\nrunning.",
+        "operationId": "get_config_status",
+        "responses": {
+          "200": {
+            "description": "The last reload's outcome",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A token without the `status:read` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/heartbeat/{id}": {
       "get": {
         "tags": [
@@ -1618,6 +1664,37 @@
           "unknown"
         ]
       },
+      "ConfigStatus": {
+        "type": "object",
+        "description": "How the configuration last reloaded, as `GET /api/v1/config/status`\nreturns it.",
+        "required": [
+          "loaded_at",
+          "last_attempt_at",
+          "ok",
+          "errors"
+        ],
+        "properties": {
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Diagnostic"
+            },
+            "description": "Why the last attempt failed, each with its file, line and column\nwhen it has one; empty when it did not fail."
+          },
+          "last_attempt_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When a reload was last tried, whether or not it took; the startup\nread until the first."
+          },
+          "loaded_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When the running configuration was read: at startup, or by the\nlast reload that put its configuration in place."
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "Whether the last attempt put its configuration in place. False\nmeans the configuration from `loaded_at` is still running."
+          }
+        }
+      },
       "DeployStamp": {
         "type": "object",
         "description": "`POST /api/v1/releases/{project}/{version}/deployed`: record that a\nversion was deployed. The body may be empty.",
@@ -1644,6 +1721,56 @@
           }
         },
         "additionalProperties": false
+      },
+      "Diagnostic": {
+        "type": "object",
+        "description": "One configuration error, located as precisely as the problem allows.\n\nSerialized with every key present (`null` when unknown), so a reader can\nrely on the shape: `{file, line, column, path, message, hint}`.",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "column": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "1-based column, counted in characters.",
+            "minimum": 0
+          },
+          "file": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The file, as the loader named it; absent for a problem with the\nfolder as a whole, such as a missing setting no file mentions."
+          },
+          "hint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How to fix it, when there is something more to say."
+          },
+          "line": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "1-based line.",
+            "minimum": 0
+          },
+          "message": {
+            "type": "string",
+            "description": "What is wrong."
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where in the file's data the problem is, such as `check[2].timeout`."
+          }
+        }
       },
       "ErrorBody": {
         "type": "object",
@@ -2636,6 +2763,10 @@
     {
       "name": "heartbeats",
       "description": "Pings from scheduled jobs"
+    },
+    {
+      "name": "config",
+      "description": "Whether the configuration reloaded"
     }
   ]
 }

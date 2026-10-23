@@ -26,6 +26,7 @@ mod output;
 mod probe;
 mod query;
 mod release;
+mod reload;
 mod serve;
 mod web;
 
@@ -69,6 +70,7 @@ fn run(cli: Cli) -> Result<Report, Failure> {
             ConfigCommand::Check { config } => config::check(&config),
             ConfigCommand::Show { config } => config::show(&config),
             ConfigCommand::Schema => Ok(config::schema()),
+            ConfigCommand::Status { server } => config::status(&server),
         },
         Some(Command::Db { command }) => db::run(command),
         Some(Command::Probe { command }) => match command {

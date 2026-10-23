@@ -11,7 +11,7 @@ use utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};
 use utoipa::{Modify, OpenApi};
 use utoipa_axum::router::OpenApiRouter;
 
-use super::{AppState, heartbeats, history, incidents, releases, status, timeline};
+use super::{AppState, config_status, heartbeats, history, incidents, releases, status, timeline};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -31,6 +31,7 @@ use super::{AppState, heartbeats, history, incidents, releases, status, timeline
         (name = releases::TAG, description = "The release log and deploy stamps"),
         (name = timeline::TAG, description = "Outages, incidents and deploys in one stream"),
         (name = heartbeats::TAG, description = "Pings from scheduled jobs"),
+        (name = config_status::TAG, description = "Whether the configuration reloaded"),
     ),
     modifiers(&BearerAuth),
 )]
@@ -57,6 +58,7 @@ pub fn api() -> OpenApiRouter<AppState> {
         .merge(releases::router())
         .merge(timeline::router())
         .merge(heartbeats::router())
+        .merge(config_status::router())
 }
 
 /// The OpenAPI document.

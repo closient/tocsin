@@ -9,14 +9,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use tocsin_alert::{AlertMetrics, Alerter, AlertingHistory, HTTP_TIMEOUT, Router, WorkerSettings};
+use tocsin_alert::{
+    AlertMetrics, Alerter, AlertingHistory, HTTP_TIMEOUT, Notifiers, Router, WorkerSettings,
+};
 use tocsin_core::config::Config;
 use tocsin_engine::ports::{Clock, ProbeRunner, SystemClock};
-use tocsin_engine::{Engine, HeartbeatHandle, Parts, Plan};
+use tocsin_engine::{Engine, HeartbeatHandle, Parts, Plan, StatusHandle};
 use tocsin_probe::ProbeContext;
 use tocsin_store::{DB_FILE, Retention, Store};
 use tokio::signal::unix::{Signal, SignalKind, signal};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
@@ -26,6 +28,7 @@ use crate::http::{self, AppState};
 use crate::lock;
 use crate::metrics::Metrics;
 use crate::output::{Failure, Report};
+use crate::reload::{ConfigStatus, LiveRouter, Reloader, Reloading};
 use crate::web::identity::AdminAuth;
 
 pub fn run(config: &Path, data: Option<&Path>) -> Result<Report, Failure> {
@@ -83,6 +86,18 @@ pub fn run(config: &Path, data: Option<&Path>) -> Result<Report, Failure> {
     })
 }
 
+/// Opens the database in `data`.
+fn open_store(data: &Path) -> Result<Arc<Store>, Failure> {
+    let path = data.join(DB_FILE);
+    let store = Store::open(&path).map_err(|error| {
+        Failure::new(
+            Exit::Runtime,
+            format!("cannot open database {}: {error}", path.display()),
+        )
+    })?;
+    Ok(Arc::new(store))
+}
+
 /// Serves and runs the checks until a shutdown signal, then stops the
 /// checks, drains requests and closes the store.
 /// Resolves with the signal's name, or fails if the server ends first.
@@ -94,6 +109,7 @@ async fn serve(
     retention_days: u32,
 ) -> Result<&'static str, Failure> {
     let shutdown = Shutdown::install()?;
+    let hangup = install(SignalKind::hangup())?;
     // Before anything that holds the store starts, so failing here leaves
     // nothing to stop.
     let admin = AdminAuth::from_config(config)
@@ -104,14 +120,7 @@ async fn serve(
             )
         })?
         .map(Arc::new);
-    let path = data.join(DB_FILE);
-    let store = Store::open(&path).map_err(|error| {
-        Failure::new(
-            Exit::Runtime,
-            format!("cannot open database {}: {error}", path.display()),
-        )
-    })?;
-    let store = Arc::new(store);
+    let store = open_store(data)?;
     let listen = config.server.listen;
     let listener = tokio::net::TcpListener::bind(listen)
         .await
@@ -138,21 +147,39 @@ async fn serve(
             return Err(failure);
         }
     };
-    let app = http::router(AppState {
+    let (status, config_status) = watch::channel(ConfigStatus::loaded(http::now()));
+    let state = AppState {
         store: Arc::clone(&store),
         config: Arc::clone(config),
         events,
         admin,
-        live: Arc::new(monitor.engine.status_handle()),
+        live: Arc::new(monitor.status_handle()),
         heartbeats: monitor.heartbeats(),
-    });
+        config_status,
+    };
+    let app = LiveRouter::new(http::router(state.clone()));
+    let service = app.service();
+    // Watching before the ready line, so a change made after it is seen.
+    let reloader = Reloader::start(
+        Reloading {
+            folder: config_folder.to_owned(),
+            data: data.to_owned(),
+            variables: Arc::new(|name| std::env::var(name).ok()),
+            state,
+            app,
+            status,
+            metrics: metrics.config.clone(),
+        },
+        monitor,
+        Some(hangup),
+    );
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(async move {
         // Peer addresses let `trusted_header` auth check where a request
         // came from.
         axum::serve(
             listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
+            service.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(async {
             let _ = stopped.await;
@@ -169,14 +196,15 @@ async fn serve(
         files,
         checks = config.checks.len(),
         retention_days,
-        "tocsin serving; waiting for SIGINT or SIGTERM"
+        "tocsin serving; SIGHUP or a change to the configuration reloads it; \
+         waiting for SIGINT or SIGTERM"
     );
     let (outcome, _closed) = supervise(
         shutdown.wait(),
         stop,
         server,
         maintenance,
-        Some(monitor),
+        Some(reloader),
         store,
     )
     .await;
@@ -189,6 +217,22 @@ pub(crate) struct Monitor {
     engine: Engine,
     wake: JoinHandle<()>,
     alerter: Alerter,
+    history: Arc<AlertingHistory>,
+    /// What alerting is configured with now, to go back to when a reload
+    /// cannot finish.
+    notifiers: Notifiers,
+    router: Arc<Router>,
+    client: reqwest::Client,
+    store: Arc<Store>,
+}
+
+/// Why [`Monitor::reload`] failed.
+#[derive(Debug)]
+pub(crate) enum ReloadError {
+    /// Nothing changed: the old configuration is still running.
+    Rejected(Failure),
+    /// The new configuration is running, but a step after it failed.
+    Unfinished(Failure),
 }
 
 impl Monitor {
@@ -227,20 +271,28 @@ impl Monitor {
         let notifiers = tocsin_alert::build_all(config, &client).map_err(|error| {
             Failure::new(Exit::Runtime, format!("cannot set up alerting: {error}"))
         })?;
+        // Alerts left open on a notifier removed while tocsin was stopped
+        // would otherwise stay open for good: nothing can resolve them.
+        end_alerts_without_notifier(store, &notifiers).await?;
         let router = Arc::new(Router::new(config));
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let alerter = Alerter::start(
             Arc::clone(store),
-            notifiers,
+            notifiers.clone(),
             Arc::clone(&router),
             Arc::clone(&clock),
             metrics.clone(),
             WorkerSettings::default(),
         );
-        let history = AlertingHistory::new(Arc::clone(store), router, alerter.waker(), clock);
+        let history = Arc::new(AlertingHistory::new(
+            Arc::clone(store),
+            Arc::clone(&router),
+            alerter.waker(),
+            clock,
+        ));
         let parts = Parts {
             runner: Arc::new(ProbeRunner::new(probe_context(config))),
-            history: Arc::new(history),
+            history: Arc::clone(&history) as _,
             notices: Arc::clone(store) as _,
             sink: Arc::new(events.clone()),
             clock: Arc::new(SystemClock),
@@ -266,12 +318,78 @@ impl Monitor {
             engine,
             wake,
             alerter,
+            history,
+            notifiers,
+            router,
+            client,
+            store: Arc::clone(store),
         })
+    }
+
+    /// Runs `config` in place of the running configuration: its checks,
+    /// heartbeats and components, notifiers and routes. `config.server` is
+    /// not read; the engine keeps the node and concurrency it started with.
+    ///
+    /// Alerting changes first, so an outage the new checks open is routed
+    /// by the new routes to notifiers the worker has. Alerts already open
+    /// keep the notifiers they fired on; those on a notifier no longer
+    /// configured are ended, since nothing can resolve them.
+    ///
+    /// # Errors
+    ///
+    /// [`ReloadError::Rejected`], with the old configuration still
+    /// running, if the checks cannot be scheduled, a notifier cannot be
+    /// built, or the engine cannot start the new checks.
+    /// [`ReloadError::Unfinished`] if the open alerts on removed notifiers
+    /// cannot be ended; the next reload or start tries again.
+    pub(crate) async fn reload(&mut self, config: &Config) -> Result<(), ReloadError> {
+        let plan = Plan::from_config(config).map_err(|error| {
+            ReloadError::Rejected(Failure::new(
+                Exit::InvalidInput,
+                format!("cannot schedule the checks: {error}"),
+            ))
+        })?;
+        let notifiers = tocsin_alert::build_all(config, &self.client).map_err(|error| {
+            ReloadError::Rejected(Failure::new(
+                Exit::InvalidInput,
+                format!("cannot set up alerting: {error}"),
+            ))
+        })?;
+        let router = Arc::new(Router::new(config));
+        self.alerter
+            .reconfigure(notifiers.clone(), Arc::clone(&router));
+        self.history.set_router(Arc::clone(&router));
+        if let Err(error) = self.engine.reconcile(&plan).await {
+            self.alerter
+                .reconfigure(self.notifiers.clone(), Arc::clone(&self.router));
+            self.history.set_router(Arc::clone(&self.router));
+            return Err(ReloadError::Rejected(Failure::new(
+                Exit::Runtime,
+                format!("cannot start the new checks: {error}"),
+            )));
+        }
+        self.notifiers = notifiers;
+        self.router = router;
+        end_alerts_without_notifier(&self.store, &self.notifiers)
+            .await
+            .map_err(ReloadError::Unfinished)
     }
 
     /// Takes heartbeat pings to the engine.
     pub(crate) fn heartbeats(&self) -> HeartbeatHandle {
         self.engine.heartbeats()
+    }
+
+    /// Reads the engine's current state for the read API. A reload keeps
+    /// the same engine, so the handle stays good across reloads.
+    pub(crate) fn status_handle(&self) -> StatusHandle {
+        self.engine.status_handle()
+    }
+
+    /// The checks and heartbeats running now.
+    #[cfg(test)]
+    pub(crate) fn snapshot(&self) -> tocsin_engine::Snapshot {
+        self.engine.snapshot()
     }
 
     /// Stops the checks, then the alert delivery worker, and waits for
@@ -284,6 +402,27 @@ impl Monitor {
         self.engine.shutdown().await;
         self.alerter.stop().await;
     }
+}
+
+/// Ends the open alerts that fired on a notifier not in `notifiers`.
+async fn end_alerts_without_notifier(store: &Store, notifiers: &Notifiers) -> Result<(), Failure> {
+    let configured = notifiers.keys().cloned().collect();
+    let ended = store
+        .end_alerts_without_notifier(configured, tocsin_store::now_ms())
+        .await
+        .map_err(|error| {
+            Failure::new(
+                Exit::Runtime,
+                format!("cannot end the alerts of removed notifiers: {error}"),
+            )
+        })?;
+    if ended > 0 {
+        tracing::warn!(
+            alerts = ended,
+            "ended open alerts whose notifiers are no longer configured; they will not be resolved"
+        );
+    }
+    Ok(())
 }
 
 /// The root certificates HTTP and TLS checks verify against. Without a
@@ -322,7 +461,7 @@ async fn supervise(
     stop: oneshot::Sender<()>,
     mut server: JoinHandle<io::Result<()>>,
     maintenance: JoinHandle<()>,
-    monitor: Option<Monitor>,
+    reloader: Option<Reloader>,
     store: Arc<Store>,
 ) -> (Result<&'static str, Failure>, bool) {
     let ended = tokio::select! {
@@ -344,8 +483,8 @@ async fn supervise(
             Err(Failure::new(Exit::Runtime, message))
         }
     };
-    if let Some(monitor) = monitor {
-        monitor.stop().await;
+    if let Some(reloader) = reloader {
+        reloader.stop().await;
     }
     if outcome.is_ok() {
         drain(stop, server).await;
@@ -480,16 +619,18 @@ struct Shutdown {
     terminate: Signal,
 }
 
+/// A handler for `kind`, which then no longer has its default effect.
+fn install(kind: SignalKind) -> Result<Signal, Failure> {
+    signal(kind).map_err(|error| {
+        Failure::new(
+            Exit::Runtime,
+            format!("cannot install signal handler: {error}"),
+        )
+    })
+}
+
 impl Shutdown {
     fn install() -> Result<Self, Failure> {
-        let install = |kind: SignalKind| {
-            signal(kind).map_err(|error| {
-                Failure::new(
-                    Exit::Runtime,
-                    format!("cannot install signal handler: {error}"),
-                )
-            })
-        };
         Ok(Shutdown {
             interrupt: install(SignalKind::interrupt())?,
             terminate: install(SignalKind::terminate())?,
@@ -636,6 +777,7 @@ mod tests {
             admin: None,
             live: Arc::new(monitor.engine.status_handle()),
             heartbeats: monitor.heartbeats(),
+            config_status: crate::reload::steady_status(),
         });
 
         let body = json!({
@@ -746,5 +888,94 @@ mod tests {
         monitor.stop().await;
         assert!(close(store).await);
         pinged.expect("the ping is stored");
+    }
+
+    fn parse(toml: &str) -> tocsin_core::config::Config {
+        tocsin_core::config::load(
+            &[Source {
+                name: "tocsin.toml".into(),
+                text: Ok(toml.into()),
+            }],
+            &Environment {
+                hostname: "test".into(),
+                variable: &|_| None,
+            },
+        )
+        .unwrap()
+    }
+
+    /// An alert sent to a notifier the configuration no longer has would
+    /// never be resolved or repeated: it ends, at startup and at reload,
+    /// without a message, and the others keep firing.
+    #[tokio::test]
+    async fn the_alerts_of_a_removed_notifier_end_at_startup_and_at_reload() {
+        let (_dir, store) = open();
+        // Nothing listens there once the listener is dropped.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let check = format!(
+            "[[check]]\nid = \"db\"\ntype = \"tcp\"\ntarget = \"{closed}\"\n\
+             interval = \"1s\"\ntimeout = \"500ms\"\nconfirm = 1\n"
+        );
+        let notifier = |id: &str| {
+            format!(
+                "[[notifier]]\nid = \"{id}\"\ntype = \"ntfy\"\n\
+                 [notifier.ntfy]\nurl = \"http://127.0.0.1:9/{id}\"\n"
+            )
+        };
+        let route =
+            |notifiers: &str| format!("[[route]]\nid = \"all\"\nnotifiers = [{notifiers}]\n");
+        let open_alerts = async || {
+            let mut open: Vec<String> = store
+                .alerts()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|alert| alert.ended_at_ms.is_none())
+                .map(|alert| alert.notifier_id)
+                .collect();
+            open.sort();
+            open
+        };
+
+        let both = parse(&format!(
+            "{check}{}{}{}",
+            notifier("kept"),
+            notifier("gone"),
+            route("\"kept\", \"gone\"")
+        ));
+        let events = EventBus::new();
+        let mut seen = events.subscribe();
+        let monitor = Monitor::start(&both, &store, &events, &AlertMetrics::default())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Event::CheckChanged(change) = seen.recv().await.unwrap()
+                    && change.to == Health::Down
+                {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("the check goes down");
+        monitor.stop().await;
+        assert_eq!(open_alerts().await, ["gone", "kept"]);
+
+        let one = parse(&format!("{check}{}{}", notifier("kept"), route("\"kept\"")));
+        let mut monitor = Monitor::start(&one, &store, &events, &AlertMetrics::default())
+            .await
+            .unwrap();
+        assert_eq!(open_alerts().await, ["kept"], "ended at startup");
+
+        monitor.reload(&parse(&check)).await.unwrap();
+        assert!(open_alerts().await.is_empty(), "ended at reload");
+        let outages = store.open_outages("test").await.unwrap();
+        assert_eq!(outages.len(), 1, "the outage itself stays open");
+        monitor.stop().await;
+        assert!(close(store).await);
     }
 }

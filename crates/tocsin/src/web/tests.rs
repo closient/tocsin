@@ -82,6 +82,7 @@ fn site(config: Config, admin: Option<AdminAuth>) -> Site {
         admin: admin.map(Arc::new),
         live: Arc::new(tocsin_engine::Snapshot::default()),
         heartbeats: tocsin_engine::HeartbeatHandle::default(),
+        config_status: crate::reload::steady_status(),
     };
     Site {
         _dir: dir,

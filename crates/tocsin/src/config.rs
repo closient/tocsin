@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `tocsin config`: reading a configuration folder, and the `check`, `show`
-//! and `schema` commands.
+//! `tocsin config`: reading a configuration folder, the `check`, `show`
+//! and `schema` commands, and `status` for a running server.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use tocsin_core::config::{self, Config, Diagnostic, Environment, Source};
 
+use crate::cli::ServerArgs;
+use crate::client::Client;
 use crate::exit::Exit;
 use crate::output::{Failure, Report};
+use crate::reload::ConfigStatus;
 
 /// A loaded configuration and the files it came from, in merge order.
 pub struct Loaded {
@@ -19,6 +23,14 @@ pub struct Loaded {
 
 /// Reads, merges and validates every `*.toml` file under `folder`.
 pub fn load(folder: &Path) -> Result<Loaded, Failure> {
+    load_with(folder, &|name| std::env::var(name).ok())
+}
+
+/// [`load`], reading `${ENV:NAME}` secrets through `variable`.
+pub fn load_with(
+    folder: &Path,
+    variable: &dyn Fn(&str) -> Option<String>,
+) -> Result<Loaded, Failure> {
     if !folder.is_dir() {
         return Err(Failure::new(
             Exit::InvalidInput,
@@ -68,10 +80,9 @@ pub fn load(folder: &Path) -> Result<Loaded, Failure> {
         .collect();
     let files: Vec<String> = sources.iter().map(|source| source.name.clone()).collect();
 
-    let variable = |name: &str| std::env::var(name).ok();
     let environment = Environment {
         hostname: gethostname::gethostname().to_string_lossy().into_owned(),
-        variable: &variable,
+        variable,
     };
     match config::load(&sources, &environment) {
         Ok(config) => Ok(Loaded { config, files }),
@@ -186,6 +197,35 @@ pub fn schema() -> Report {
         json,
         exit: Exit::Ok,
     }
+}
+
+/// `tocsin config status`: whether a running server's configuration last
+/// reloaded, exiting [`Exit::CheckFailed`] when it did not.
+pub fn status(server: &ServerArgs) -> Result<Report, Failure> {
+    let status: ConfigStatus = Client::new(server)?.get_with_token("api/v1/config/status")?;
+    let mut text = if status.ok {
+        format!(
+            "configuration loaded at {}; the last reload succeeded",
+            status.loaded_at
+        )
+    } else {
+        format!(
+            "the reload at {} failed; the configuration loaded at {} is still running",
+            status.last_attempt_at, status.loaded_at
+        )
+    };
+    for diagnostic in &status.errors {
+        let _ = write!(text, "\n{diagnostic}");
+    }
+    Ok(Report {
+        exit: if status.ok {
+            Exit::Ok
+        } else {
+            Exit::CheckFailed
+        },
+        json: json!(status),
+        text,
+    })
 }
 
 fn pretty(json: &Value) -> String {

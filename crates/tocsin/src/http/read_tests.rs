@@ -171,6 +171,7 @@ fn api() -> Api {
         admin: None,
         live: Arc::new(snapshot()),
         heartbeats: HeartbeatHandle::default(),
+        config_status: crate::reload::steady_status(),
     };
     Api {
         _dir: dir,

@@ -45,6 +45,30 @@ jobs:
       # fails under CI rather than skip, so allow them for every group.
       - name: Allow unprivileged ICMP sockets
         run: sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
+      # The /metrics test pipes a scrape through `promtool check metrics`;
+      # under CI it fails rather than skip when TOCSIN_PROMTOOL is unset.
+      - name: Install promtool 3.13.5
+        env:
+          PROMETHEUS_VERSION: 3.13.5
+          PROMETHEUS_SHA256_AMD64: 0388822ace519c5a3a8ef556a541ce1b536e21d872f82deded465bd27a5a0699
+          PROMETHEUS_SHA256_ARM64: e705357ffa5b3189e98bf145d044364d75dd994470c706a07731292932b2ee0f
+        run: |
+          case "$RUNNER_ARCH" in
+            X64) arch=amd64 sha256=$PROMETHEUS_SHA256_AMD64 ;;
+            ARM64) arch=arm64 sha256=$PROMETHEUS_SHA256_ARM64 ;;
+            *) echo "no promtool pinned for $RUNNER_ARCH" >&2; exit 1 ;;
+          esac
+          name="prometheus-$PROMETHEUS_VERSION.linux-$arch"
+          curl --fail --location --silent --show-error --output "$RUNNER_TEMP/$name.tar.gz" \
+            "https://github.com/prometheus/prometheus/releases/download/v$PROMETHEUS_VERSION/$name.tar.gz"
+          echo "$sha256  $RUNNER_TEMP/$name.tar.gz" | sha256sum --check --strict
+          tar --extract --gzip --file "$RUNNER_TEMP/$name.tar.gz" --directory "$RUNNER_TEMP" "$name/promtool"
+          "$RUNNER_TEMP/$name/promtool" --version
+          echo "TOCSIN_PROMTOOL=$RUNNER_TEMP/$name/promtool" >> "$GITHUB_ENV"
+      - name: The example alert rules are valid and pass their tests
+        run: |
+          "$TOCSIN_PROMTOOL" check rules examples/prometheus/tocsin-rules.yml
+          "$TOCSIN_PROMTOOL" test rules examples/prometheus/tocsin-rules.test.yml
       - run: cargo test --workspace --locked
 
   # The JSON Schema editors use must accept every example, both as

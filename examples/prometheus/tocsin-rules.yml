@@ -1,0 +1,58 @@
+# Prometheus alert rules for tocsin's /metrics (docs/metrics.md), for
+# alerting through Alertmanager instead of, or as well as, tocsin's own
+# notifiers. CI runs `promtool check rules` and `promtool test rules` on
+# this file and tocsin-rules.test.yml.
+groups:
+  - name: tocsin
+    rules:
+      # tocsin has already confirmed the outage (a check's `confirm`
+      # results agreeing), so this fires on the first scrape that sees it.
+      - alert: TocsinCheckDown
+        expr: tocsin_check_up{kind="check"} == 0
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.check }} is down on {{ $labels.node }}"
+
+      - alert: TocsinCheckDegraded
+        expr: tocsin_check_up{kind="check"} == 0.5
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.check }} has been degraded for 15 minutes on {{ $labels.node }}"
+
+      # A heartbeat goes down when its deadline passes without a ping, or
+      # when a job reports failure.
+      - alert: TocsinHeartbeatMissed
+        expr: tocsin_check_up{kind="heartbeat"} == 0
+        labels:
+          severity: page
+        annotations:
+          summary: "Heartbeat {{ $labels.check }} missed its deadline or reported failure"
+
+      # Each such message is one an operator never got from tocsin.
+      - alert: TocsinNotificationsAbandoned
+        expr: increase(tocsin_notifications_abandoned_total[15m]) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "tocsin gave up delivering alerts through {{ $labels.notifier }}"
+
+      # The last good configuration is still running; the change is not.
+      - alert: TocsinConfigReloadFailed
+        expr: tocsin_config_reload_success == 0
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "tocsin rejected its configuration; see tocsin config status"
+
+      # Nothing above can fire while Prometheus cannot scrape tocsin.
+      - alert: TocsinUnreachable
+        expr: up{job="tocsin"} == 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Prometheus cannot scrape tocsin at {{ $labels.instance }}"

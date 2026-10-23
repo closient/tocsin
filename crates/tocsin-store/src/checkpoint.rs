@@ -38,6 +38,16 @@
 //! writes past the hard limit try once without waiting until a checkpoint
 //! succeeds again. While the writer checkpoints at the hard limit, this
 //! thread starts no pass of its own, which would only take the lock from it.
+//!
+//! Retention's purge is the one writer that can outrun the checkpointer: a
+//! delete chunk of 2000 rows appends hundreds of frames, chunks follow each
+//! other 10 ms apart, and the passes chasing them each copy the 16 MiB
+//! between the soft limit and the commits. Left alone it carries the log to
+//! the hard limit, and the check result that lands there waits out an inline
+//! copy (TOC-62). So before each of its writes retention [`Checkpointer::make_room`]:
+//! past [`SOFT_LIMIT_FRAMES`], it waits until a pass has copied the log, for
+//! up to [`PACE_WAIT`], and lets the checkpointer, not a check result, pay
+//! for the frames it wrote.
 
 use std::cell::Cell;
 use std::os::raw::c_int;
@@ -88,6 +98,12 @@ const CHECKPOINT_WAIT: Duration = schema::BUSY_TIMEOUT;
 /// held by another process, whose checkpoint it cannot wait on directly.
 const CHECKPOINT_POLL: Duration = Duration::from_millis(10);
 
+/// Longest retention waits, before one of its writes, for the checkpointer
+/// to copy a log past [`SOFT_LIMIT_FRAMES`]: as long as the writer would wait
+/// at the hard limit. A wait that times out writes anyway, and the hard
+/// limit still bounds the log.
+const PACE_WAIT: Duration = schema::BUSY_TIMEOUT;
+
 /// The log file's size once a rewind has emptied it: about
 /// [`HARD_LIMIT_FRAMES`] frames of 4 KiB pages. A log that a long read kept
 /// from rewinding is cut back to this, not left at its largest.
@@ -126,6 +142,7 @@ fn on_commit(_: &Wal, frames: c_int) -> rusqlite::Result<()> {
 
 pub(crate) struct Checkpointer {
     thread: JoinHandle<()>,
+    log: Arc<Log>,
     stats: Arc<Stats>,
     #[cfg(test)]
     passes: Arc<Passes>,
@@ -159,6 +176,18 @@ struct Log {
     appended: AtomicU64,
     /// Frames in the log.
     frames: AtomicU64,
+    /// The appended count up to which the checkpointer's last complete pass
+    /// copied the log.
+    copied: AtomicU64,
+}
+
+impl Log {
+    /// The log is past [`SOFT_LIMIT_FRAMES`] and holds frames no complete
+    /// pass has copied, so a commit now would not rewind it.
+    fn behind(&self) -> bool {
+        self.frames.load(Ordering::Relaxed) >= u64::from(SOFT_LIMIT_FRAMES.unsigned_abs())
+            && self.copied.load(Ordering::Relaxed) < self.appended.load(Ordering::Relaxed)
+    }
 }
 
 /// The writer's checkpoints at the limit have timed out or failed since
@@ -269,6 +298,7 @@ impl Checkpointer {
         Ok((
             Checkpointer {
                 thread,
+                log: Arc::clone(&log),
                 stats: Arc::clone(&stats),
                 #[cfg(test)]
                 passes: Arc::clone(&passes),
@@ -286,6 +316,20 @@ impl Checkpointer {
     pub(crate) fn stats(&self) -> CheckpointStats {
         self.stats.snapshot()
     }
+
+    /// Before a bulk write: while the log is past [`SOFT_LIMIT_FRAMES`] and
+    /// no pass has copied it, waits for one, for up to [`PACE_WAIT`], so the
+    /// bulk writer, not the writes queued behind it, waits for the copy.
+    pub(crate) async fn make_room(&self) {
+        if !self.log.behind() {
+            return;
+        }
+        let started = Instant::now();
+        while self.log.behind() && started.elapsed() < PACE_WAIT {
+            tokio::time::sleep(CHECKPOINT_POLL).await;
+        }
+        self.stats.paced(started, started.elapsed());
+    }
 }
 
 #[cfg(test)]
@@ -298,6 +342,7 @@ impl Checkpointer {
         }
         Checkpointer {
             thread,
+            log: Arc::default(),
             stats: Arc::default(),
             passes: Arc::default(),
         }
@@ -650,6 +695,9 @@ fn run(conn: &Connection, nudges: &Receiver<()>, log: &Log, passes: &Passes, sta
         #[cfg(test)]
         passes.ran.fetch_add(1, Ordering::Relaxed);
         copied_all = complete;
+        if complete {
+            log.copied.fetch_max(copied_to, Ordering::Relaxed);
+        }
         due = if !complete {
             Some(Instant::now() + RETRY)
         } else if log.appended.load(Ordering::Relaxed) > copied_to {

@@ -179,6 +179,7 @@ fn span(event: &CheckpointEvent) -> (Instant, Instant) {
         CheckpointEvent::Pass { at, took, .. } | CheckpointEvent::Write { at, took, .. } => {
             (at, at + took)
         }
+        CheckpointEvent::Paced { at, waited } => (at, at + waited),
         _ => unreachable!("an event this bench does not know"),
     }
 }
@@ -215,6 +216,9 @@ fn describe(event: &CheckpointEvent) -> String {
         CheckpointEvent::Write { took, frames, .. } => {
             format!("write {took:.2?}, log at {frames} frames after")
         }
+        CheckpointEvent::Paced { waited, .. } => {
+            format!("retention waited {waited:.2?} for the checkpointer")
+        }
         _ => unreachable!("an event this bench does not know"),
     }
 }
@@ -229,6 +233,7 @@ fn paths(stats: &CheckpointStats, stalls: &[Stall], opened: Instant, purged: Ins
          | the writer's checkpoints there | {} | {:.2?} | the log at up to {} frames |\n\
          | lockouts | {} | | |\n\
          | stand-asides | {} | | |\n\
+         | retention writes paced | {} | {:.2?} | |\n\
          | checkpointer passes | {} | {:.2?} | p99 {:.2?} |\n\
          | chase passes | {} | | {} in a row at most |\n\
          | rewinds | {} | | the log at up to {} frames |\n\
@@ -242,6 +247,8 @@ fn paths(stats: &CheckpointStats, stalls: &[Stall], opened: Instant, purged: Ins
         stats.inline_frames_max,
         stats.lockouts,
         stats.stand_asides,
+        stats.paced_writes,
+        stats.paced_wait_max,
         stats.passes,
         stats.pass_max,
         stats.pass_p99,

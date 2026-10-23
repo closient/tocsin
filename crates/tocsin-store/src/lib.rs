@@ -935,7 +935,10 @@ impl Store {
     /// past it, recounting there if a result for it was committed in
     /// between, so the daily bar never loses a day or a result. The delete
     /// then runs in chunks through the writer, so writes queued meanwhile go
-    /// through between chunks and readers never wait.
+    /// through between chunks and readers never wait. Before each of its
+    /// writes it lets the checkpointer copy a log past the soft limit, so
+    /// the purge never carries the log to the hard limit, where a queued
+    /// write would wait for the copy (TOC-62).
     ///
     /// # Errors
     ///
@@ -951,6 +954,7 @@ impl Store {
             .read(move |conn| rollup::plan_finalize(conn, cutoff, now_ms))
             .await?
         {
+            self.checkpointer.make_room().await;
             rolled_up += self
                 .writer
                 .run(move |conn| rollup::finalize(conn, plan))
@@ -969,6 +973,7 @@ impl Store {
         let limit = policy.chunk_rows.max(1);
         let (mut deleted, mut chunks) = (0, 0);
         loop {
+            self.checkpointer.make_room().await;
             let removed = self
                 .writer
                 .run(move |conn| rollup::delete_chunk(conn, target, limit))

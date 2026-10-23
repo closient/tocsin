@@ -41,6 +41,11 @@ pub struct CheckpointStats {
     pub lockouts: u64,
     /// Passes the checkpointer skipped to stand aside for the writer.
     pub stand_asides: u64,
+    /// Retention's writes that waited for the checkpointer to copy a log
+    /// past the soft limit first.
+    pub paced_writes: u64,
+    /// The longest such wait.
+    pub paced_wait_max: Duration,
     /// Passes the checkpointer ran.
     pub passes: u64,
     /// The longest of them.
@@ -94,6 +99,14 @@ pub enum CheckpointEvent {
         /// It copied every frame it found.
         complete: bool,
     },
+    /// Retention waited longer than 10 ms for the checkpointer before one
+    /// of its writes.
+    Paced {
+        /// When it started waiting.
+        at: Instant,
+        /// How long it waited.
+        waited: Duration,
+    },
     /// A write on the writer thread took longer than 10 ms, its checkpoint
     /// at the limit, if any, not included.
     Write {
@@ -120,6 +133,8 @@ pub(crate) struct Stats {
     inline_frames_max: AtomicU64,
     lockouts: AtomicU64,
     stand_asides: AtomicU64,
+    paced_writes: AtomicU64,
+    paced_wait_max: AtomicU64,
     passes: AtomicU64,
     pass_max: AtomicU64,
     pass_buckets: [AtomicU64; BUCKETS],
@@ -142,6 +157,8 @@ impl Default for Stats {
             inline_frames_max: AtomicU64::new(0),
             lockouts: AtomicU64::new(0),
             stand_asides: AtomicU64::new(0),
+            paced_writes: AtomicU64::new(0),
+            paced_wait_max: AtomicU64::new(0),
             passes: AtomicU64::new(0),
             pass_max: AtomicU64::new(0),
             pass_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -233,6 +250,16 @@ impl Stats {
         bump(&self.stand_asides);
     }
 
+    /// Retention waited `waited` from `at` for the checkpointer.
+    pub(crate) fn paced(&self, at: Instant, waited: Duration) {
+        bump(&self.paced_writes);
+        self.paced_wait_max
+            .fetch_max(micros(waited), Ordering::Relaxed);
+        if waited > SLOW {
+            self.event(CheckpointEvent::Paced { at, waited });
+        }
+    }
+
     /// A pass of the checkpointer's; `streak` is the chase passes in a row
     /// including this one.
     pub(crate) fn pass(&self, event: CheckpointEvent, streak: u64) {
@@ -292,6 +319,8 @@ impl Stats {
             inline_frames_max: load(&self.inline_frames_max),
             lockouts: load(&self.lockouts),
             stand_asides: load(&self.stand_asides),
+            paced_writes: load(&self.paced_writes),
+            paced_wait_max: duration(&self.paced_wait_max),
             passes: load(&self.passes),
             pass_max,
             pass_p99,

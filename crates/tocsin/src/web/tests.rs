@@ -1604,3 +1604,42 @@ async fn the_admin_timeline_shows_private_deploys_to_an_admin_only() {
     let body = text(send(&site.router, request).await.1).await;
     assert!(!body.contains("v9.9.9"), "{body}");
 }
+
+/// More than a page of events: the admin sees the newest, and is told so.
+#[tokio::test]
+async fn the_admin_timeline_shows_the_newest_page_and_says_so() {
+    let config = config_with(
+        "mode = \"trusted_header\"\ntrusted_proxies = [\"10.0.0.0/8\"]",
+        "[[project]]\nid = \"api\"\nname = \"API\"\n",
+    );
+    let admin = AdminAuth::from_config(&config).unwrap();
+    let site = site(config, admin);
+    for index in 0..510 {
+        http::releases::deployed(
+            &site.state,
+            "api".into(),
+            format!("r{index}"),
+            tocsin_core::release::DeployStamp::default(),
+            Actor::token("deploys"),
+        )
+        .await
+        .unwrap();
+    }
+    let request = from(PROXY, Method::GET, "/admin/timeline")
+        .header("x-forwarded-email", ALICE)
+        .body(Body::empty())
+        .unwrap();
+    let (status, response) = send(&site.router, request).await;
+    assert_eq!(status, StatusCode::OK);
+    let page = text(response).await;
+    assert!(page.contains("these are the newest 500."), "{page}");
+    let newest = page.find("api r509 to production").unwrap();
+    let oldest_shown = page.find("api r10 to production").unwrap();
+    assert!(newest < oldest_shown, "newest first");
+    for hidden in 0..10 {
+        assert!(
+            !page.contains(&format!("api r{hidden} to production")),
+            "r{hidden}"
+        );
+    }
+}

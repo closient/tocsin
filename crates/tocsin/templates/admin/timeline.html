@@ -20,7 +20,7 @@
 {%- endif %}
 
 {%- if truncated %}
-<p class="notice">More events fell in this window than one page shows; these are the oldest.</p>
+<p class="notice">More events fell in this window than one page shows; these are the newest {{ events.len() }}.</p>
 {%- endif %}
 {%- if events.is_empty() %}
 <p class="muted">Nothing in this window.</p>

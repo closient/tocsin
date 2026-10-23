@@ -372,6 +372,15 @@
             }
           },
           {
+            "name": "before",
+            "in": "query",
+            "description": "Only releases older than the previous page's last: its\n`next_before`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "Page size, 1 to 200; default 50.",
@@ -415,7 +424,7 @@
             }
           },
           "422": {
-            "description": "A bad `since` or `limit`",
+            "description": "A bad `since`, `before` or `limit`",
             "content": {
               "application/json": {
                 "schema": {
@@ -640,10 +649,19 @@
           {
             "name": "since",
             "in": "query",
-            "description": "The start of the window (RFC 3339): at most 366 days ago; default\n30 days ago.",
+            "description": "The start of the window (RFC 3339): at most 366 days ago; default\n30 days ago. Keep it the same while paging.",
             "required": false,
             "schema": {
               "$ref": "#/components/schemas/Timestamp"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Only events after the previous page's last: its `next_after`.",
+            "required": false,
+            "schema": {
+              "type": "string"
             }
           },
           {
@@ -690,7 +708,7 @@
             }
           },
           "422": {
-            "description": "An unknown component, or a bad `since` or `limit`",
+            "description": "An unknown component, or a bad `since`, `after` or `limit`",
             "content": {
               "application/json": {
                 "schema": {
@@ -745,7 +763,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/Timestamp",
-                "description": "Defaults to now. A later stamp replaces an earlier one: the release\nrecords its latest deploy."
+                "description": "Defaults to now; at most an hour past the server's clock. The\nrelease keeps the latest deploy time it is given, so a stamp\nearlier than the recorded one changes nothing."
               },
               {
                 "type": "null"
@@ -1146,7 +1164,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/Timestamp",
-                "description": "When it was deployed, if it already has been. Left as recorded when\nomitted."
+                "description": "When it was deployed, if it already has been. Left as recorded when\nomitted or earlier than the recorded time; never more than an hour\npast the server's clock."
               },
               {
                 "type": "null"
@@ -1174,7 +1192,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/Timestamp",
-                "description": "When it was released. Defaults to now on the first publish and to\nthe recorded time on a re-publish; it may move later, never earlier."
+                "description": "When it was released. Defaults to now on the first publish and to\nthe recorded time on a re-publish; it may move later, never earlier,\nand never more than an hour past the server's clock."
               },
               {
                 "type": "null"
@@ -1252,7 +1270,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/Timestamp",
-                "description": "When it was last deployed, if it has been."
+                "description": "When it was last deployed, if it has been: the latest deploy time\nit has been given."
               },
               {
                 "type": "null"
@@ -1320,16 +1338,23 @@
           "truncated"
         ],
         "properties": {
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `before` to get the next, older page; `null` on the last."
+          },
           "releases": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Release"
             },
-            "description": "Newest `released_at` first."
+            "description": "Newest `released_at` first, ties by newest id."
           },
           "truncated": {
             "type": "boolean",
-            "description": "Whether more matched than `limit`; narrow with `since` or `project`."
+            "description": "Whether more matched than `limit`."
           }
         }
       },
@@ -1349,13 +1374,20 @@
             },
             "description": "Oldest first; ties by kind (outage, incident, deploy, release),\nthen id."
           },
+          "next_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `after`, with the same `since`, to get the next page;\n`null` on the last."
+          },
           "since": {
             "$ref": "#/components/schemas/Timestamp",
             "description": "The start of the window: events at or after it."
           },
           "truncated": {
             "type": "boolean",
-            "description": "Whether more events fell in the window than `limit`; the next page\nstarts at the last event's `at`."
+            "description": "Whether more events fell in the window than `limit`."
           }
         }
       },

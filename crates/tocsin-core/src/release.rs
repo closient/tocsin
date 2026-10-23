@@ -8,6 +8,9 @@
 //! it (title, notes, link) and stamps when it was deployed; either may come
 //! first. Publishing the same key again updates the release in place.
 
+use std::fmt;
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -15,6 +18,7 @@ use crate::Health;
 use crate::incident::{
     Actor, FieldError, Impact, IncidentKind, IncidentStatus, Timestamp, check_title, into_result,
 };
+use crate::link::http_url;
 
 /// The environment a release or deploy is for when none is given.
 pub const DEFAULT_ENVIRONMENT: &str = "production";
@@ -52,7 +56,8 @@ pub struct Release {
     /// When it was published. `null` for a deploy stamped before its
     /// publish; never moved earlier once set.
     pub released_at: Option<Timestamp>,
-    /// When it was last deployed, if it has been.
+    /// When it was last deployed, if it has been: the latest deploy time
+    /// it has been given.
     pub deployed_at: Option<Timestamp>,
     /// When tocsin first heard of it.
     pub created_at: Timestamp,
@@ -103,11 +108,13 @@ pub struct NewRelease {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// When it was released. Defaults to now on the first publish and to
-    /// the recorded time on a re-publish; it may move later, never earlier.
+    /// the recorded time on a re-publish; it may move later, never earlier,
+    /// and never more than an hour past the server's clock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub released_at: Option<Timestamp>,
     /// When it was deployed, if it already has been. Left as recorded when
-    /// omitted.
+    /// omitted or earlier than the recorded time; never more than an hour
+    /// past the server's clock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deployed_at: Option<Timestamp>,
 }
@@ -126,12 +133,20 @@ impl NewRelease {
     }
 
     /// Checks every rule a release must follow. `known` says whether a
-    /// project id is configured.
+    /// project id is configured. Times are checked against the clock by
+    /// the store, which owns the tolerance.
     ///
     /// # Errors
     ///
-    /// Every problem found, each at its field path.
-    pub fn validate(&self, known: &dyn Fn(&str) -> bool) -> Result<(), Vec<FieldError>> {
+    /// [`Rejected::NotesTooLarge`] for notes over [`MAX_NOTES_BYTES`],
+    /// before anything else is looked at; otherwise every problem found,
+    /// each at its field path.
+    pub fn validate(&self, known: &dyn Fn(&str) -> bool) -> Result<(), Rejected> {
+        if self.notes.len() > MAX_NOTES_BYTES {
+            return Err(Rejected::NotesTooLarge {
+                bytes: self.notes.len(),
+            });
+        }
         let mut errors = Vec::new();
         check_project("project", &self.project, known, &mut errors);
         check_version("version", &self.version, &mut errors);
@@ -141,15 +156,40 @@ impl NewRelease {
         if let Some(title) = &self.title {
             check_title("title", title, &mut errors);
         }
-        if self.notes.len() > MAX_NOTES_BYTES {
-            errors.push(FieldError::new("notes", notes_too_large(self.notes.len())));
-        }
         if let Some(url) = &self.url {
             check_url("url", url, &mut errors);
         }
         check_instant("released_at", self.released_at, &mut errors);
         check_instant("deployed_at", self.deployed_at, &mut errors);
-        into_result(errors)
+        into_result(errors).map_err(Rejected::Invalid)
+    }
+}
+
+/// Why [`NewRelease::validate`] refused a release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rejected {
+    /// The notes are over [`MAX_NOTES_BYTES`]: the request is too large,
+    /// not merely invalid.
+    NotesTooLarge {
+        /// Their size.
+        bytes: usize,
+    },
+    /// Fields break rules, each at its path.
+    Invalid(Vec<FieldError>),
+}
+
+impl fmt::Display for Rejected {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Rejected::NotesTooLarge { bytes } => write!(
+                f,
+                "notes must be at most {MAX_NOTES_BYTES} bytes; these are {bytes}"
+            ),
+            Rejected::Invalid(errors) => {
+                let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();
+                f.write_str(&errors.join("; "))
+            }
+        }
     }
 }
 
@@ -162,8 +202,9 @@ pub struct DeployStamp {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(max_length = 32, pattern = "^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$")]
     pub environment: Option<String>,
-    /// Defaults to now. A later stamp replaces an earlier one: the release
-    /// records its latest deploy.
+    /// Defaults to now; at most an hour past the server's clock. The
+    /// release keeps the latest deploy time it is given, so a stamp
+    /// earlier than the recorded one changes nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deployed_at: Option<Timestamp>,
 }
@@ -201,16 +242,61 @@ impl DeployStamp {
 /// `GET /api/v1/releases`: published releases, newest first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ReleaseList {
-    /// Newest `released_at` first.
+    /// Newest `released_at` first, ties by newest id.
     pub releases: Vec<Release>,
-    /// Whether more matched than `limit`; narrow with `since` or `project`.
+    /// Whether more matched than `limit`.
     pub truncated: bool,
+    /// Pass as `before` to get the next, older page; `null` on the last.
+    pub next_before: Option<String>,
 }
 
-/// The message for notes over [`MAX_NOTES_BYTES`].
-#[must_use]
-pub fn notes_too_large(bytes: usize) -> String {
-    format!("must be at most {MAX_NOTES_BYTES} bytes; these are {bytes}")
+/// A place in the release list, after which the next page starts: the
+/// last release's `released_at` and id. Opaque to clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReleaseCursor {
+    /// The last release's `released_at`.
+    pub released_at: Timestamp,
+    /// The last release's id.
+    pub id: i64,
+}
+
+impl ReleaseCursor {
+    /// The cursor just past `release`, if it is published.
+    #[must_use]
+    pub fn after(release: &Release) -> Option<Self> {
+        release.released_at.map(|released_at| ReleaseCursor {
+            released_at,
+            id: release.id,
+        })
+    }
+}
+
+impl fmt::Display for ReleaseCursor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}_{}", self.released_at.as_millis(), self.id)
+    }
+}
+
+impl FromStr for ReleaseCursor {
+    type Err = BadCursor;
+
+    fn from_str(text: &str) -> Result<Self, BadCursor> {
+        let (at, id) = text.split_once('_').ok_or(BadCursor)?;
+        Ok(ReleaseCursor {
+            released_at: Timestamp::from_millis(at.parse().map_err(|_| BadCursor)?),
+            id: id.parse().map_err(|_| BadCursor)?,
+        })
+    }
+}
+
+/// A cursor that no response handed out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BadCursor;
+
+impl fmt::Display for BadCursor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("is not a cursor from a previous page")
+    }
 }
 
 fn check_project(
@@ -252,25 +338,16 @@ fn check_name(path: &str, name: &str, max: usize, errors: &mut Vec<FieldError>) 
     }
 }
 
-/// A link is shown as one, so only `http` and `https` are allowed.
+/// A link is shown as one, so it follows the configuration's rule for
+/// links, [`http_url`], and is at most [`MAX_URL_LENGTH`] bytes.
 fn check_url(path: &str, url: &str, errors: &mut Vec<FieldError>) {
-    let lower = url.get(..8).unwrap_or(url).to_ascii_lowercase();
-    let scheme_ok = lower.starts_with("https://") || lower.starts_with("http://");
-    let host_ok = url
-        .split_once("://")
-        .is_some_and(|(_, rest)| !rest.is_empty() && !rest.starts_with('/'));
-    if !scheme_ok || !host_ok {
-        errors.push(FieldError::new(path, "must be an http or https URL"));
-    } else if url.len() > MAX_URL_LENGTH {
+    if url.len() > MAX_URL_LENGTH {
         errors.push(FieldError::new(
             path,
             format!("must be at most {MAX_URL_LENGTH} bytes"),
         ));
-    } else if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
-        errors.push(FieldError::new(
-            path,
-            "must not contain spaces or control characters",
-        ));
+    } else if let Err(message) = http_url(url) {
+        errors.push(FieldError::new(path, message));
     }
 }
 
@@ -389,9 +466,61 @@ pub struct Timeline {
     /// Oldest first; ties by kind (outage, incident, deploy, release),
     /// then id.
     pub events: Vec<TimelineEvent>,
-    /// Whether more events fell in the window than `limit`; the next page
-    /// starts at the last event's `at`.
+    /// Whether more events fell in the window than `limit`.
     pub truncated: bool,
+    /// Pass as `after`, with the same `since`, to get the next page;
+    /// `null` on the last.
+    pub next_after: Option<String>,
+}
+
+/// A place on the timeline: an event's [`TimelineEvent::sort_key`].
+/// Paging resumes strictly past it, so events sharing an instant are
+/// neither repeated nor skipped. Opaque to clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineCursor {
+    /// The event's instant.
+    pub at: Timestamp,
+    /// Its [`TimelineEvent::kind_rank`].
+    pub kind_rank: u8,
+    /// Its row's id.
+    pub id: i64,
+}
+
+impl TimelineCursor {
+    /// The cursor at `event`.
+    #[must_use]
+    pub fn at(event: &TimelineEvent) -> Self {
+        let (at, kind_rank, id) = event.sort_key();
+        TimelineCursor { at, kind_rank, id }
+    }
+}
+
+impl fmt::Display for TimelineCursor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}_{}_{}", self.at.as_millis(), self.kind_rank, self.id)
+    }
+}
+
+impl FromStr for TimelineCursor {
+    type Err = BadCursor;
+
+    fn from_str(text: &str) -> Result<Self, BadCursor> {
+        let mut parts = text.split('_');
+        let (Some(at), Some(kind_rank), Some(id), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return Err(BadCursor);
+        };
+        let kind_rank: u8 = kind_rank.parse().map_err(|_| BadCursor)?;
+        if kind_rank > 3 {
+            return Err(BadCursor);
+        }
+        Ok(TimelineCursor {
+            at: Timestamp::from_millis(at.parse().map_err(|_| BadCursor)?),
+            kind_rank,
+            id: id.parse().map_err(|_| BadCursor)?,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -440,12 +569,11 @@ mod tests {
     }
 
     fn paths(new: &NewRelease) -> Vec<String> {
-        new.validate(&|id| id == "api")
-            .err()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|error| error.path)
-            .collect()
+        match new.validate(&|id| id == "api") {
+            Ok(()) => Vec::new(),
+            Err(Rejected::Invalid(errors)) => errors.into_iter().map(|error| error.path).collect(),
+            Err(too_large) => panic!("{too_large}"),
+        }
     }
 
     #[test]
@@ -459,9 +587,14 @@ mod tests {
             paths(&release(Some(&"t".repeat(200)), "", None)),
             Vec::<String>::new()
         );
+        // Too large is its own answer, ahead of every other problem.
+        let mut huge = release(Some(""), &"n".repeat(MAX_NOTES_BYTES + 1), Some("x"));
+        huge.project = "nope".to_owned();
         assert_eq!(
-            paths(&release(None, &"n".repeat(MAX_NOTES_BYTES + 1), None)),
-            ["notes"]
+            huge.validate(&|id| id == "api"),
+            Err(Rejected::NotesTooLarge {
+                bytes: MAX_NOTES_BYTES + 1
+            })
         );
         assert_eq!(
             paths(&release(None, &"n".repeat(MAX_NOTES_BYTES), None)),
@@ -474,7 +607,7 @@ mod tests {
 
     #[test]
     fn links_are_http_only() {
-        for good in ["https://example.com/v1", "HTTP://example.com"] {
+        for good in ["https://example.com/v1", "http://example.com"] {
             assert!(paths(&release(None, "", Some(good))).is_empty(), "{good}");
         }
         for bad in [
@@ -486,8 +619,30 @@ mod tests {
             "https:///path",
             "https://example.com/a b",
             "ftp://example.com",
+            &format!("https://example.com/{}", "a".repeat(MAX_URL_LENGTH)),
         ] {
             assert_eq!(paths(&release(None, "", Some(bad))), ["url"], "{bad}");
+        }
+    }
+
+    #[test]
+    fn cursors_round_trip_and_refuse_anything_else() {
+        let timeline = TimelineCursor {
+            at: Timestamp::from_millis(1_700_000_000_000),
+            kind_rank: 2,
+            id: 41,
+        };
+        assert_eq!(timeline.to_string().parse(), Ok(timeline));
+        let release = ReleaseCursor {
+            released_at: Timestamp::from_millis(1_700_000_000_000),
+            id: 7,
+        };
+        assert_eq!(release.to_string().parse(), Ok(release));
+        for bad in ["", "1", "1_2", "1_2_3_4", "x_2_3", "1_4_3", "1_2_y"] {
+            assert_eq!(bad.parse::<TimelineCursor>(), Err(BadCursor), "{bad}");
+        }
+        for bad in ["", "1", "1_x", "x_1", "1_2_3"] {
+            assert_eq!(bad.parse::<ReleaseCursor>(), Err(BadCursor), "{bad}");
         }
     }
 }

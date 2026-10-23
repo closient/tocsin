@@ -257,7 +257,9 @@ deployed, and a published row to having a title. Triggers refuse changing
 a row's id, key or creation, and moving `released_at` earlier or back to
 NULL. Indexed by `(project_id, released_at)`, by `released_at`, and by
 `coalesce(deployed_at, released_at)`, where the timeline places it. 0004
-also adds `outage_by_start` on `outage (started_at)` for the timeline.
+also adds `outage_by_start` on `outage (started_at)` and
+`incident_by_created` on `incident (created_at)`, so the timeline reads
+every kind of event from an index.
 
 ## Rollups
 

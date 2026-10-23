@@ -17,7 +17,7 @@ use serde::Deserialize;
 use tocsin_core::config::Config;
 use tocsin_core::incident::{Actor, FieldError, Timestamp};
 use tocsin_core::release::{
-    DeployStamp, MAX_NOTES_BYTES, NewRelease, Release, ReleaseList, notes_too_large,
+    DeployStamp, NewRelease, Rejected, Release, ReleaseCursor, ReleaseList,
 };
 use tocsin_store::{Projects, ReleaseQuery, Written};
 use utoipa::IntoParams;
@@ -62,7 +62,7 @@ pub fn visible_projects(config: &Config, viewer: Viewer) -> Projects {
     }
 }
 
-/// `?project=&since=&limit=` on the list.
+/// `?project=&since=&before=&limit=` on the list.
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 #[serde(deny_unknown_fields)]
@@ -72,6 +72,9 @@ pub struct ListQuery {
     project: Option<String>,
     /// Only releases published at or after this instant (RFC 3339).
     since: Option<Timestamp>,
+    /// Only releases older than the previous page's last: its
+    /// `next_before`.
+    before: Option<String>,
     /// Page size, 1 to 200; default 50.
     limit: Option<u32>,
 }
@@ -88,7 +91,7 @@ pub struct ListQuery {
         (status = 200, description = "Newest `released_at` first", body = ReleaseList),
         (status = 401, description = "An `Authorization` header with an unknown token", body = ErrorBody),
         (status = 403, description = "A token without the `status:read` scope", body = ErrorBody),
-        (status = 422, description = "A bad `since` or `limit`", body = ErrorBody),
+        (status = 422, description = "A bad `since`, `before` or `limit`", body = ErrorBody),
     ),
 )]
 pub async fn list_releases(
@@ -98,12 +101,24 @@ pub async fn list_releases(
 ) -> Result<Json<ReleaseList>, ApiError> {
     let Query(query) = query
         .map_err(|rejection| ApiError::invalid(vec![FieldError::new("", rejection.body_text())]))?;
+    let mut errors = Vec::new();
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT);
     if !(1..=MAX_LIMIT).contains(&limit) {
-        return Err(ApiError::invalid(vec![FieldError::new(
+        errors.push(FieldError::new(
             "limit",
             format!("must be 1 to {MAX_LIMIT}"),
-        )]));
+        ));
+    }
+    let before = match query.before.as_deref().map(str::parse::<ReleaseCursor>) {
+        Some(Err(bad)) => {
+            errors.push(FieldError::new("before", bad.to_string()));
+            None
+        }
+        Some(Ok(cursor)) => Some(cursor),
+        None => None,
+    };
+    if !errors.is_empty() {
+        return Err(ApiError::invalid(errors));
     }
     let (releases, truncated) = state
         .store
@@ -112,12 +127,20 @@ pub async fn list_releases(
             project: query.project,
             version: None,
             since: query.since,
+            before,
             limit,
         })
         .await?;
+    // The last page carries no cursor, even when it is exactly full.
+    let next_before = releases
+        .last()
+        .filter(|_| truncated)
+        .and_then(ReleaseCursor::after)
+        .map(|cursor| cursor.to_string());
     Ok(Json(ReleaseList {
         releases,
         truncated,
+        next_before,
     }))
 }
 
@@ -194,21 +217,19 @@ pub async fn stamp_deploy(
 ///
 /// # Errors
 ///
-/// 413 for notes over [`MAX_NOTES_BYTES`]; 422 for other invalid fields;
-/// 500 if the store fails.
+/// 413 for notes over [`tocsin_core::release::MAX_NOTES_BYTES`]; 422 for other invalid fields,
+/// a `released_at` before the recorded one, or a time too far in the
+/// future; 500 if the store fails.
 pub async fn publish(
     state: &AppState,
     new: NewRelease,
     actor: Actor,
 ) -> Result<(Arc<Release>, Written), ApiError> {
-    if new.notes.len() > MAX_NOTES_BYTES {
-        return Err(ApiError::too_large(format!(
-            "notes {}",
-            notes_too_large(new.notes.len())
-        )));
-    }
     new.validate(&|id| state.knows_project(id))
-        .map_err(ApiError::invalid)?;
+        .map_err(|rejected| match rejected {
+            Rejected::NotesTooLarge { .. } => ApiError::too_large(rejected.to_string()),
+            Rejected::Invalid(errors) => ApiError::invalid(errors),
+        })?;
     let (release, written) = state
         .store
         .publish_release(new, actor.clone(), now())
@@ -235,7 +256,8 @@ pub async fn publish(
 ///
 /// # Errors
 ///
-/// 422 for invalid fields; 500 if the store fails.
+/// 422 for invalid fields or a time too far in the future; 500 if the
+/// store fails.
 pub async fn deployed(
     state: &AppState,
     project: String,

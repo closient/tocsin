@@ -75,3 +75,5 @@ END;
 
 -- The timeline reads outages from a start time across every check.
 CREATE INDEX outage_by_start ON outage (started_at);
+-- ...and incidents from a creation time.
+CREATE INDEX incident_by_created ON incident (created_at);

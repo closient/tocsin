@@ -28,7 +28,7 @@ public = true          # the default; false hides it from anonymous readers
 | `notes` | Markdown, at most 64 KiB (65,536 bytes). |
 | `url` | Optional `http` or `https` link, such as the GitHub release; at most 2,048 bytes. |
 | `released_at` | When it was published. `null` on a deploy stamped before its publish. |
-| `deployed_at` | When it was last deployed, if it has been. |
+| `deployed_at` | The latest deploy time it has been given, if it has been deployed. |
 | `created_at`, `created_by` | When tocsin first heard of it, and the token (or person) that wrote it. |
 | `updated_at`, `updated_by` | The last write and its author. |
 
@@ -42,15 +42,23 @@ again with corrected notes, updates the row; it never makes a second one.
 - **Publishing again** replaces `title`, `notes` and `url`. `released_at`
   keeps its recorded value when omitted, may move later, and is refused
   (422) if earlier; a database trigger holds the same rule. A
-  `deployed_at` in the body replaces the recorded one; omitted, the
-  recorded one stays.
+  `deployed_at` in the body is kept only if it is later than the
+  recorded one; omitted, the recorded one stays.
+- **Deploy times only move later**, from a publish or a stamp, so a
+  retried or out-of-order CI job reporting an older deploy cannot rewind
+  the timeline.
+- **No time more than an hour past the server's clock**: a `released_at`
+  or `deployed_at` beyond that is refused with a 422 naming the field, so
+  a typo such as 3026 for 2026 cannot sit at the top of every list for a
+  thousand years. The hour allows for a CI runner whose clock runs ahead.
 - **Each environment is its own release.** `v1.4.0` to `staging` and to
   `production` are two rows with their own deploy times.
 - **A deploy stamped before the publish creates a stub**: empty title and
   notes, `released_at` null. Pipelines that deploy and then publish, or
   whose two jobs race, lose nothing; the publish fills the stub in and
-  keeps its `deployed_at`. A stub is on the timeline (as a deploy) but not
-  in the release log or the public pages until it is published.
+  keeps its `deployed_at`. A stub is on the timeline (as a deploy) and in
+  the deploys on its version's page once some environment of that version
+  is published, but it is not in the release log or the feed.
 - The first write answers **201**, every later one **200**, with the
   release either way.
 
@@ -96,20 +104,28 @@ shows them to everyone already.
 | Method and path | Token | Body | Success |
 |---|---|---|---|
 | `POST /api/v1/releases` | `release` | `{project, version, environment?, title?, notes?, url?, released_at?, deployed_at?}` | 201 created, 200 updated; the release |
-| `POST /api/v1/releases/{project}/{version}/deployed` | `release` | optional `{environment?, deployed_at?}`; empty means production, now | 201 stub created, 200 stamped (the new time replaces the recorded one); the release |
-| `GET /api/v1/releases?project=&since=&limit=` | none, or `status:read` | | 200, `{releases, truncated}`, newest `released_at` first |
-| `GET /api/v1/timeline?component=&since=&limit=` | none, or `status:read` | | 200, `{since, events, truncated}`, oldest first |
+| `POST /api/v1/releases/{project}/{version}/deployed` | `release` | optional `{environment?, deployed_at?}`; empty means production, now | 201 stub created, 200 stamped (the later of the new and recorded times is kept); the release |
+| `GET /api/v1/releases?project=&since=&before=&limit=` | none, or `status:read` | | 200, `{releases, truncated, next_before}`, newest `released_at` first |
+| `GET /api/v1/timeline?component=&since=&after=&limit=` | none, or `status:read` | | 200, `{since, events, truncated, next_after}`, oldest first |
 
 - **Release list**: `limit` 1 to 200, default 50. `since` keeps releases
-  published at or after it. Stubs are not listed.
+  published at or after it. Stubs are not listed. When `truncated` is
+  true, `next_before` is an opaque cursor: pass it back as `before` for
+  the next, older page, and keep paging until `truncated` is false. The
+  cursor is the last release's `(released_at, id)`, so releases published
+  in the same millisecond are neither repeated nor skipped. Each
+  environment is its own entry here; the public pages group them.
 - **Timeline**: outages (at their start), incidents and maintenance (at
   creation), deploys (at `deployed_at`) and releases not yet deployed (at
   `released_at`), read from one database snapshot. Ties on time order by
   kind (outage, incident, deploy, release), then id. `since` defaults to
   30 days ago and may reach back at most 366 days; `limit` is 1 to 500,
-  default 100. `truncated` says more events fell in the window: ask again
-  with `since` set to the last event's `at` (events at that instant repeat;
-  skip them by `kind` and `id`). `component` keeps outages of its checks
+  default 100. `truncated` says more events fell in the window, and
+  `next_after` is an opaque cursor: pass it back as `after`, with the same
+  `since` and `component`, for the next page. The cursor is the last
+  event's time, kind and id, so a page boundary inside one instant neither
+  repeats nor skips an event; a cursor that is not one tocsin handed out
+  is a 422 naming `after`. `component` keeps outages of its checks
   and heartbeats, incidents naming it, and deploys of projects that list
   it; an unknown component is a 422.
 
@@ -121,7 +137,7 @@ The release-specific ones:
 | 401 | `unauthorized` | A write with no token or an unknown one; a read with an unknown one. |
 | 403 | `forbidden` | A write without `release`; a read with a token that lacks `status:read`. |
 | 413 | `too_large` | `notes` over 64 KiB. (A body over 2 MiB is also 413.) |
-| 422 | `invalid` | An unknown project or component (named in the message), a bad version or environment (in the body or the path), a title over 200 characters, `released_at` earlier than recorded, a `since` or `limit` out of range. |
+| 422 | `invalid` | An unknown project or component (named in the message), a bad version or environment (in the body or the path), a title over 200 characters, `released_at` earlier than recorded, a `released_at` or `deployed_at` more than an hour past the server's clock, a `since` or `limit` out of range, a `before` or `after` that is not a cursor tocsin handed out. |
 
 ### Events
 
@@ -137,10 +153,10 @@ These load no script and fit a phone.
 
 | Page | |
 |---|---|
-| `/releases` | Published releases of public projects, newest first; `?project=` narrows to one. |
-| `/releases/<project>/<version>` | One release: title, notes, and every environment it was published to with its deploy time. A stub (deployed, never published) is not shown. |
-| `/releases.atom` | An Atom feed of the latest 20, with `?project=`. Links are absolute when `[server] public_url` is set. |
-| `/admin/timeline` | Behind [admin sign-in](admin.md): the last 30 days of outages, incidents and deploys, newest first, every project included, with a component filter. When more than 500 events fall in the window it says so and shows the oldest 500. |
+| `/releases` | Published versions of public projects, newest first; `?project=` narrows to one. A version published to several environments is one entry, dated at its first publish, with the production release's title (or else the first published). |
+| `/releases/<project>/<version>` | One version: title, notes, and every environment it reached with its deploy time, environments only stamped included. A version no environment has published yet has no page. |
+| `/releases.atom` | An Atom feed of the latest 20 versions, with `?project=`, one entry per version like the list. An entry's id is `urn:tocsin:release:<project>:<version>`, so publishing to another environment never shows a reader a second entry. Links are absolute when `[server] public_url` is set. |
+| `/admin/timeline` | Behind [admin sign-in](admin.md): the last 30 days of outages, incidents and deploys, newest first, every project included, with a component filter. When more than 500 events fall in the window it shows the newest 500 and says so. |
 
 Notes are Markdown rendered by the same sanitizing renderer incidents use:
 raw HTML is escaped, links are `http`, `https` or `mailto` only, and no
@@ -274,5 +290,11 @@ function as the API and the admin page, so the window bound, the limit and
 the visibility rule cannot drift:
 
 ```rust
-crate::http::timeline::read(&state, Viewer::Public, Some(component_id), since, limit).await
+crate::http::timeline::read(&state, Viewer::Public, Window {
+    component: Some(component_id),
+    since,
+    after: None,
+    order: Order::NewestFirst,
+    limit,
+}).await
 ```

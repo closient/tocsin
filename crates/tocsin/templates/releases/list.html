@@ -26,11 +26,9 @@
     <a class="item-title" href="{{ release.href }}">{{ release.title }}</a>
     <div class="meta">
       <span class="badge">{{ release.project }} {{ release.version }}</span>
-      {%- if let Some(environment) = release.environment %} <span class="badge">{{ environment }}</span>{% endif %}
-      <span class="muted">
-        {%- if let Some(at) = release.released_at %}released <time datetime="{{ at.iso }}">{{ at.text }}</time>{% endif %}
-        {%- if let Some(at) = release.deployed_at %} · deployed <time datetime="{{ at.iso }}">{{ at.text }}</time>{% endif %}
-      </span>
+      {%- if let Some(at) = release.released_at %}
+      <span class="muted">released <time datetime="{{ at.iso }}">{{ at.text }}</time></span>
+      {%- endif %}
     </div>
   </li>
   {%- endfor %}

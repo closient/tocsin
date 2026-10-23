@@ -4,7 +4,9 @@
 //! `/releases/{project}/{version}`, and the Atom feed at `/releases.atom`.
 //!
 //! These pages show what an anonymous reader of the API sees: public
-//! projects only, through [`crate::http::releases::visible_projects`]. They
+//! projects only, through [`crate::http::releases::visible_projects`]. The
+//! list and the feed have one entry per version, dated at its first
+//! publish; the version's page shows every environment it reached. They
 //! load no script. Notes are Markdown, shown only through
 //! [`markdown::render`]; titles and every other value are escaped by
 //! askama.
@@ -18,7 +20,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use serde::Deserialize;
 use tocsin_core::incident::Timestamp;
-use tocsin_core::release::{DEFAULT_ENVIRONMENT, Release};
+use tocsin_core::release::Release;
 use tocsin_store::ReleaseQuery;
 
 use super::markdown;
@@ -64,15 +66,13 @@ struct ProjectChoice {
     selected: bool,
 }
 
-/// One release in the list.
+/// One version in the list.
 struct Row {
     href: String,
     project: String,
     version: String,
     title: String,
-    environment: Option<String>,
     released_at: Option<Stamp>,
-    deployed_at: Option<Stamp>,
 }
 
 #[derive(Template)]
@@ -147,21 +147,22 @@ impl ProjectFilter {
     }
 }
 
-/// The public view of `project`'s published releases, or every public
-/// project's, newest first; whether more matched than `limit`.
-async fn visible(
+/// The public view of `project`'s published versions, or every public
+/// project's, one release standing for each, newest first; whether more
+/// matched than `limit`.
+async fn versions(
     state: &AppState,
     project: Option<String>,
-    version: Option<String>,
     limit: u32,
 ) -> Result<(Vec<Release>, bool), HtmlError> {
     state
         .store
-        .releases(ReleaseQuery {
+        .release_versions(ReleaseQuery {
             visible: visible_projects(&state.config, Viewer::Public),
             project,
-            version,
+            version: None,
             since: None,
+            before: None,
             limit,
         })
         .await
@@ -193,7 +194,7 @@ async fn list(
     let Query(filter) = query
         .map_err(|_| HtmlError::new(StatusCode::BAD_REQUEST, "`project` must be one value."))?;
     let project = filter.project(&state)?;
-    let (releases, truncated) = visible(&state, project.clone(), None, PAGE_SIZE).await?;
+    let (releases, truncated) = versions(&state, project.clone(), PAGE_SIZE).await?;
     let page = ListPage {
         layout: Layout::public(project.as_deref().map_or_else(
             || "Releases".to_owned(),
@@ -218,10 +219,7 @@ async fn list(
                 project: project_name(&state, &release.project),
                 version: release.version.clone(),
                 title: release.display_title().to_owned(),
-                environment: (release.environment != DEFAULT_ENVIRONMENT)
-                    .then(|| release.environment.clone()),
                 released_at: release.released_at.map(Stamp::new),
-                deployed_at: release.deployed_at.map(Stamp::new),
             })
             .collect(),
         truncated,
@@ -241,22 +239,29 @@ async fn detail(
     path: Result<Path<ReleasePath>, PathRejection>,
 ) -> Result<Response, HtmlError> {
     let Path(ReleasePath { project, version }) = path.map_err(|_| HtmlError::not_found())?;
-    // Every environment this version was published to; the production
-    // one, or else the first, supplies the title and notes.
-    let (mut releases, _) = visible(
-        &state,
-        Some(project.clone()),
-        Some(version.clone()),
-        PAGE_SIZE,
-    )
-    .await?;
-    releases.sort_by(|a, b| {
-        (a.environment != DEFAULT_ENVIRONMENT, &a.environment)
-            .cmp(&(b.environment != DEFAULT_ENVIRONMENT, &b.environment))
-    });
-    let Some(release) = releases.first() else {
+    // Every environment this version reached, stamped-only ones included,
+    // production first.
+    let releases = state
+        .store
+        .release_environments(
+            visible_projects(&state.config, Viewer::Public),
+            project.clone(),
+            version.clone(),
+        )
+        .await
+        .map_err(|error| HtmlError::internal(&error))?;
+    // The production release, or else the first published, supplies the
+    // title and notes; a version never published has no page.
+    let Some(release) = releases
+        .iter()
+        .find(|release| release.released_at.is_some())
+    else {
         return Err(HtmlError::not_found());
     };
+    let first_released = releases
+        .iter()
+        .filter_map(|release| release.released_at)
+        .min();
     let name = project_name(&state, &project);
     let page = DetailPage {
         layout: Layout::public(format!("{name} {version}")),
@@ -264,7 +269,7 @@ async fn detail(
         project: name,
         version: version.clone(),
         title: release.display_title().to_owned(),
-        released_at: release.released_at.map(Stamp::new),
+        released_at: first_released.map(Stamp::new),
         url: release.url.clone(),
         notes_html: markdown::render(&release.notes),
         deploys: releases
@@ -285,7 +290,7 @@ async fn feed(
     let Query(filter) = query
         .map_err(|_| HtmlError::new(StatusCode::BAD_REQUEST, "`project` must be one value."))?;
     let project = filter.project(&state)?;
-    let (releases, _) = visible(&state, project.clone(), None, FEED_SIZE).await?;
+    let (releases, _) = versions(&state, project.clone(), FEED_SIZE).await?;
     // Links are absolute when `[server] public_url` says where the site
     // is; feed readers resolve relative ones against the feed's URL.
     let base = state
@@ -317,7 +322,9 @@ async fn feed(
         entries: releases
             .iter()
             .map(|release| Entry {
-                id: format!("urn:tocsin:release:{}", release.id),
+                // Per version, so a later environment's publish, which may
+                // change which release stands for it, is the same entry.
+                id: format!("urn:tocsin:release:{}:{}", release.project, release.version),
                 link: format!("{base}{}", href(release)),
                 title: format!(
                     "{} {}: {}",

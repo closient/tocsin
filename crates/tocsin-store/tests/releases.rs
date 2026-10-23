@@ -11,9 +11,9 @@ use std::time::Duration;
 use rusqlite::Connection;
 use tocsin_core::Health;
 use tocsin_core::incident::{Actor, Impact, IncidentKind, NewIncident, Timestamp};
-use tocsin_core::release::{DeployStamp, NewRelease, TimelineEvent};
+use tocsin_core::release::{DeployStamp, NewRelease, ReleaseCursor, TimelineCursor, TimelineEvent};
 use tocsin_store::{
-    ComponentScope, Error, NewOutage, Projects, ReleaseQuery, Store, TimelineQuery, Written,
+    ComponentScope, Error, NewOutage, Order, Projects, ReleaseQuery, Store, TimelineQuery, Written,
 };
 
 struct Fixture {
@@ -66,6 +66,7 @@ fn all(project: Option<&str>) -> ReleaseQuery {
         project: project.map(Into::into),
         version: None,
         since: None,
+        before: None,
         limit: 100,
     }
 }
@@ -225,6 +226,114 @@ async fn a_deploy_stamped_after_the_publish_lands_on_it() {
 }
 
 #[tokio::test]
+async fn a_deploy_time_never_moves_earlier() {
+    let fixture = open();
+    let stamp = |ms| DeployStamp {
+        environment: None,
+        deployed_at: Some(at(ms)),
+    };
+    fixture
+        .store
+        .stamp_deploy("api".into(), "v5".into(), stamp(8_000), ci(), at(9_000))
+        .await
+        .unwrap();
+    // A retried or out-of-order CI job reports an older deploy.
+    let (late, written) = fixture
+        .store
+        .stamp_deploy("api".into(), "v5".into(), stamp(3_000), ci(), at(9_500))
+        .await
+        .unwrap();
+    assert_eq!(written, Written::Updated);
+    assert_eq!(late.deployed_at, Some(at(8_000)));
+
+    // So does a publish carrying an old deploy time.
+    let mut publish = release("api", "v5");
+    publish.deployed_at = Some(at(4_000));
+    let (published, _) = fixture
+        .store
+        .publish_release(publish, ci(), at(10_000))
+        .await
+        .unwrap();
+    assert_eq!(published.deployed_at, Some(at(8_000)));
+
+    // A later time from either still lands.
+    let mut publish = release("api", "v5");
+    publish.deployed_at = Some(at(12_000));
+    let (published, _) = fixture
+        .store
+        .publish_release(publish, ci(), at(12_500))
+        .await
+        .unwrap();
+    assert_eq!(published.deployed_at, Some(at(12_000)));
+    let (stamped, _) = fixture
+        .store
+        .stamp_deploy("api".into(), "v5".into(), stamp(13_000), ci(), at(13_000))
+        .await
+        .unwrap();
+    assert_eq!(stamped.deployed_at, Some(at(13_000)));
+}
+
+#[tokio::test]
+async fn times_far_past_the_clock_are_refused() {
+    let fixture = open();
+    let now = at(1_760_000_000_000);
+    let hour = 60 * 60 * 1000;
+    // 3026 for 2026: a thousand years out.
+    let typo = at(now.as_millis() + 1_000 * 365 * 24 * hour);
+    let field = |error: Error| match error {
+        Error::Invalid(errors) => errors.into_iter().map(|e| e.path).collect::<Vec<_>>(),
+        other => panic!("{other}"),
+    };
+
+    let mut new = release("api", "v1");
+    new.released_at = Some(typo);
+    let error = fixture
+        .store
+        .publish_release(new, ci(), now)
+        .await
+        .unwrap_err();
+    assert_eq!(field(error), ["released_at"]);
+    let mut new = release("api", "v1");
+    new.deployed_at = Some(typo);
+    let error = fixture
+        .store
+        .publish_release(new, ci(), now)
+        .await
+        .unwrap_err();
+    assert_eq!(field(error), ["deployed_at"]);
+    let stamp = DeployStamp {
+        environment: None,
+        deployed_at: Some(typo),
+    };
+    let error = fixture
+        .store
+        .stamp_deploy("api".into(), "v1".into(), stamp, ci(), now)
+        .await
+        .unwrap_err();
+    assert_eq!(field(error), ["deployed_at"]);
+    assert_eq!(count(&fixture), 0);
+
+    // Up to the tolerance is a clock a little ahead, and is kept.
+    let edge = at(now.as_millis() + hour);
+    let mut new = release("api", "v1");
+    new.released_at = Some(edge);
+    new.deployed_at = Some(edge);
+    let (kept, _) = fixture.store.publish_release(new, ci(), now).await.unwrap();
+    assert_eq!(
+        (kept.released_at, kept.deployed_at),
+        (Some(edge), Some(edge))
+    );
+    let mut new = release("api", "v2");
+    new.released_at = Some(at(edge.as_millis() + 1));
+    let error = fixture
+        .store
+        .publish_release(new, ci(), now)
+        .await
+        .unwrap_err();
+    assert_eq!(field(error), ["released_at"]);
+}
+
+#[tokio::test]
 async fn released_at_moves_later_on_request_and_never_earlier() {
     let fixture = open();
     let mut first = release("api", "v4");
@@ -324,6 +433,8 @@ async fn reads_see_only_the_projects_they_are_given() {
         .timeline(TimelineQuery {
             visible: only(),
             since: at(0),
+            after: None,
+            order: Order::OldestFirst,
             limit: 100,
             component: None,
         })
@@ -376,6 +487,113 @@ async fn release_lists_are_newest_first_and_say_when_truncated() {
         .unwrap();
     assert_eq!(since.len(), 2);
     assert!(!truncated);
+}
+
+#[tokio::test]
+async fn release_lists_page_by_time_then_id() {
+    let fixture = open();
+    // Three versions share an instant, so the cursor needs the id.
+    let mut expected = Vec::new();
+    for (index, ms) in [1_000, 2_000, 2_000, 2_000, 3_000, 4_000, 5_000]
+        .into_iter()
+        .enumerate()
+    {
+        let (written, _) = fixture
+            .store
+            .publish_release(release("api", &format!("v{index}")), ci(), at(ms))
+            .await
+            .unwrap();
+        expected.push(written.version);
+    }
+    expected.reverse();
+    let mut seen = Vec::new();
+    let mut before = None;
+    loop {
+        let (page, truncated) = fixture
+            .store
+            .releases(ReleaseQuery {
+                before,
+                limit: 2,
+                ..all(None)
+            })
+            .await
+            .unwrap();
+        seen.extend(page.iter().map(|release| release.version.clone()));
+        if !truncated {
+            break;
+        }
+        before = ReleaseCursor::after(page.last().unwrap());
+    }
+    assert_eq!(seen, expected);
+}
+
+#[tokio::test]
+async fn versions_list_once_dated_at_their_first_publish() {
+    let fixture = open();
+    let publish = |version: &str, environment: &str, ms: i64| {
+        let mut new = release("api", version);
+        new.environment = Some(environment.into());
+        new.title = Some(format!("{version} to {environment}"));
+        fixture.store.publish_release(new, ci(), at(ms))
+    };
+    // v1 reaches staging first, then production; v2 only staging.
+    publish("v1", "staging", 1_000).await.unwrap();
+    publish("v1", "production", 3_000).await.unwrap();
+    publish("v2", "staging", 2_000).await.unwrap();
+    // A stamp alone is not a published version.
+    fixture
+        .store
+        .stamp_deploy(
+            "api".into(),
+            "v3".into(),
+            DeployStamp::default(),
+            ci(),
+            at(4_000),
+        )
+        .await
+        .unwrap();
+    let (versions, truncated) = fixture.store.release_versions(all(None)).await.unwrap();
+    assert!(!truncated);
+    let shown: Vec<_> = versions
+        .iter()
+        .map(|release| {
+            (
+                release.version.as_str(),
+                release.title.as_str(),
+                release.released_at,
+            )
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("v2", "v2 to staging", Some(at(2_000))),
+            // Production speaks for it; dated at staging's earlier publish.
+            ("v1", "v1 to production", Some(at(1_000))),
+        ]
+    );
+
+    // Every row for the version, the stub included, production first.
+    let rows = fixture
+        .store
+        .release_environments(Projects::All, "api".into(), "v1".into())
+        .await
+        .unwrap();
+    let environments: Vec<_> = rows.iter().map(|r| r.environment.as_str()).collect();
+    assert_eq!(environments, ["production", "staging"]);
+    let stub = fixture
+        .store
+        .release_environments(Projects::All, "api".into(), "v3".into())
+        .await
+        .unwrap();
+    assert_eq!(stub.len(), 1);
+    assert_eq!(stub[0].released_at, None);
+    let hidden = fixture
+        .store
+        .release_environments(Projects::Only(vec![]), "api".into(), "v1".into())
+        .await
+        .unwrap();
+    assert_eq!(hidden, []);
 }
 
 fn outage(check: &str, component: Option<&str>, started_at_ms: i64) -> NewOutage {
@@ -472,6 +690,8 @@ fn window(since: i64, limit: u32) -> TimelineQuery {
     TimelineQuery {
         visible: Projects::All,
         since: at(since),
+        after: None,
+        order: Order::OldestFirst,
         limit,
         component: None,
     }
@@ -576,4 +796,104 @@ async fn the_timeline_filters_to_one_component() {
         panic!("an incident");
     };
     assert_eq!(components, &["api"]);
+}
+
+#[tokio::test]
+async fn the_timeline_pages_through_one_instant_without_gaps_or_repeats() {
+    let fixture = open();
+    let store = &fixture.store;
+    // 150 events in one millisecond, every kind.
+    for index in 0..60 {
+        store
+            .open_outage(outage(&format!("check-{index}"), None, 1_000))
+            .await
+            .unwrap();
+    }
+    for _ in 0..30 {
+        store
+            .create_incident(incident("api"), ci(), at(1_000))
+            .await
+            .unwrap();
+    }
+    for index in 0..60 {
+        let mut new = release("api", &format!("v{index}"));
+        new.released_at = Some(at(1_000));
+        // Half deployed, half only published.
+        if index % 2 == 0 {
+            new.deployed_at = Some(at(1_000));
+        }
+        store.publish_release(new, ci(), at(1_000)).await.unwrap();
+    }
+    let everything = store.timeline(window(0, 500)).await.unwrap();
+    assert_eq!(everything.events.len(), 150);
+    assert!(!everything.truncated);
+    assert_eq!(everything.next_after, None);
+
+    let first = store.timeline(window(0, 100)).await.unwrap();
+    assert_eq!(first.events.len(), 100);
+    assert!(first.truncated);
+    let cursor: TimelineCursor = first.next_after.as_deref().unwrap().parse().unwrap();
+    let second = store
+        .timeline(TimelineQuery {
+            after: Some(cursor),
+            ..window(0, 100)
+        })
+        .await
+        .unwrap();
+    assert_eq!(second.events.len(), 50);
+    assert!(!second.truncated);
+    assert_eq!(second.next_after, None);
+    let paged: Vec<_> = first.events.into_iter().chain(second.events).collect();
+    assert_eq!(paged, everything.events);
+}
+
+#[tokio::test]
+async fn the_newest_end_reads_backwards_through_the_same_order() {
+    let fixture = open();
+    history(&fixture).await;
+    let oldest_first = fixture.store.timeline(window(1_000, 100)).await.unwrap();
+    let newest = |after| TimelineQuery {
+        order: Order::NewestFirst,
+        after,
+        ..window(1_000, 3)
+    };
+    let first = fixture.store.timeline(newest(None)).await.unwrap();
+    assert!(first.truncated);
+    assert_eq!(
+        kinds(&first.events),
+        [("incident", 6_000), ("deploy", 5_000), ("outage", 4_000)]
+    );
+    let mut paged = first.events;
+    let mut next = first.next_after;
+    while let Some(cursor) = next {
+        let page = fixture
+            .store
+            .timeline(newest(Some(cursor.parse().unwrap())))
+            .await
+            .unwrap();
+        paged.extend(page.events);
+        next = page.next_after;
+    }
+    paged.reverse();
+    assert_eq!(paged, oldest_first.events);
+}
+
+#[tokio::test]
+async fn the_timeline_reads_incidents_by_creation_time_from_an_index() {
+    let fixture = open();
+    let plan: Vec<String> = raw(&fixture)
+        .prepare(
+            "EXPLAIN QUERY PLAN SELECT id, created_at FROM incident \
+             WHERE created_at >= ?1 AND (created_at, 1, id) > (?1, 1, ?2) \
+             ORDER BY created_at ASC, id ASC LIMIT 101",
+        )
+        .unwrap()
+        .query_map([0, 0], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(
+        plan.iter().any(|step| step.contains("incident_by_created")),
+        "{plan:?}"
+    );
 }

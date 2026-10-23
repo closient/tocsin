@@ -13,13 +13,14 @@ use axum::response::Response;
 use axum::routing::get;
 use serde::Deserialize;
 use tocsin_core::release::{Release, TimelineEvent};
+use tocsin_store::Order;
 
 use super::identity::Admin;
 use super::page::{HtmlError, Layout, render};
 use super::releases::Stamp;
 use crate::http::AppState;
 use crate::http::auth::Viewer;
-use crate::http::timeline::{self, MAX_LIMIT};
+use crate::http::timeline::{self, MAX_LIMIT, Window};
 
 /// The admin timeline route. Merged only when `[server.auth]` turns the
 /// admin pages on.
@@ -69,14 +70,16 @@ async fn page(
         .map_err(|_| HtmlError::new(StatusCode::BAD_REQUEST, "`component` must be one value."))?;
     let component = filter.component.filter(|id| !id.is_empty());
     let since = timeline::default_since();
-    let found = timeline::read(
-        &state,
-        Viewer::Trusted,
-        component.as_deref(),
+    // The newest page: what happened most recently is what an operator
+    // opened this for.
+    let window = Window {
+        component: component.as_deref(),
         since,
-        MAX_LIMIT,
-    )
-    .await?;
+        after: None,
+        order: Order::NewestFirst,
+        limit: MAX_LIMIT,
+    };
+    let found = timeline::read(&state, Viewer::Trusted, window).await?;
     let page = TimelinePage {
         layout: Layout::admin("Timeline", &admin),
         components: state
@@ -90,8 +93,7 @@ async fn page(
             })
             .collect(),
         since: Stamp::new(found.since),
-        // Newest first, as the incident list reads.
-        events: found.events.iter().rev().map(row).collect(),
+        events: found.events.iter().map(row).collect(),
         truncated: found.truncated,
     };
     Ok(render(StatusCode::OK, &page))

@@ -40,7 +40,7 @@ pub use crate::error::{Error, Result};
 pub use crate::incident::OpenIncident;
 pub use crate::outage::{LastUp, Outage};
 use crate::readers::Readers;
-pub use crate::release::{ComponentScope, Projects, ReleaseQuery, TimelineQuery, Written};
+pub use crate::release::{ComponentScope, Order, Projects, ReleaseQuery, TimelineQuery, Written};
 pub use crate::rollup::DailyRollup;
 use crate::writer::{Insert, Writer};
 
@@ -390,7 +390,8 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] if `new.released_at` is before the recorded one;
+    /// [`Error::Invalid`] if `new.released_at` is before the recorded one,
+    /// or either time is more than [`FUTURE_TOLERANCE`] past `at`;
     /// otherwise a value breaks a constraint, or the write fails.
     pub async fn publish_release(
         &self,
@@ -417,7 +418,9 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// A value breaks a constraint, or the write fails.
+    /// [`Error::Invalid`] if the stamp is more than [`FUTURE_TOLERANCE`]
+    /// past `at`; otherwise a value breaks a constraint, or the write
+    /// fails.
     pub async fn stamp_deploy(
         &self,
         project: String,
@@ -449,8 +452,37 @@ impl Store {
         self.read(move |conn| release::list(conn, &query)).await
     }
 
-    /// Outages, incidents, deploys and releases matching `query`, oldest
-    /// first, read from one snapshot.
+    /// One release per project and version matching `query`, newest
+    /// first, and whether more matched than its limit. The production
+    /// release stands for the version if it was published there, else the
+    /// first published; its `released_at` is the version's first publish
+    /// in any environment.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn release_versions(&self, query: ReleaseQuery) -> Result<(Vec<Release>, bool)> {
+        self.read(move |conn| release::versions(conn, &query)).await
+    }
+
+    /// Every environment's row for `project` `version` that `visible`
+    /// allows, deploy stamps included; production first.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn release_environments(
+        &self,
+        visible: Projects,
+        project: String,
+        version: String,
+    ) -> Result<Vec<Release>> {
+        self.read(move |conn| release::environments(conn, &visible, &project, &version))
+            .await
+    }
+
+    /// Outages, incidents, deploys and releases matching `query`, in its
+    /// order, read from one snapshot.
     ///
     /// # Errors
     ///

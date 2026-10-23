@@ -619,3 +619,157 @@ async fn the_openapi_document_lists_the_release_routes() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_time_far_past_the_server_clock_is_422_naming_its_field() {
+    let api = api();
+    // 3026 for 2026.
+    let typo = "3026-10-23T12:00:00Z";
+    for field in ["released_at", "deployed_at"] {
+        let mut body = release("api", "v1");
+        body[field] = json!(typo);
+        let (status, error) = api.publish(body).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+        assert_eq!(error["fields"][0]["path"], field, "{error}");
+        assert!(
+            error["fields"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("3026")
+        );
+    }
+    let (status, error) = api
+        .deployed("api", "v1", Some(json!({"deployed_at": typo})))
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["fields"][0]["path"], "deployed_at", "{error}");
+    let (_, list) = api.send(Method::GET, "/api/v1/releases", None, None).await;
+    assert_eq!(list["releases"], json!([]), "{list}");
+}
+
+#[tokio::test]
+async fn the_release_list_pages_down_to_the_oldest_with_before() {
+    let api = api();
+    let mut published = Vec::new();
+    for index in 0..205 {
+        let version = format!("r{index}");
+        let (status, _) = api.publish(release("api", &version)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        published.push(version);
+    }
+    published.reverse();
+
+    let mut seen = Vec::new();
+    let mut uri = "/api/v1/releases?limit=200".to_owned();
+    loop {
+        let (status, page) = api.send(Method::GET, &uri, None, None).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        seen.extend(
+            page["releases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|release| release["version"].as_str().unwrap().to_owned()),
+        );
+        if page["truncated"] == json!(false) {
+            assert_eq!(page["next_before"], Value::Null);
+            break;
+        }
+        let before = page["next_before"].as_str().unwrap();
+        uri = format!("/api/v1/releases?limit=200&before={before}");
+    }
+    assert_eq!(seen, published);
+
+    let (status, error) = api
+        .send(Method::GET, "/api/v1/releases?before=yesterday", None, None)
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["fields"][0]["path"], "before", "{error}");
+}
+
+#[tokio::test]
+async fn the_timeline_api_reads_oldest_first_and_says_where_to_go_on() {
+    let api = api();
+    for index in 0..510 {
+        api.deployed("api", &format!("r{index}"), None).await;
+    }
+    let versions = |timeline: &Value| -> Vec<String> {
+        timeline["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["release"]["version"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let (_, first) = api
+        .send(Method::GET, "/api/v1/timeline?limit=500", None, None)
+        .await;
+    assert_eq!(first["truncated"], true, "{first}");
+    let first_versions = versions(&first);
+    assert_eq!(first_versions.len(), 500);
+    assert_eq!(first_versions[0], "r0");
+    let after = first["next_after"].as_str().unwrap();
+    let (_, rest) = api
+        .send(
+            Method::GET,
+            &format!("/api/v1/timeline?limit=500&after={after}"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(rest["truncated"], false, "{rest}");
+    assert_eq!(rest["next_after"], Value::Null);
+    let all: Vec<_> = first_versions.into_iter().chain(versions(&rest)).collect();
+    let expected: Vec<_> = (0..510).map(|index| format!("r{index}")).collect();
+    assert_eq!(all, expected);
+
+    let (status, error) = api
+        .send(Method::GET, "/api/v1/timeline?after=9_9", None, None)
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["fields"][0]["path"], "after", "{error}");
+}
+
+#[tokio::test]
+async fn a_version_lists_once_and_its_page_shows_every_environment() {
+    let api = api();
+    let mut staging = release("api", "v2.0.0");
+    staging["environment"] = json!("staging");
+    staging["title"] = json!("Staging title");
+    api.publish(staging).await;
+    let mut production = release("api", "v2.0.0");
+    production["title"] = json!("Production title");
+    api.publish(production).await;
+    // Only stamped: no publish for canary.
+    api.deployed("api", "v2.0.0", Some(json!({"environment": "canary"})))
+        .await;
+
+    let (_, list) = api.page("/releases").await;
+    assert_eq!(
+        list.matches("href=\"/releases/api/v2.0.0\"").count(),
+        1,
+        "{list}"
+    );
+    assert!(list.contains("Production title") && !list.contains("Staging title"));
+    let (_, feed) = api.page("/releases.atom").await;
+    assert_eq!(feed.matches("<entry>").count(), 1, "{feed}");
+    assert!(
+        feed.contains("<id>urn:tocsin:release:api:v2.0.0</id>"),
+        "{feed}"
+    );
+
+    let (status, detail) = api.page("/releases/api/v2.0.0").await;
+    assert_eq!(status, StatusCode::OK);
+    for environment in ["production", "staging", "canary"] {
+        assert!(
+            detail.contains(&format!("<span class=\"badge\">{environment}</span>")),
+            "{environment}: {detail}"
+        );
+    }
+    // A version that was only ever stamped has no page yet.
+    api.deployed("api", "v3.0.0", None).await;
+    assert_eq!(
+        api.page("/releases/api/v3.0.0").await.0,
+        StatusCode::NOT_FOUND
+    );
+}

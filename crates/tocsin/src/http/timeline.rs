@@ -12,8 +12,8 @@ use axum::extract::{Query, State};
 use serde::Deserialize;
 use tocsin_core::config::Config;
 use tocsin_core::incident::{FieldError, Timestamp};
-use tocsin_core::release::Timeline;
-use tocsin_store::{ComponentScope, TimelineQuery};
+use tocsin_core::release::{Timeline, TimelineCursor};
+use tocsin_store::{ComponentScope, Order, TimelineQuery};
 use utoipa::IntoParams;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -41,7 +41,7 @@ pub fn router() -> OpenApiRouter<AppState> {
     OpenApiRouter::new().routes(routes!(get_timeline))
 }
 
-/// `?component=&since=&limit=` on the timeline.
+/// `?component=&since=&after=&limit=` on the timeline.
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 #[serde(deny_unknown_fields)]
@@ -50,10 +50,27 @@ pub struct TimelineParams {
     /// incidents naming it, deploys of projects that list it.
     component: Option<String>,
     /// The start of the window (RFC 3339): at most 366 days ago; default
-    /// 30 days ago.
+    /// 30 days ago. Keep it the same while paging.
     since: Option<Timestamp>,
+    /// Only events after the previous page's last: its `next_after`.
+    after: Option<String>,
     /// Events, 1 to 500; default 100.
     limit: Option<u32>,
+}
+
+/// Which part of the timeline [`read`] returns.
+#[derive(Debug, Clone, Copy)]
+pub struct Window<'a> {
+    /// Only events touching this `[[component]]`.
+    pub component: Option<&'a str>,
+    /// Events at or after this.
+    pub since: Timestamp,
+    /// Only events past this cursor, as the caller was handed it.
+    pub after: Option<&'a str>,
+    /// Which end to start from.
+    pub order: Order,
+    /// At most this many events.
+    pub limit: u32,
 }
 
 /// Outages, incidents and deploys, oldest first, read in one snapshot.
@@ -69,7 +86,7 @@ pub struct TimelineParams {
         (status = 200, description = "Oldest first", body = Timeline),
         (status = 401, description = "An `Authorization` header with an unknown token", body = ErrorBody),
         (status = 403, description = "A token without the `status:read` scope", body = ErrorBody),
-        (status = 422, description = "An unknown component, or a bad `since` or `limit`", body = ErrorBody),
+        (status = 422, description = "An unknown component, or a bad `since`, `after` or `limit`", body = ErrorBody),
     ),
 )]
 pub async fn get_timeline(
@@ -79,11 +96,14 @@ pub async fn get_timeline(
 ) -> Result<Json<Timeline>, ApiError> {
     let Query(query) = query
         .map_err(|rejection| ApiError::invalid(vec![FieldError::new("", rejection.body_text())]))?;
-    let since = query.since.unwrap_or_else(default_since);
-    let limit = query.limit.unwrap_or(DEFAULT_LIMIT);
-    read(&state, viewer, query.component.as_deref(), since, limit)
-        .await
-        .map(Json)
+    let window = Window {
+        component: query.component.as_deref(),
+        since: query.since.unwrap_or_else(default_since),
+        after: query.after.as_deref(),
+        order: Order::OldestFirst,
+        limit: query.limit.unwrap_or(DEFAULT_LIMIT),
+    };
+    read(&state, viewer, window).await.map(Json)
 }
 
 /// The default window's start: [`DEFAULT_WINDOW_MS`] ago.
@@ -91,20 +111,27 @@ pub fn default_since() -> Timestamp {
     Timestamp::from_millis(now().as_millis() - DEFAULT_WINDOW_MS)
 }
 
-/// The timeline as `viewer` sees it: events at or after `since`, at most
-/// `limit`, touching `component` when one is given.
+/// The timeline as `viewer` sees it: events at or after `window.since`,
+/// past `window.after`, at most `window.limit` from the end
+/// `window.order` names, touching `window.component` when one is given.
 ///
 /// # Errors
 ///
 /// 422 for an unknown component, a `since` more than [`MAX_WINDOW_MS`]
-/// ago, or a `limit` outside 1 to [`MAX_LIMIT`]; 500 if the store fails.
+/// ago, an `after` no page handed out, or a `limit` outside 1 to
+/// [`MAX_LIMIT`]; 500 if the store fails.
 pub async fn read(
     state: &AppState,
     viewer: Viewer,
-    component: Option<&str>,
-    since: Timestamp,
-    limit: u32,
+    window: Window<'_>,
 ) -> Result<Timeline, ApiError> {
+    let Window {
+        component,
+        since,
+        after,
+        order,
+        limit,
+    } = window;
     let mut errors = Vec::new();
     let earliest = now().as_millis() - MAX_WINDOW_MS;
     if since.as_millis() < earliest {
@@ -123,6 +150,14 @@ pub async fn read(
             format!("must be 1 to {MAX_LIMIT}"),
         ));
     }
+    let after = match after.map(str::parse::<TimelineCursor>) {
+        Some(Err(bad)) => {
+            errors.push(FieldError::new("after", bad.to_string()));
+            None
+        }
+        Some(Ok(cursor)) => Some(cursor),
+        None => None,
+    };
     let component = match component {
         Some(id) if !state.knows_component(id) => {
             errors.push(FieldError::new(
@@ -142,6 +177,8 @@ pub async fn read(
         .timeline(TimelineQuery {
             visible: visible_projects(&state.config, viewer),
             since,
+            after,
+            order,
             limit,
             component,
         })

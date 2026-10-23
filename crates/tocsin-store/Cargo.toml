@@ -1,0 +1,15 @@
+[package]
+name = "tocsin-store"
+description = "SQLite history store for tocsin."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+tocsin-core.workspace = true
+
+[lints]
+workspace = true

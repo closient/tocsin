@@ -1,0 +1,90 @@
+# tocsin design
+
+tocsin is an open-source, single-binary uptime monitor, status page and release log, written in Rust and configured entirely by files. It is built for Closient first and published for anyone.
+
+This file is the decision record from the 2026-10-22 plan review, and it is canonical: change the design by changing this file in a pull request. It supersedes the February 2026 Go plan and the April 2026 Django plan, neither of which shipped.
+
+## What makes it different
+
+* **Files are the only configuration.** A folder of TOML files defines everything that is watched, how state is derived, who gets alerted and how the page looks. There is no UI and no API for changing configuration, and therefore no Terraform provider. Any tool that writes files (git, Ansible, an agent) is the IaC.
+* **The database holds history, not configuration.** SQLite in a data folder stores check results, outage records, incidents, releases and, from v0.2, subscribers.
+* **Agent-friendly end to end.** Configuring, running, interrogating and integrating must all be easy for a coding agent: schema-validated config, `--json` on every command, one-shot probe runs that explain their verdict, an OpenAPI spec, `/llms.txt`, and an MCP server.
+* **Release log.** CI pushes each release and deploy (version, notes, time) to tocsin. tocsin keeps a public, subscribable log and shows deploys on the same timeline as outages, so "what changed right before this broke" is one glance.
+
+## Decisions — Christian's calls (2026-10-22)
+
+* **Language:** Rust.
+* **Deployment:** one binary, plus a config folder and a data folder.
+* **Topology:** single node first. A central reporting node or federation (nodes behind a firewall or DMZ reporting out, or nodes sharing data with each other) comes later.
+* **Storage:** SQLite.
+* **Configuration:** files only. The format is open as long as agents can write it and it can be verified (see the defaults below for the format chosen).
+* **No Terraform provider.**
+* **Incidents are data, not configuration.** They are stored in SQLite and written through `tocsin incident ...`, an authenticated write API, or a small admin page. They can be exported to markdown. Outages tocsin detects itself are recorded automatically. Scheduled maintenance follows the same rule: it is a kind of incident, not configuration.
+* **Releases are push only.** CI posts the version, notes and deploy time. tocsin never polls GitHub, so there is no GitHub auth to manage.
+* **Checks:** HTTP, TLS certificates, TCP and other standard network protocols, plus push heartbeats (for example, webhooks arriving).
+* **Status page:** components, incidents, a 90-day uptime bar and live updates.
+* **Notifications:** email, Slack, Pushover and more.
+* **Admin UI:** only for incidents and, from v0.2, subscribers. Configuration has no UI.
+* **Auth:** delegated to the proxy in front of tocsin (Cloudflare Access with Google login at Closient). tocsin does not run its own login system.
+* **License:** AGPL-3.0. It stays truly open source, and anyone running a modified version as a service must publish their changes.
+* **v0.1 scope:**
+  * config and validation
+  * every probe type, plus heartbeats
+  * SQLite history
+  * public status page
+  * incidents (CLI, API and admin page)
+  * release log
+  * operator alerts with resolve
+  * `--json` CLI and `/metrics`
+
+  v0.2 adds subscribers and MCP. Federation comes after that.
+
+## Defaults (proposed in the review and not yet overruled; change them here)
+
+* **Config format:** TOML, split across any number of `*.toml` files in the folder and merged, with IDs unique across files. The JSON Schema is generated from the Rust types (`schemars`) and published. `tocsin config check --json` reports every error with its file, line and column. Secrets come from environment variables (`${ENV:NAME}`) and never sit in files.
+* **Reload:** tocsin watches the folder and also reloads on SIGHUP. A reload that fails validation keeps the old config running and reports the error through logs, `/metrics` and the API.
+* **Assertions are structured TOML, not a string DSL.** They can be validated against the schema. Each assertion's failure maps to either `degraded` or `down`, which gives three health states: up, degraded, down.
+* **API:**
+  * Read side: status, history, incidents and releases, described by OpenAPI.
+  * Write side: heartbeat pings, incidents, releases and deploys, and from v0.2 subscriber signup and unsubscribe.
+  * Every write path uses a bearer token declared in config, whose secret comes from an environment variable.
+* **Proxy auth:** tocsin verifies the `Cf-Access-Jwt-Assertion` token against the Cloudflare Access team's public keys (JWKS) and audience. It never trusts the email header on its own. Other proxies (oauth2-proxy, Tailscale) can use a generic trusted-header mode, which is off unless explicitly enabled.
+* **Email:** the From and Reply-To addresses are required settings, and validation rejects any `noreply` address. Every email tocsin sends must be one a person can answer, matching Closient's own rule.
+* **Federation groundwork, from day one:** every result carries a `node_id`, and results are append-only.
+* **Operator alerts:** Slack, Pushover, email, ntfy, Discord, Telegram and a generic webhook, plus posting to Alertmanager. Every alert has a matching "resolved" message with the same identity, so no alert is fire-only.
+* **Subscriber channels (v0.2):** email with double opt-in, plus RSS/Atom feeds for incidents and releases.
+* **Agent surfaces:**
+  * `--json` and stable exit codes on every command
+  * `tocsin probe run <check>`
+  * a built-in MCP server (v0.2)
+  * `/llms.txt` and `/api/v1/status.json`
+  * JSON-LD on the status page
+  * `AGENTS.md` and markdown docs in the repo
+* **Rust stack shortlist:**
+  * tokio and axum for the runtime and web server
+  * rusqlite (bundled) with `rusqlite_migration` for storage
+  * askama and vendored htmx for the status page
+  * reqwest with rustls for HTTP probes
+  * hickory-resolver for DNS
+  * surge-ping for ICMP
+  * x509-parser for certificates
+  * lettre for email
+  * schemars, serde and toml for config
+  * clap for the CLI
+  * notify for file watching
+  * jsonwebtoken for the Access JWT
+  * utoipa for OpenAPI
+  * prometheus-client for metrics
+  * tracing for logs
+  * rmcp for MCP
+  * cargo-dist for releases
+
+## Milestones
+
+* **v0.1 — Monitor, page and releases.** Enough to retire Gatus at Closient. UptimeFlare stays as the outside watchdog for the tocsin node, because a single node cannot report its own death.
+* **v0.2 — Subscribers and MCP.**
+* **Federation.** Design first, then build.
+
+## Repo
+
+The repository was relicensed from MPL-2.0 to AGPL-3.0-only before any outside contribution, so the AGPL applies to every line of tocsin.

@@ -96,7 +96,13 @@ impl Drop for Server {
 
 impl Server {
     fn start(config: &Path, data: &Path) -> Self {
+        Server::start_with(config, data, &[])
+    }
+
+    /// Starts serve with extra environment variables.
+    fn start_with(config: &Path, data: &Path, environment: &[(&str, &Path)]) -> Self {
         let child = Command::new(env!("CARGO_BIN_EXE_tocsin"))
+            .envs(environment.iter().copied())
             .args(["--json", "serve", "--config"])
             .arg(config)
             .arg("--data")
@@ -344,7 +350,7 @@ fn db_info_reports_rows_and_the_oldest_result() {
     let info = json_stdout(&output);
     assert_eq!(info["rows"]["check_result"], 4);
     assert_eq!(info["rows"]["daily_rollup"], 0);
-    assert_eq!(info["schema_version"], 2);
+    assert_eq!(info["schema_version"], 3);
     assert!(info["size_bytes"].as_u64().unwrap() > 0);
     assert_eq!(
         info["oldest_result"],
@@ -448,13 +454,13 @@ fn db_info_reports_a_newer_schema_without_touching_it() {
     );
     let info = json_stdout(&output);
     assert_eq!(info["schema_version"], 99);
-    assert_eq!(info["supported_schema_version"], 2);
+    assert_eq!(info["supported_schema_version"], 3);
     assert_eq!(info["rows"]["check_result"], 4);
     assert_eq!(user_version(&data), 99);
 
     let text = tocsin(&["db", "info", "--data", data_arg(&data)]);
     assert!(
-        String::from_utf8_lossy(&text.stdout).contains("newer than this build's 2"),
+        String::from_utf8_lossy(&text.stdout).contains("newer than this build's 3"),
         "{}",
         String::from_utf8_lossy(&text.stdout)
     );
@@ -644,4 +650,121 @@ fn serve_applies_retention_at_startup() {
     assert_eq!(info["rows"]["check_result"], 0);
     assert_eq!(info["rows"]["daily_rollup"], 2);
     assert_ne!(info["purged_before"], Value::Null);
+}
+
+/// Serve runs the configured checks: results are stored, and a check that
+/// cannot connect opens an outage while one that can does not.
+#[test]
+fn serve_runs_the_checks_and_records_an_outage() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let open = listener.local_addr().unwrap();
+    let closed = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let config = config_folder();
+    let checks = format!(
+        "[[check]]\nid = \"open\"\ntype = \"tcp\"\ntarget = \"{open}\"\n\
+         interval = \"1s\"\ntimeout = \"500ms\"\nconfirm = 1\n\n\
+         [[check]]\nid = \"closed\"\ntype = \"tcp\"\ntarget = \"{closed}\"\n\
+         interval = \"1s\"\ntimeout = \"500ms\"\nconfirm = 1\n"
+    );
+    std::fs::write(config.path().join("checks.toml"), checks).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let mut server = Server::start(config.path(), data.path());
+    let lines = wait_ready(&mut server);
+    let drain = std::thread::spawn(move || lines.map_while(Result::ok).collect::<Vec<_>>());
+
+    std::thread::sleep(Duration::from_millis(2_500));
+    server.signal("-TERM");
+    let status = server.wait_with_deadline();
+    let log = drain.join().unwrap().join("\n");
+    assert_eq!(status.code(), Some(0), "stderr:\n{log}");
+    drop(listener);
+
+    let output = tocsin(&["--json", "db", "info", "--data", data_arg(&data)]);
+    assert_eq!(output.status.code(), Some(0));
+    let info = json_stdout(&output);
+    let results = info["rows"]["check_result"].as_i64().unwrap();
+    assert!(results >= 4, "{results} results; stderr:\n{log}");
+    assert_eq!(info["rows"]["outage"], 1, "stderr:\n{log}");
+}
+
+/// Without system root certificates serve stays up: HTTP checks are
+/// recorded down with the reason, said once at startup, and the other
+/// checks run as usual.
+#[test]
+fn serve_without_root_certificates_records_http_checks_down() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let open = listener.local_addr().unwrap();
+    let config = config_folder();
+    let checks = format!(
+        "[[check]]\nid = \"web\"\ntype = \"http\"\ntarget = \"https://127.0.0.1:1/\"\n\
+         interval = \"1s\"\ntimeout = \"500ms\"\nconfirm = 1\n\n\
+         [[check]]\nid = \"open\"\ntype = \"tcp\"\ntarget = \"{open}\"\n\
+         interval = \"1s\"\ntimeout = \"500ms\"\nconfirm = 1\n"
+    );
+    std::fs::write(config.path().join("checks.toml"), checks).unwrap();
+    // When either is set, these are the only places roots are loaded from.
+    let roots = tempfile::tempdir().unwrap();
+    let no_roots = roots.path().join("empty.pem");
+    std::fs::write(&no_roots, "").unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let mut server = Server::start_with(
+        config.path(),
+        data.path(),
+        &[("SSL_CERT_FILE", &no_roots), ("SSL_CERT_DIR", roots.path())],
+    );
+    let mut lines = BufReader::new(server.0.stderr.take().unwrap()).lines();
+    let before_ready: Vec<String> = lines
+        .by_ref()
+        .map_while(Result::ok)
+        .take_while(|line| !line.contains(READY))
+        .collect();
+    let drain = std::thread::spawn(move || lines.map_while(Result::ok).collect::<Vec<_>>());
+
+    std::thread::sleep(Duration::from_millis(2_500));
+    server.signal("-TERM");
+    let status = server.wait_with_deadline();
+    let log = format!(
+        "{}\n{}",
+        before_ready.join("\n"),
+        drain.join().unwrap().join("\n")
+    );
+    assert_eq!(status.code(), Some(0), "serve stays up; stderr:\n{log}");
+    drop(listener);
+    let warnings: Vec<&String> = before_ready
+        .iter()
+        .filter(|line| line.contains("no root certificates"))
+        .collect();
+    assert_eq!(warnings.len(), 1, "one startup error; stderr:\n{log}");
+    assert!(
+        warnings[0].contains("ERROR")
+            && warnings[0].contains("web")
+            && !warnings[0].contains("open"),
+        "it names the affected checks: {}",
+        warnings[0]
+    );
+
+    let conn = rusqlite::Connection::open(data.path().join("tocsin.db")).unwrap();
+    let results = |check: &str| -> Vec<(String, Option<String>)> {
+        conn.prepare("SELECT health, error FROM check_result WHERE check_id = ?1")
+            .unwrap()
+            .query_map([check], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let web = results("web");
+    assert!(web.len() >= 2, "{web:?}; stderr:\n{log}");
+    for (health, error) in &web {
+        assert_eq!(health, "down");
+        let error = error.as_deref().unwrap_or_default();
+        assert!(error.contains("no root certificates"), "{error}");
+    }
+    let open = results("open");
+    assert!(
+        !open.is_empty() && open.iter().all(|(health, _)| health == "up"),
+        "{open:?}"
+    );
 }

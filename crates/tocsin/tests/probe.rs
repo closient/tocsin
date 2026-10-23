@@ -299,3 +299,29 @@ fn json_output_keeps_logs_off_stdout() {
     assert_eq!(text.lines().count(), 1);
     serde_json::from_str::<Value>(&text).expect("one JSON document");
 }
+
+/// Without system root certificates an HTTP check cannot run, which is a
+/// runtime failure, not a verdict on the target; a TCP check still runs.
+#[test]
+fn without_root_certificates_only_http_checks_fail_to_run() {
+    let fixture = fixture();
+    let roots = tempfile::tempdir().expect("temp folder");
+    let no_roots = roots.path().join("empty.pem");
+    write(roots.path(), "empty.pem", "");
+    let run = |check: &str| {
+        Command::new(env!("CARGO_BIN_EXE_tocsin"))
+            .args(["probe", "run", check, "--json", "--config"])
+            .arg(fixture.config.path())
+            .env("TOCSIN_LOG", "warn")
+            .env("SSL_CERT_FILE", &no_roots)
+            .env("SSL_CERT_DIR", roots.path())
+            .output()
+            .expect("tocsin runs")
+    };
+    let output = run("statuspage-api");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    let document = fixture.json(&output);
+    let message = document["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("no root certificates"), "{document}");
+    assert_eq!(run("refused").status.code(), Some(1));
+}

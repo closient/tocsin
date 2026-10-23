@@ -97,6 +97,7 @@ they are small and they are the incident history.
 | `health` | text | `degraded` or `down`. |
 | `started_at` | integer | |
 | `ended_at` | integer | Null while open; ≥ `started_at`. |
+| `alerted` | integer | 1 if the change that opened it alerted, 0 if a maintenance window silenced it; its recovery alerts the same way. Added by 0003; older rows are 1. |
 
 ### `daily_rollup`
 

@@ -2263,6 +2263,7 @@ dependencies = [
  "subtle",
  "tempfile",
  "tocsin-core",
+ "tocsin-engine",
  "tocsin-probe",
  "tocsin-store",
  "tokio",
@@ -2286,6 +2287,21 @@ dependencies = [
  "serde_json_path",
  "toml",
  "utoipa",
+]
+
+[[package]]
+name = "tocsin-engine"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tocsin-core",
+ "tocsin-probe",
+ "tocsin-store",
+ "tokio",
+ "toml",
+ "tracing",
 ]
 
 [[package]]

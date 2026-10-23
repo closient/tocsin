@@ -427,6 +427,15 @@
         "name": {
           "description": "Display name.",
           "type": "string"
+        },
+        "rule": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ComponentRule"
+            }
+          ],
+          "default": "worst",
+          "description": "How the health of the component's checks combines into its own."
         }
       },
       "required": [
@@ -434,6 +443,21 @@
         "name"
       ],
       "type": "object"
+    },
+    "ComponentRule": {
+      "description": "How a component's health is derived from the health of its checks.",
+      "oneOf": [
+        {
+          "const": "worst",
+          "description": "The worst check decides: one check down makes the component down.",
+          "type": "string"
+        },
+        {
+          "const": "majority",
+          "description": "The worst state that more than half of the checks share or exceed:\none check down out of three leaves the component up.",
+          "type": "string"
+        }
+      ]
     },
     "DiscordSettings": {
       "additionalProperties": false,
@@ -1277,6 +1301,13 @@
           "default": "127.0.0.1:8080",
           "description": "The address the web server listens on, as `ip:port`: `127.0.0.1:8080`,\n`0.0.0.0:8080` or `[::]:8080`. Hostnames are not accepted.",
           "type": "string"
+        },
+        "max_concurrent_checks": {
+          "default": 64,
+          "description": "The most checks that may run at once across the node. Checks due\nwhile the limit is reached wait for a free slot.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
         },
         "node_id": {
           "description": "This node's name in every result it records. Defaults to the\nhostname.",

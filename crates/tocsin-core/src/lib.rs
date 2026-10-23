@@ -9,5 +9,6 @@ pub mod config;
 pub mod health;
 pub mod incident;
 pub mod probe;
+pub mod state;
 
 pub use health::Health;

@@ -12,7 +12,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::Health;
@@ -46,7 +46,6 @@ pub struct ProbeOutcome {
     /// How long the probe took, in milliseconds.
     pub duration_ms: u64,
     /// The check's health on this result.
-    #[serde(with = "health_serde")]
     pub health: Health,
     /// What the probe observed; absent when it could not complete.
     pub facts: Option<Facts>,
@@ -784,25 +783,6 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     };
     let year = year_of_era + era * 400 + i64::from(month <= 2);
     (year, month, day)
-}
-
-/// [`Health`] serializes as its configuration name: `up`, `degraded` or
-/// `down`.
-mod health_serde {
-    use super::{Deserialize, Deserializer, Health, Serializer};
-
-    #[allow(
-        clippy::trivially_copy_pass_by_ref,
-        reason = "serde's `with` signature"
-    )]
-    pub fn serialize<S: Serializer>(health: &Health, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(health.as_str())
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Health, D::Error> {
-        let text = String::deserialize(deserializer)?;
-        text.parse().map_err(serde::de::Error::custom)
-    }
 }
 
 #[cfg(test)]

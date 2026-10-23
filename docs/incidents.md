@@ -118,8 +118,10 @@ token learns nothing about the body rules.
 Every successful write emits one event on the server's internal event bus,
 after its transaction commits: `incident_created`, `incident_updated` (an
 update was appended) or `incident_edited`, each carrying the incident as the
-API returns it. Refused writes emit nothing. Nothing consumes the bus yet;
-notifications and the status page's live updates will.
+API returns it. Refused writes emit nothing. The engine publishes
+`check_changed` and `component_changed` on the same bus, and rereads
+incidents on every incident event, so a posted incident moves its
+components at once; see [engine.md](engine.md#events).
 
 ## CLI
 

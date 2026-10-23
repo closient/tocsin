@@ -10,7 +10,10 @@ use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, params};
 use tocsin_core::Health;
-use tocsin_store::{Day, NewCheckResult, NewOutage, Retention, Store, latest_schema_version};
+use tocsin_store::{
+    Day, LastUp, NewCheckResult, NewOutage, OutageChange, OutageEnd, Retention, Store,
+    latest_schema_version,
+};
 
 fn day(text: &str) -> Day {
     text.parse().unwrap()
@@ -205,6 +208,7 @@ async fn schema_rejects_values_outside_the_enums() {
             component_id: None,
             health: Health::Up,
             started_at_ms: 0,
+            alerted: true,
         })
         .await;
     assert!(up_outage.is_err());
@@ -219,6 +223,7 @@ async fn an_outage_only_ever_gets_ended_once() {
         component_id: Some("website".into()),
         health: Health::Down,
         started_at_ms: 5_000,
+        alerted: true,
     };
     let id = fixture.store.open_outage(outage()).await.unwrap();
     assert!(
@@ -229,6 +234,11 @@ async fn an_outage_only_ever_gets_ended_once() {
     let error = conn
         .execute("UPDATE outage SET health = 'degraded' WHERE id = ?1", [id])
         .expect_err("changed an outage's health")
+        .to_string();
+    assert!(error.contains("ended_at set, once"), "{error}");
+    let error = conn
+        .execute("UPDATE outage SET alerted = 0 WHERE id = ?1", [id])
+        .expect_err("changed whether an outage alerted")
         .to_string();
     assert!(error.contains("ended_at set, once"), "{error}");
     assert!(
@@ -248,6 +258,188 @@ async fn an_outage_only_ever_gets_ended_once() {
     assert!(fixture.store.end_outage(id + 100, 9_000).await.is_err());
     // Once ended, the check can have a new outage.
     fixture.store.open_outage(outage()).await.unwrap();
+}
+
+#[tokio::test]
+async fn open_outages_lists_only_this_nodes_unended_outages() {
+    let fixture = open();
+    let outage = |node: &str, check: &str, health| NewOutage {
+        node_id: node.into(),
+        check_id: check.into(),
+        component_id: None,
+        health,
+        started_at_ms: 5_000,
+        // Only the degraded one opened in maintenance.
+        alerted: health == Health::Down,
+    };
+    let ended = fixture
+        .store
+        .open_outage(outage("node-a", "api", Health::Down))
+        .await
+        .unwrap();
+    fixture.store.end_outage(ended, 6_000).await.unwrap();
+    let web = fixture
+        .store
+        .open_outage(outage("node-a", "web", Health::Degraded))
+        .await
+        .unwrap();
+    let api = fixture
+        .store
+        .open_outage(outage("node-a", "api", Health::Down))
+        .await
+        .unwrap();
+    fixture
+        .store
+        .open_outage(outage("node-b", "web", Health::Down))
+        .await
+        .unwrap();
+    let open = fixture.store.open_outages("node-a").await.unwrap();
+    let summary: Vec<_> = open
+        .iter()
+        .map(|outage| {
+            (
+                outage.id,
+                outage.check_id.as_str(),
+                outage.health,
+                outage.ended_at_ms,
+                outage.alerted,
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (api, "api", Health::Down, None, true),
+            (web, "web", Health::Degraded, None, false)
+        ]
+    );
+    assert_eq!(fixture.store.open_outages("node-c").await.unwrap(), []);
+}
+
+#[tokio::test]
+async fn changing_an_outage_ends_and_opens_together_or_not_at_all() {
+    let fixture = open();
+    let outage = |check: &str, health, started_at_ms| NewOutage {
+        node_id: "node-a".into(),
+        check_id: check.into(),
+        component_id: None,
+        health,
+        started_at_ms,
+        alerted: true,
+    };
+    let degraded = fixture
+        .store
+        .open_outage(outage("web", Health::Degraded, 1_000))
+        .await
+        .unwrap();
+    let down = fixture
+        .store
+        .change_outage(OutageChange {
+            end: Some(OutageEnd {
+                id: degraded,
+                ended_at_ms: 2_000,
+            }),
+            open: Some(outage("web", Health::Down, 2_000)),
+        })
+        .await
+        .unwrap()
+        .expect("opened one");
+    let open = fixture.store.open_outages("node-a").await.unwrap();
+    assert_eq!(
+        open.iter().map(|outage| outage.id).collect::<Vec<_>>(),
+        [down]
+    );
+
+    // The open half fails (an outage is never up), so the end is undone too.
+    let failed = fixture
+        .store
+        .change_outage(OutageChange {
+            end: Some(OutageEnd {
+                id: down,
+                ended_at_ms: 3_000,
+            }),
+            open: Some(outage("web", Health::Up, 3_000)),
+        })
+        .await;
+    assert!(failed.is_err());
+    let open = fixture.store.open_outages("node-a").await.unwrap();
+    assert_eq!(
+        open.iter()
+            .map(|outage| (outage.id, outage.ended_at_ms))
+            .collect::<Vec<_>>(),
+        [(down, None)],
+        "a failed change left the outage ended"
+    );
+
+    // Ending alone resolves with no new id.
+    let ended = fixture
+        .store
+        .change_outage(OutageChange {
+            end: Some(OutageEnd {
+                id: down,
+                ended_at_ms: 3_000,
+            }),
+            open: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(ended, None);
+    assert_eq!(fixture.store.open_outages("node-a").await.unwrap(), []);
+}
+
+#[tokio::test]
+async fn last_up_is_the_latest_up_result_since_the_last_outage() {
+    let fixture = open();
+    let on = |node: &str, check: &str, started_at_ms, health| NewCheckResult {
+        node_id: node.into(),
+        ..result(check, started_at_ms, health)
+    };
+    for (node, check, at, health) in [
+        ("node-a", "web", 1_000, Health::Up),
+        ("node-a", "web", 2_000, Health::Up),
+        ("node-a", "web", 3_000, Health::Down),
+        ("node-a", "api", 1_500, Health::Up),
+        ("node-a", "api", 2_500, Health::Up),
+        ("node-a", "db", 1_000, Health::Down),
+        ("node-b", "web", 9_000, Health::Up),
+    ] {
+        fixture
+            .store
+            .append(on(node, check, at, health))
+            .await
+            .unwrap();
+    }
+    let api = fixture
+        .store
+        .open_outage(NewOutage {
+            node_id: "node-a".into(),
+            check_id: "api".into(),
+            component_id: None,
+            health: Health::Down,
+            started_at_ms: 1_700,
+            alerted: true,
+        })
+        .await
+        .unwrap();
+    fixture.store.end_outage(api, 2_500).await.unwrap();
+
+    let checks = ["web", "api", "db", "gone"].map(String::from).to_vec();
+    let found = fixture.store.last_up("node-a", checks).await.unwrap();
+    assert_eq!(
+        found,
+        [
+            LastUp {
+                check_id: "web".into(),
+                last_up_ms: 2_000,
+                since_ms: 1_000,
+            },
+            LastUp {
+                check_id: "api".into(),
+                last_up_ms: 2_500,
+                since_ms: 2_500,
+            },
+        ]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

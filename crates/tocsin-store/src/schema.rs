@@ -15,6 +15,7 @@ use crate::error::{Error, Result};
 static MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("../migrations/0001_history.sql")),
     M::up(include_str!("../migrations/0002_incidents.sql")),
+    M::up(include_str!("../migrations/0003_outage_alerted.sql")),
 ];
 
 /// How long a connection waits for another process's lock before failing.

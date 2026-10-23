@@ -192,6 +192,60 @@ pub(crate) fn list(conn: &Connection, before: Option<i64>, limit: u32) -> Result
     })
 }
 
+/// An incident not yet resolved or a maintenance not yet completed, with
+/// only what deriving component status needs: no title, no updates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenIncident {
+    /// Its id.
+    pub id: i64,
+    /// Incident or maintenance.
+    pub kind: IncidentKind,
+    /// Its declared impact.
+    pub impact: Impact,
+    /// The components it names, sorted.
+    pub components: Vec<String>,
+    /// A maintenance window's scheduled start.
+    pub scheduled_start: Option<Timestamp>,
+    /// A maintenance window's scheduled end.
+    pub scheduled_end: Option<Timestamp>,
+}
+
+/// Every incident not yet resolved and every maintenance not yet
+/// completed, oldest first, in one query.
+pub(crate) fn open(conn: &Connection) -> Result<Vec<OpenIncident>> {
+    let mut statement = conn.prepare_cached(
+        "SELECT incident.id, kind, impact, scheduled_start, scheduled_end, component_id
+         FROM incident
+         LEFT JOIN incident_component ON incident_component.incident_id = incident.id
+         WHERE resolved_at IS NULL
+         ORDER BY incident.id, component_id",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut open: Vec<OpenIncident> = Vec::new();
+    while let Some(row) = rows.next()? {
+        let id: i64 = row.get(0)?;
+        if open.last().is_none_or(|incident| incident.id != id) {
+            let instant = |index: usize| -> rusqlite::Result<Option<Timestamp>> {
+                Ok(row
+                    .get::<_, Option<i64>>(index)?
+                    .map(Timestamp::from_millis))
+            };
+            open.push(OpenIncident {
+                id,
+                kind: text(row, 1)?,
+                impact: text(row, 2)?,
+                components: Vec::new(),
+                scheduled_start: instant(3)?,
+                scheduled_end: instant(4)?,
+            });
+        }
+        if let (Some(incident), Some(component)) = (open.last_mut(), row.get(5)?) {
+            incident.components.push(component);
+        }
+    }
+    Ok(open)
+}
+
 /// Runs `read` against one snapshot of the database, so an incident's row,
 /// components and updates all come from the same moment even while the
 /// writer commits. A write already runs inside its own transaction, which

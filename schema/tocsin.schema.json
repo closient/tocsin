@@ -1133,16 +1133,12 @@
       "additionalProperties": false,
       "description": "`[[project]]`: something whose releases and deploys the release log\nrecords. CI pushes them; tocsin never polls.",
       "properties": {
-        "component": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Id"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "The `[[component]]` whose timeline shows this project's deploys."
+        "components": {
+          "description": "The `[[component]]`s this project's deploys belong to: a timeline\nfiltered to one of them shows them.",
+          "items": {
+            "$ref": "#/definitions/Id"
+          },
+          "type": "array"
         },
         "description": {
           "description": "A line shown with the project.",
@@ -1162,6 +1158,11 @@
         "name": {
           "description": "Display name.",
           "type": "string"
+        },
+        "public": {
+          "default": true,
+          "description": "Whether `/releases`, its feed and the unauthenticated API show the\nproject's releases. A non-public project's releases are seen only\nwith a `status:read` token or on the admin timeline.",
+          "type": "boolean"
         },
         "url": {
           "description": "The project's homepage or repository.",
@@ -1586,7 +1587,7 @@
       "type": "object"
     },
     "TokenScope": {
-      "description": "What a token may write.",
+      "description": "What a token may do.",
       "oneOf": [
         {
           "const": "heartbeat",
@@ -1601,6 +1602,11 @@
         {
           "const": "release",
           "description": "Releases and deploys.",
+          "type": "string"
+        },
+        {
+          "const": "status:read",
+          "description": "Reading what is not public: non-public projects' releases in the\nread API.",
           "type": "string"
         }
       ]

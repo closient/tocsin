@@ -274,7 +274,8 @@ Something whose releases and deploys the release log records. CI pushes them; to
 | `name` | string | Required. |
 | `description` | string | Optional. |
 | `url` | URL | Optional. The homepage or repository. |
-| `component` | component id | Optional. Its timeline shows this project's deploys. |
+| `components` | list of component ids | Optional. The components this project's deploys belong to: a timeline filtered to one of them shows them. |
+| `public` | bool | Default `true`. Whether `/releases`, `/releases.atom` and the unauthenticated read API show its releases. A non-public project's releases are seen only with a `status:read` token or on `/admin/timeline`. See [releases.md](releases.md). |
 
 ## `[[notifier]]`
 
@@ -320,11 +321,11 @@ Sends alerts matching its filters to its notifiers. An empty filter matches ever
 
 ## `[[token]]`
 
-A bearer token for the write API.
+A bearer token for the API: writing incidents, releases and heartbeats, and reading what is not public.
 
 | Key | Type | |
 |-----|------|-|
 | `id` | id | Required. Logged with each write. |
 | `secret` | secret | Required. Two tokens may not resolve to the same value; the error names both tokens, never the value. |
-| `scopes` | list of `heartbeat`, `incident`, `release` | Required, at least one. |
+| `scopes` | list of `heartbeat`, `incident`, `release`, `status:read` | Required, at least one. `release` publishes releases and stamps deploys; `status:read` reads non-public projects' releases. |
 | `description` | string | Optional. Who or what uses the token. |

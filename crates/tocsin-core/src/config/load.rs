@@ -503,8 +503,12 @@ impl<'a> Loader<'a> {
             }
         }
         for project in &items.projects {
-            if let Some(component) = &project.value.component {
-                references.push(("component", component, project.origin.key("component")));
+            for (index, component) in project.value.components.iter().enumerate() {
+                references.push((
+                    "component",
+                    component,
+                    project.origin.key("components").index(index),
+                ));
             }
         }
         for route in &items.routes {

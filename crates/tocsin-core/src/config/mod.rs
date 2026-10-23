@@ -382,9 +382,19 @@ pub struct Project {
     /// The project's homepage or repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// The `[[component]]` whose timeline shows this project's deploys.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub component: Option<Id>,
+    /// The `[[component]]`s this project's deploys belong to: a timeline
+    /// filtered to one of them shows them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<Id>,
+    /// Whether `/releases`, its feed and the unauthenticated API show the
+    /// project's releases. A non-public project's releases are seen only
+    /// with a `status:read` token or on the admin timeline.
+    #[serde(default = "default_public")]
+    pub public: bool,
+}
+
+fn default_public() -> bool {
+    true
 }
 
 /// `[[route]]`: sends alerts matching its filters to its notifiers. Empty
@@ -429,7 +439,7 @@ pub struct Token {
     pub description: Option<String>,
 }
 
-/// What a token may write.
+/// What a token may do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum TokenScope {
@@ -439,6 +449,11 @@ pub enum TokenScope {
     Incident,
     /// Releases and deploys.
     Release,
+    /// Reading what is not public: non-public projects' releases in the
+    /// read API.
+    // TODO(TOC-48): the private status page reads with this scope too.
+    #[serde(rename = "status:read")]
+    StatusRead,
 }
 
 /// The JSON Schema for one configuration file ([`ConfigFile`]), in draft 7

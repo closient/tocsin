@@ -18,6 +18,7 @@ mod error;
 mod incident;
 mod outage;
 mod readers;
+mod release;
 mod rollup;
 mod schema;
 #[cfg(test)]
@@ -31,6 +32,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, TransactionBehavior};
 use tocsin_core::Health;
 use tocsin_core::incident::{Actor, Incident, IncidentEdit, NewIncident, NewUpdate, Timestamp};
+use tocsin_core::release::{DeployStamp, NewRelease, Release, Timeline};
 
 use crate::checkpoint::Checkpointer;
 pub use crate::day::Day;
@@ -38,6 +40,7 @@ pub use crate::error::{Error, Result};
 pub use crate::incident::OpenIncident;
 pub use crate::outage::{LastUp, Outage};
 use crate::readers::Readers;
+pub use crate::release::{ComponentScope, Projects, ReleaseQuery, TimelineQuery, Written};
 pub use crate::rollup::DailyRollup;
 use crate::writer::{Insert, Writer};
 
@@ -379,6 +382,81 @@ impl Store {
                 Ok(incident)
             })
             .await
+    }
+
+    /// Publishes a release, or updates the one with the same project,
+    /// version and environment, written by `actor` at `at`. The caller has
+    /// validated `new`, including that its project is configured.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] if `new.released_at` is before the recorded one;
+    /// otherwise a value breaks a constraint, or the write fails.
+    pub async fn publish_release(
+        &self,
+        new: NewRelease,
+        actor: Actor,
+        at: Timestamp,
+    ) -> Result<(Release, Written)> {
+        self.writer
+            .run(move |conn| {
+                let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let (id, written) = release::publish(&transaction, &new, &actor, at)?;
+                let release = release::load(&transaction, id)?;
+                transaction.commit()?;
+                // The row was written by this transaction, so it is there.
+                let release = release.ok_or(Error::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+                Ok((release, written))
+            })
+            .await
+    }
+
+    /// Records that `version` of `project` was deployed, creating a stub
+    /// release for a later publish to fill in if there is none. The caller
+    /// has validated the stamp, the project and the version.
+    ///
+    /// # Errors
+    ///
+    /// A value breaks a constraint, or the write fails.
+    pub async fn stamp_deploy(
+        &self,
+        project: String,
+        version: String,
+        stamp: DeployStamp,
+        actor: Actor,
+        at: Timestamp,
+    ) -> Result<(Release, Written)> {
+        self.writer
+            .run(move |conn| {
+                let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let (id, written) =
+                    release::stamp(&transaction, &project, &version, &stamp, &actor, at)?;
+                let release = release::load(&transaction, id)?;
+                transaction.commit()?;
+                let release = release.ok_or(Error::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+                Ok((release, written))
+            })
+            .await
+    }
+
+    /// Published releases matching `query`, newest first, and whether more
+    /// matched than its limit.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn releases(&self, query: ReleaseQuery) -> Result<(Vec<Release>, bool)> {
+        self.read(move |conn| release::list(conn, &query)).await
+    }
+
+    /// Outages, incidents, deploys and releases matching `query`, oldest
+    /// first, read from one snapshot.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn timeline(&self, query: TimelineQuery) -> Result<Timeline> {
+        self.read(move |conn| release::timeline(conn, &query)).await
     }
 
     /// The incident with that id, with its components and updates.

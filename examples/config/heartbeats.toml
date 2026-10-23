@@ -17,7 +17,7 @@ url = "https://logs.example.com/search?q=nightly-backup"
 id = "api"
 name = "API"
 url = "https://github.com/example/api"
-component = "api"
+components = ["api"]
 
 [[token]]
 id = "ci"

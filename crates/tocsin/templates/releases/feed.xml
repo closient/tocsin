@@ -1,0 +1,21 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>{{ id }}</id>
+  <title>{{ title }}</title>
+  <updated>{{ updated }}</updated>
+  <link rel="self" type="application/atom+xml" href="{{ self_link }}"/>
+  <link rel="alternate" type="text/html" href="{{ alternate }}"/>
+  <generator>tocsin</generator>
+  {%- for entry in entries %}
+  <entry>
+    <id>{{ entry.id }}</id>
+    <title>{{ entry.title }}</title>
+    <link rel="alternate" type="text/html" href="{{ entry.link }}"/>
+    <published>{{ entry.published }}</published>
+    <updated>{{ entry.updated }}</updated>
+    <author><name>tocsin</name></author>
+    <content type="html">{{ entry.notes_html }}</content>
+  </entry>
+  {%- endfor %}
+</feed>

@@ -11,18 +11,23 @@ use utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};
 use utoipa::{Modify, OpenApi};
 use utoipa_axum::router::OpenApiRouter;
 
-use super::{AppState, incidents};
+use super::{AppState, incidents, releases, timeline};
 
 #[derive(OpenApi)]
 #[openapi(
     info(
         title = "tocsin",
         description = "Uptime monitor, status page and release log. Reads are public; \
-                       writes need a `[[token]]` with the route's scope.",
+                       writes need a `[[token]]` with the route's scope, and a \
+                       `status:read` token also sees non-public projects.",
         license(name = "AGPL-3.0-only", identifier = "AGPL-3.0-only"),
         version = "1",
     ),
-    tags((name = incidents::TAG, description = "Incidents and scheduled maintenance")),
+    tags(
+        (name = incidents::TAG, description = "Incidents and scheduled maintenance"),
+        (name = releases::TAG, description = "The release log and deploy stamps"),
+        (name = timeline::TAG, description = "Outages, incidents and deploys in one stream"),
+    ),
     modifiers(&BearerAuth),
 )]
 struct Document;
@@ -41,7 +46,10 @@ impl Modify for BearerAuth {
 
 /// Every API route, with its documentation.
 pub fn api() -> OpenApiRouter<AppState> {
-    OpenApiRouter::with_openapi(Document::openapi()).merge(incidents::router())
+    OpenApiRouter::with_openapi(Document::openapi())
+        .merge(incidents::router())
+        .merge(releases::router())
+        .merge(timeline::router())
 }
 
 /// The OpenAPI document.

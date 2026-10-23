@@ -91,7 +91,7 @@ is refused, not quietly treated as anonymous. The full rule is in
 One function decides what a reader may see:
 `crate::http::releases::visible_projects`. Without `status:read` it is the
 configured projects marked `public`; with it, every project. Every read of
-releases (the list API, the timeline API, `/releases`, `/releases.atom`,
+releases (the list API, the timeline API, `/releases`, `/feeds/releases.atom`,
 `/releases/<project>/<version>`) passes that answer to the store, which
 filters in SQL. A release whose project is no longer configured is never
 public. Asking for a non-public project anonymously looks exactly like
@@ -163,7 +163,7 @@ These load no script and fit a phone.
 |---|---|
 | `/releases` | Published versions of public projects, newest first; `?project=` narrows to one. A version published to several environments is one entry, dated at its first publish, with the production release's title (or else the first published). |
 | `/releases/<project>/<version>` | One version: title, notes, and every environment it reached with its deploy time, environments only stamped included. A version no environment has published yet has no page. |
-| `/releases.atom` | An Atom feed of the latest 20 versions, with `?project=`, one entry per version like the list. An entry's id is `urn:tocsin:release:<project>:<version>`, so publishing to another environment never shows a reader a second entry. Links are absolute when `[server] public_url` is set. |
+| `/feeds/releases.atom`, `/feeds/releases/<project>.atom` | Atom feeds of the latest 20 versions, of every public project or of one, one entry per version like the list. An entry's id is `urn:tocsin:release:<project>:<version>`, so publishing to another environment never shows a reader a second entry. `/releases.atom[?project=]`, their earlier address, still serves them. See [the status page's feeds](status-page.md#feeds). |
 | `/admin/timeline` | Behind [admin sign-in](admin.md): the last 30 days of outages, incidents and deploys, newest first, every project included, with a component filter. When more than 500 events fall in the window it shows the newest 500 and says so. |
 
 Notes are Markdown rendered by the same sanitizing renderer incidents use:

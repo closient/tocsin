@@ -11,7 +11,7 @@ CI, cron ─> Cloudflare ──────────────────�
 
 | Path | Who | Guarded by |
 |------|-----|------------|
-| The public pages, such as `/releases` and `/releases.atom` | everyone | nothing |
+| The public pages and feeds, such as `/releases` and `/feeds/incidents.atom` | everyone | nothing |
 | `/api/v1/...` reads | everyone; `status:read` tokens see non-public projects | tocsin's tokens |
 | `/api/v1/...` writes (incidents, releases, heartbeat pings) | CI, cron jobs, scripts | tocsin's tokens, by scope |
 | `/admin/` | the people who run incidents | Cloudflare Access, then tocsin checking the Access token |

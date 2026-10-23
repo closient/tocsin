@@ -59,6 +59,8 @@ insta = { workspace = true }
 # The structural accessibility audit of the status pages.
 html5ever = "0.40"
 regex.workspace = true
+# Parses the Atom feeds to check them against RFC 4287.
+roxmltree = "0.21"
 tempfile = "3"
 # A bound, never-listening socket: a port that refuses connections and stays ours.
 socket2 = "0.6"

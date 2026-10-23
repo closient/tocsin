@@ -37,7 +37,7 @@ use crate::http::events::tests::every_event;
 use crate::http::events::{Event, EventBus, RESYNC};
 use crate::http::{self, AppState, incidents, now, releases};
 
-const CONFIG: &str = r#"
+pub(super) const CONFIG: &str = r#"
 [server]
 public_url = "https://status.example.com/"
 
@@ -100,7 +100,7 @@ scopes = ["incident"]
 "#;
 
 /// A public project, so `/` shows releases.
-const PUBLIC_PROJECT: &str = r#"
+pub(super) const PUBLIC_PROJECT: &str = r#"
 [[project]]
 id = "app"
 name = "Example app"
@@ -129,14 +129,14 @@ fn snapshot() -> Snapshot {
 }
 
 /// A store, the state around it, and the router serving it.
-struct Site {
+pub(super) struct Site {
     _dir: tempfile::TempDir,
-    state: AppState,
+    pub(super) state: AppState,
     router: Router,
 }
 
 /// A site configured with [`CONFIG`] and `more`.
-fn site(more: &str) -> Site {
+pub(super) fn site(more: &str) -> Site {
     let variable = |name: &str| (name == "ONCALL_TOKEN").then(|| ONCALL.to_owned());
     let config = tocsin_core::config::load(
         &[Source {
@@ -170,7 +170,7 @@ fn site(more: &str) -> Site {
 
 impl Site {
     /// Status, headers and body of `GET uri` with `headers`.
-    async fn get_with(
+    pub(super) async fn get_with(
         &self,
         uri: &str,
         headers: &[(header::HeaderName, &str)],
@@ -194,13 +194,13 @@ impl Site {
     }
 
     /// The page at `uri`, which must be there.
-    async fn page(&self, uri: &str) -> String {
+    pub(super) async fn page(&self, uri: &str) -> String {
         let (status, _, body) = self.get_with(uri, &[]).await;
         assert_eq!(status, StatusCode::OK, "{uri}: {body}");
         body
     }
 
-    async fn open(&self, title: &str, kind: IncidentKind, components: &[&str]) -> i64 {
+    pub(super) async fn open(&self, title: &str, kind: IncidentKind, components: &[&str]) -> i64 {
         let scheduled = (kind == IncidentKind::Maintenance).then(|| {
             let start = now().as_millis() + 86_400_000;
             (
@@ -227,7 +227,7 @@ impl Site {
         .id
     }
 
-    async fn resolve(&self, id: i64) {
+    pub(super) async fn resolve(&self, id: i64) {
         incidents::append(
             &self.state,
             id,
@@ -241,7 +241,7 @@ impl Site {
         .unwrap();
     }
 
-    async fn release(&self, version: &str, title: &str) {
+    pub(super) async fn release(&self, version: &str, title: &str) {
         releases::publish(
             &self.state,
             NewRelease {
@@ -280,7 +280,7 @@ impl Site {
 
     /// Everything `/` shows: an incident, a maintenance window, a resolved
     /// incident and a release.
-    async fn furnish(&self) {
+    pub(super) async fn furnish(&self) {
         self.open("Elevated API errors", IncidentKind::Incident, &["api"])
             .await;
         self.open("Database upgrade", IncidentKind::Maintenance, &["jobs"])

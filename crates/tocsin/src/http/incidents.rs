@@ -100,6 +100,23 @@ pub async fn list(state: &AppState, query: ListQuery) -> Result<IncidentList, Ap
     })
 }
 
+/// Up to `limit` incidents and maintenance naming `[[component]]`
+/// `component`, newest first: the read behind a component's feed.
+///
+/// # Errors
+///
+/// 404 if no `[[component]]` has that id; 500 if the store fails.
+pub async fn naming(
+    state: &AppState,
+    component: &str,
+    limit: u32,
+) -> Result<Vec<Incident>, ApiError> {
+    if !state.knows_component(component) {
+        return Err(ApiError::not_found(format!("no component {component}")));
+    }
+    Ok(state.store.incidents_naming(component, limit).await?)
+}
+
 /// One incident with every update.
 #[utoipa::path(
     get,

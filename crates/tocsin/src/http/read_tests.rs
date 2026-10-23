@@ -774,6 +774,8 @@ async fn llms_txt_is_the_status_in_plain_text_with_where_to_go_next() {
         "- [API errors](https://status.example.com/api/v1/incidents/1): incident investigating, impact major, affecting api",
         "(https://status.example.com/api/v1/openapi.json)",
         "(https://status.example.com/api/v1/status.json)",
+        "(https://status.example.com/feeds/incidents.atom)",
+        "(https://status.example.com/feeds/components/ID.atom)",
         "(https://github.com/closient/tocsin/blob/main/docs/api.md)",
         "(https://status.example.com/api/v1/outages?since=",
         "/api/v1/checks/ID/results?since=",

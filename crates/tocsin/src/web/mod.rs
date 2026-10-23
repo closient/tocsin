@@ -22,6 +22,7 @@ pub mod access;
 pub mod admin;
 pub mod assets;
 pub mod csrf;
+pub mod feeds;
 pub mod form;
 pub mod identity;
 pub mod markdown;
@@ -32,6 +33,8 @@ pub mod timeline;
 pub mod uptime;
 
 #[cfg(test)]
+mod feeds_tests;
+#[cfg(test)]
 mod status_tests;
 #[cfg(test)]
 mod tests;
@@ -41,7 +44,7 @@ use axum::routing::get;
 
 use crate::http::AppState;
 
-/// The HTML routes: assets, the status page and the release log always, the admin pages
+/// The HTML routes: assets, the status page, the release log and their feeds always, the admin pages
 /// when `[server.auth]` turns them on. Without it, `/admin/` is the same 404 as any unknown
 /// path.
 pub fn router(state: &AppState) -> Router<AppState> {
@@ -51,7 +54,8 @@ pub fn router(state: &AppState) -> Router<AppState> {
             get(assets::serve),
         )
         .merge(status::router())
-        .merge(releases::router());
+        .merge(releases::router())
+        .merge(feeds::router());
     if state.admin.is_some() {
         router = router.merge(admin::router()).merge(timeline::router());
     }

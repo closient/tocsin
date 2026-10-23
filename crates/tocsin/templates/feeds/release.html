@@ -1,0 +1,8 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{#- A version's content in a feed (web/feeds.rs): its notes, sanitized
+    Markdown, or its title when it has none, so no entry is empty. -#}
+{%- if notes_html.trim().is_empty() -%}
+<p>{{ title }}</p>
+{%- else -%}
+{{ notes_html|safe }}
+{%- endif -%}

@@ -48,7 +48,8 @@ pub fn test(notifier_id: &str, folder: &Path) -> Result<Report, Failure> {
         .enable_all()
         .build()
         .map_err(|error| Failure::new(Exit::Runtime, format!("cannot start runtime: {error}")))?;
-    let client = tocsin_alert::http_client(HTTP_TIMEOUT)
+    let client = crate::net::http_client(HTTP_TIMEOUT)
+        .build()
         .map_err(|error| Failure::new(Exit::Runtime, format!("cannot set up HTTP: {error}")))?;
     let built = tocsin_alert::build(notifier, configuration.server.email.as_ref(), &client)
         .map_err(|error| {

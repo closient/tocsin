@@ -60,40 +60,9 @@ impl fmt::Display for SendError {
 
 impl std::error::Error for SendError {}
 
-/// How long one HTTP request to a notifier may take.
+/// How long one HTTP request to a notifier may take; the binary builds the
+/// shared client with it.
 pub const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// The shared outbound HTTP client: rustls on ring, with a timeout and
-/// tocsin's user agent.
-///
-/// # Errors
-///
-/// The TLS backend could not be set up.
-pub fn http_client(timeout: Duration) -> Result<reqwest::Client, reqwest::Error> {
-    client_builder(timeout).build()
-}
-
-/// The client [`http_client`] builds, trusting no root certificate, for a
-/// system that has none: every HTTPS send then fails, and is recorded,
-/// instead of tocsin refusing to start.
-///
-/// # Errors
-///
-/// The TLS backend could not be set up.
-pub fn http_client_without_roots(timeout: Duration) -> Result<reqwest::Client, reqwest::Error> {
-    client_builder(timeout)
-        .tls_certs_only(std::iter::empty())
-        .build()
-}
-
-fn client_builder(timeout: Duration) -> reqwest::ClientBuilder {
-    // Another part of the binary may have installed it already.
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    reqwest::Client::builder()
-        .timeout(timeout)
-        .connect_timeout(timeout)
-        .user_agent(concat!("tocsin/", env!("CARGO_PKG_VERSION")))
-}
 
 /// Removes secret values from text before it is logged or stored.
 #[derive(Clone, Default)]

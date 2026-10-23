@@ -203,16 +203,19 @@ impl Monitor {
         })?;
         // Like the probes, alerting runs without system root certificates:
         // each HTTPS delivery then fails and is recorded as failed.
-        let client = match tocsin_alert::http_client(HTTP_TIMEOUT) {
+        let client = match crate::net::http_client(HTTP_TIMEOUT).build() {
             Ok(client) => client,
             Err(error) => {
                 tracing::error!(
                     "alerting cannot verify TLS ({error}); every HTTPS notifier will fail \
                      until the system trusts a certificate authority"
                 );
-                tocsin_alert::http_client_without_roots(HTTP_TIMEOUT).map_err(|error| {
-                    Failure::new(Exit::Runtime, format!("cannot set up HTTP: {error}"))
-                })?
+                crate::net::http_client(HTTP_TIMEOUT)
+                    .tls_certs_only(std::iter::empty())
+                    .build()
+                    .map_err(|error| {
+                        Failure::new(Exit::Runtime, format!("cannot set up HTTP: {error}"))
+                    })?
             }
         };
         let notifiers = tocsin_alert::build_all(config, &client).map_err(|error| {

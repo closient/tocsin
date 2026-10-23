@@ -17,7 +17,7 @@ use tocsin_alert::notifiers::pushover::{Priorities, Pushover};
 use tocsin_alert::notifiers::slack::Slack;
 use tocsin_alert::notifiers::telegram::Telegram;
 use tocsin_alert::notifiers::webhook::{self, SIGNATURE_HEADER, TIMESTAMP_HEADER, Webhook};
-use tocsin_alert::{Alert, AlertEvent, Notifier, http_client};
+use tocsin_alert::{Alert, AlertEvent, Notifier};
 use tocsin_core::Health;
 use tocsin_store::SubjectKind;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -58,8 +58,13 @@ async fn fire_then_resolve(notifier: &dyn Notifier) {
     }
 }
 
+/// A client like the binary's, for loopback mocks.
 fn client() -> reqwest::Client {
-    http_client(Duration::from_secs(5)).unwrap()
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap()
 }
 
 /// One request the mock received.

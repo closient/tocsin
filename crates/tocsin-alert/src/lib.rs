@@ -20,9 +20,7 @@ pub mod worker;
 pub use alert::{Alert, AlertEvent};
 pub use history::AlertingHistory;
 pub use metrics::AlertMetrics;
-pub use notifier::{
-    HTTP_TIMEOUT, Notifier, Redactor, SendError, http_client, http_client_without_roots,
-};
+pub use notifier::{HTTP_TIMEOUT, Notifier, Redactor, SendError};
 pub use notifiers::{Notifiers, build, build_all};
 pub use route::Router;
 pub use worker::{Alerter, Backoff, WorkerSettings};

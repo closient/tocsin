@@ -19,7 +19,6 @@ jiff.workspace = true
 lettre.workspace = true
 prometheus-client.workspace = true
 reqwest = { workspace = true, features = ["json"] }
-rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -29,6 +28,8 @@ url.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+# Installs the TLS provider for the tests' HTTP client, as the binary does.
+rustls.workspace = true
 tempfile = "3"
 tokio = { workspace = true, features = ["sync", "rt", "time", "macros", "net", "io-util", "test-util"] }
 

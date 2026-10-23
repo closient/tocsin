@@ -6,3 +6,6 @@
 //! store crate persists history; both depend on the types defined here.
 
 pub mod config;
+pub mod health;
+
+pub use health::Health;

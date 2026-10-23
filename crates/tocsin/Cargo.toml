@@ -13,7 +13,8 @@ tocsin-core.workspace = true
 clap.workspace = true
 gethostname.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tocsin-store.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
@@ -21,4 +22,7 @@ tracing-subscriber.workspace = true
 workspace = true
 
 [dev-dependencies]
+# Same version as tocsin-store's, to set up databases a newer build wrote.
+rusqlite = { version = "0.40", features = ["bundled"] }
 tempfile = "3"
+tocsin-core.workspace = true

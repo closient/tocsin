@@ -81,7 +81,7 @@ Fields marked **may be secret** take either a value written in the file or an en
 | `public_url` | URL | none | Where people reach the status page; used in links and emails. `http://` or `https://`. |
 | `node_id` | string | the hostname | This node's name in every result it records. No whitespace. |
 | `data_dir` | path | none | Folder for the SQLite database. A relative path is relative to the config folder. `tocsin serve --data` overrides it; one of the two is required. |
-| `retention_days` | integer | `90` | Days of check results kept. At least 1. |
+| `retention_days` | integer | `90` | Whole UTC days of raw check results kept before today; daily rollups are kept forever. At least 1. See [storage.md](storage.md#retention). |
 
 ### `[server.email]`
 

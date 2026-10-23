@@ -3,11 +3,16 @@
 //! `tocsin serve`: run until told to stop.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::json;
+use tocsin_store::{DB_FILE, Retention, Store};
 use tokio::signal::unix::{Signal, SignalKind, signal};
+use tokio::time::MissedTickBehavior;
 
 use crate::exit::Exit;
+use crate::lock;
 use crate::output::{Failure, Report};
 
 pub fn run(config: &Path, data: Option<&Path>) -> Result<Report, Failure> {
@@ -25,6 +30,7 @@ pub fn run(config: &Path, data: Option<&Path>) -> Result<Report, Failure> {
         }
     };
     let data = data.as_path();
+    let retention_days = loaded.config.server.retention_days;
     // `symlink_metadata` also catches a dangling symlink, which `exists()`
     // reports as absent and `create_dir_all` then fails on.
     if data.symlink_metadata().is_ok() && !data.is_dir() {
@@ -39,6 +45,13 @@ pub fn run(config: &Path, data: Option<&Path>) -> Result<Report, Failure> {
             format!("cannot create data folder {}: {error}", data.display()),
         )
     })?;
+    // Held until this function returns, after the store has closed.
+    let Some(_lock) = lock::try_take(data)? else {
+        return Err(Failure::new(
+            Exit::InvalidInput,
+            format!("another tocsin serve is using {}", data.display()),
+        ));
+    };
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -46,6 +59,18 @@ pub fn run(config: &Path, data: Option<&Path>) -> Result<Report, Failure> {
         .map_err(|error| Failure::new(Exit::Runtime, format!("cannot start runtime: {error}")))?;
     let signal_name = runtime.block_on(async {
         let shutdown = Shutdown::install()?;
+        let path = data.join(DB_FILE);
+        let store = Store::open(&path).map_err(|error| {
+            Failure::new(
+                Exit::Runtime,
+                format!("cannot open database {}: {error}", path.display()),
+            )
+        })?;
+        let store = Arc::new(store);
+        let maintenance = tokio::spawn(maintain(
+            Arc::clone(&store),
+            Retention::days(retention_days),
+        ));
         // Logged only once both handlers exist, so a signal sent after this
         // line is always handled rather than killing the process outright.
         tracing::info!(
@@ -53,16 +78,60 @@ pub fn run(config: &Path, data: Option<&Path>) -> Result<Report, Failure> {
             data = %data.display(),
             files = loaded.files.len(),
             checks = loaded.config.checks.len(),
+            retention_days,
             "tocsin serving; waiting for SIGINT or SIGTERM"
         );
-        Ok::<_, Failure>(shutdown.wait().await)
+        let signal_name = shutdown.wait().await;
+        tracing::info!(signal = signal_name, "shutting down");
+        maintenance.abort();
+        // An aborted task drops its handle on the store at its next await,
+        // which `await` on the join handle waits for.
+        let _ = maintenance.await;
+        let Ok(store) = Arc::try_unwrap(store) else {
+            tracing::warn!("database still in use at shutdown; not closed");
+            return Ok(signal_name);
+        };
+        if let Err(error) = store.close().await {
+            tracing::warn!(%error, "database did not close cleanly");
+        }
+        Ok::<_, Failure>(signal_name)
     })?;
-    tracing::info!(signal = signal_name, "shutting down");
 
     Ok(Report {
         json: json!({ "status": "stopped", "signal": signal_name }),
         text: format!("tocsin stopped ({signal_name})"),
     })
+}
+
+/// How often rollups are brought up to date and retention runs.
+const MAINTENANCE_EVERY: Duration = Duration::from_hours(1);
+
+/// Hourly: roll up the days since the last pass, then delete results older
+/// than the retention window. The first pass runs at startup. Failures are
+/// logged and retried on the next tick; a pass never stops the monitor.
+async fn maintain(store: Arc<Store>, retention: Retention) {
+    let mut ticks = tokio::time::interval(MAINTENANCE_EVERY);
+    ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        ticks.tick().await;
+        match store.rollup_recent().await {
+            Ok(report) => tracing::debug!(rows = report.rows, "daily rollups updated"),
+            Err(error) => tracing::error!(%error, "daily rollup failed"),
+        }
+        match store
+            .apply_retention(retention, tocsin_store::now_ms())
+            .await
+        {
+            Ok(report) if report.deleted > 0 => tracing::info!(
+                deleted = report.deleted,
+                chunks = report.chunks,
+                rolled_up = report.rolled_up,
+                "retention purged old check results"
+            ),
+            Ok(_) => {}
+            Err(error) => tracing::error!(%error, "retention failed"),
+        }
+    }
 }
 
 /// Handlers for the signals that stop `tocsin serve`.

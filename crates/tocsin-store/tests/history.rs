@@ -8,7 +8,8 @@ use tocsin_core::incident::Timestamp;
 use tocsin_core::release::TimelineEvent;
 use tocsin_core::status::{CheckKind, OutageEnding};
 use tocsin_store::{
-    HistoryPage, NewCheckResult, NewOutage, Order, Projects, Store, SubjectKind, TimelineQuery,
+    HistoryPage, NewCheckResult, NewOutage, Newest, Order, Projects, ResultFilter, Store,
+    SubjectKind, TimelineQuery,
 };
 
 fn result(check: &str, started_at_ms: i64, health: Health) -> NewCheckResult {
@@ -313,4 +314,109 @@ async fn a_heartbeats_pings_read_back_as_its_results() {
         .await
         .unwrap();
     assert_eq!(older.len(), 1, "a heartbeat's cursor pages too");
+}
+
+fn newest(check: &str, since_ms: i64, filter: ResultFilter) -> Newest {
+    Newest {
+        check_id: check.into(),
+        since: Timestamp::from_millis(since_ms),
+        filter,
+    }
+}
+
+#[tokio::test]
+async fn the_newest_result_of_each_kind_is_found_per_check() {
+    let (_dir, store) = open();
+    let failed = store.append(result("api", 1_000, Degraded)).await.unwrap();
+    let latest = store.append(result("api", 2_000, Up)).await.unwrap();
+    store.append(result("web", 3_000, Down)).await.unwrap();
+    let mut ping = result("job", 1_000, Up);
+    ping.error = None;
+    let ping = store.append(ping).await.unwrap();
+    let mut miss = result("job", 2_000, Down);
+    miss.error = Some("no ping within the interval of 1h plus 1m grace".to_owned());
+    let miss = store.append(miss).await.unwrap();
+
+    let found = store
+        .newest_results(vec![
+            newest("api", 0, ResultFilter::Any),
+            newest("api", 0, ResultFilter::NotUp),
+            // The failure is before the window.
+            newest("api", 1_500, ResultFilter::NotUp),
+            newest("job", 0, ResultFilter::Any),
+            newest(
+                "job",
+                0,
+                ResultFilter::ErrorNotStartingWith("no ping within".to_owned()),
+            ),
+            newest("gone", 0, ResultFilter::Any),
+        ])
+        .await
+        .unwrap();
+    let ids: Vec<Option<i64>> = found
+        .iter()
+        .map(|row| row.as_ref().map(|row| row.id))
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            Some(latest),
+            Some(failed),
+            None,
+            Some(miss),
+            Some(ping),
+            None
+        ]
+    );
+    let failed = found[1].as_ref().unwrap();
+    assert_eq!(failed.error.as_deref(), Some("status 503"));
+    assert!(failed.detail.is_some(), "the detail reads back");
+}
+
+#[tokio::test]
+async fn results_slice_into_latency_and_failure_counts() {
+    let (_dir, store) = open();
+    for (at, health, duration) in [
+        (900, Up, 10),   // before the window
+        (1_000, Up, 10), // slice 0
+        (1_500, Degraded, 30),
+        (1_999, Down, 5_000), // down: counted, not timed
+        (2_000, Down, 5_000), // slice 1: down only
+        (3_000, Up, 20),      // slice 2
+    ] {
+        let mut row = result("api", at, health);
+        row.duration_ms = duration;
+        store.append(row).await.unwrap();
+    }
+    store.append(result("web", 1_200, Up)).await.unwrap();
+
+    let slices = store
+        .result_slices(Timestamp::from_millis(1_000), 1_000, None)
+        .await
+        .unwrap();
+    let api: Vec<_> = slices
+        .iter()
+        .filter(|slice| slice.check_id == "api")
+        .collect();
+    assert_eq!(api.len(), 3, "{api:?}");
+    assert_eq!(
+        (api[0].slice, api[0].results, api[0].degraded, api[0].down),
+        (0, 3, 1, 1)
+    );
+    assert_eq!(api[0].mean_ms, Some(20.0));
+    assert_eq!((api[0].min_ms, api[0].max_ms), (Some(10), Some(30)));
+    assert_eq!((api[1].slice, api[1].down, api[1].mean_ms), (1, 1, None));
+    assert_eq!((api[2].slice, api[2].min_ms), (2, Some(20)));
+    assert!(
+        slices
+            .iter()
+            .any(|slice| slice.check_id == "web" && slice.slice == 0)
+    );
+
+    // Asked for one check, the same slices of that check alone.
+    let only = store
+        .result_slices(Timestamp::from_millis(1_000), 1_000, Some("api".into()))
+        .await
+        .unwrap();
+    assert_eq!(only.iter().collect::<Vec<_>>(), api);
 }

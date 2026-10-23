@@ -1,0 +1,61 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{#- One check or heartbeat; the including template binds `card` (a Card,
+    web/internal.rs) and `linked`: true on the board, where the name links
+    to the check's page, false on that page, under its heading. -#}
+{%- if linked %}
+<div class="component-line">
+  <h3><a class="name" href="{{ card.href }}">{{ card.name }}</a></h3>
+  {% let label = card.status -%}
+  {%- include "status/label.html" %}
+</div>
+{%- else %}
+<p class="facts">
+  {%- let label = card.status %}
+  {%- include "status/label.html" %}</p>
+{%- endif %}
+<div class="meta">
+  <span>{{ card.kind }}, every {{ card.interval }}</span>
+  {%- if let Some(component) = card.component %}
+  <span>on <a href="{{ component.1 }}">{{ component.0 }}</a></span>
+  {%- else %}
+  <span>on no public component</span>
+  {%- endif %}
+  {%- if let Some(held) = card.held %}
+  <span>{{ card.status.text }} for {{ held.0 }}, since <time datetime="{{ held.1.iso }}">{{ held.1.text }}</time></span>
+  {%- endif %}
+  {%- if let Some(at) = card.last_run %}
+  <span>last result <time datetime="{{ at.iso }}">{{ at.text }}</time></span>
+  {%- else %}
+  <span>no result yet</span>
+  {%- endif %}
+</div>
+{%- if let Some(target) = card.target %}
+<p class="target"><code>{{ target }}</code></p>
+{%- endif %}
+{%- if let Some(pulse) = card.pulse %}
+<dl class="pulse">
+  <div><dt>Last ping</dt><dd>{% if let Some(at) = pulse.last_ping %}<time datetime="{{ at.iso }}">{{ at.text }}</time>{% else %}none yet{% endif %}</dd></div>
+  <div><dt>Next deadline</dt><dd>{% if let Some(at) = pulse.deadline %}<time datetime="{{ at.iso }}">{{ at.text }}</time>{% if pulse.overdue %} <span class="status down">passed</span>{% endif %}{% else %}none yet{% endif %}</dd></div>
+  <div><dt>Last message</dt><dd>{% if let Some(message) = pulse.message %}{{ message }}{% else %}none{% endif %}</dd></div>
+</dl>
+{%- endif %}
+{%- if let Some(spark) = card.spark %}
+{%- include "internal/sparkline.html" %}
+{%- endif %}
+{%- let bar = card.bar %}
+{%- include "status/bar.html" %}
+{%- if let Some(problem) = card.problem %}
+<p class="problem">Last problem in 24 hours:
+  {%- let label = problem.health %}
+  {% include "status/label.html" %} at <time datetime="{{ problem.at.iso }}">{{ problem.at.text }}</time>: {{ problem.text }}</p>
+{%- endif %}
+{%- if let Some(verdict) = card.verdict %}
+<p class="verdict">{{ verdict }}</p>
+{%- endif %}
+{%- if !card.links.is_empty() %}
+<ul class="links check-links">
+  {%- for link in card.links %}
+  <li><a href="{{ link.url }}">{{ link.name }}</a></li>
+  {%- endfor %}
+</ul>
+{%- endif %}

@@ -14,7 +14,9 @@
 <script src="{{ script }}" defer></script>
 {%- endfor %}
 {%- endif %}
+{%- if !chrome.json_ld.is_empty() %}
 <script type="application/ld+json">{{ chrome.json_ld|safe }}</script>
+{%- endif %}
 {%- endblock %}
 {% block header %}
 <a class="skip" href="#main">Skip to content</a>
@@ -41,7 +43,7 @@
       <li><a href="/">Current status</a></li>
       <li><a href="/history">Incident history</a></li>
       <li><a href="/releases">Releases</a></li>
-      <li><a href="/releases.atom">Release feed</a></li>
+      <li><a href="/feeds/releases.atom">Release feed</a></li>
       <li><a href="/api/v1/status.json">Status API</a></li>
     </ul>
   </nav>

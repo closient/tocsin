@@ -1,0 +1,93 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{%- let linked = false %}
+{%- let card = detail.card %}
+<div class="surface detail">
+{%- include "internal/card.html" %}
+</div>
+
+<h2>Latest assertions</h2>
+{%- if detail.verdicts.is_empty() %}
+<p class="muted">The newest result records no assertions.</p>
+{%- else %}
+{%- if let Some(at) = detail.verdicts_at %}
+<p class="muted section-note">From the result at <time datetime="{{ at.iso }}">{{ at.text }}</time>.</p>
+{%- endif %}
+<ul class="items surface verdicts">
+  {%- for verdict in detail.verdicts %}
+  <li>
+    {%- if verdict.passed %}
+    <span class="status operational"><span class="glyph" aria-hidden="true">✓</span> Passed</span>
+    {%- else %}
+    <span class="status {{ verdict.on_fail }}"><span class="glyph" aria-hidden="true">✕</span> Failed</span>
+    {%- endif %}
+    <code>{{ verdict.condition }}</code>
+    <div class="meta">
+      <span>expected <code>{{ verdict.expected }}</code></span>
+      <span>got <code>{{ verdict.actual }}</code></span>
+      {%- if !verdict.passed %}
+      <span>a failure makes it {{ verdict.on_fail }}</span>
+      {%- endif %}
+      {%- if verdict.implicit %}
+      <span>the check type's default</span>
+      {%- endif %}
+    </div>
+    {%- if let Some(message) = verdict.message %}
+    <p class="muted verdict-message">{{ message }}</p>
+    {%- endif %}
+  </li>
+  {%- endfor %}
+</ul>
+{%- endif %}
+
+<h2>Results, last 24 hours</h2>
+{%- if detail.results.is_empty() %}
+<p class="muted">No results in the last 24 hours.</p>
+{%- else %}
+<p class="muted section-note">Newest first, at most {{ detail.results.len() }}.</p>
+<ul class="items surface results">
+  {%- for result in detail.results %}
+  <li>
+    <div class="component-line">
+      <time datetime="{{ result.at.iso }}">{{ result.at.text }}</time>
+      {% let label = result.health -%}
+      {%- include "status/label.html" %}
+    </div>
+    <div class="meta">
+      <span>{{ result.duration }}</span>
+      <span>on {{ result.node }}</span>
+      {%- if let Some(code) = result.status_code %}
+      <span>status {{ code }}</span>
+      {%- endif %}
+      {%- if let Some(error) = result.error %}
+      <span class="error-text">{{ error }}</span>
+      {%- endif %}
+    </div>
+  </li>
+  {%- endfor %}
+</ul>
+{%- endif %}
+
+<h2>Outages and releases</h2>
+<p class="muted section-note">Since <time datetime="{{ detail.since.iso }}">{{ detail.since.text }}</time>, newest first.</p>
+{%- if detail.truncated %}
+<p class="notice">More happened than one page shows; these are the newest {{ detail.timeline.len() }}.</p>
+{%- endif %}
+{%- if detail.timeline.is_empty() %}
+<p class="muted">Nothing in this window.</p>
+{%- else %}
+<ul class="items surface">
+  {%- for event in detail.timeline %}
+  <li>
+    {%- if let Some(link) = event.href %}
+    <a class="item-title" href="{{ link }}">{{ event.text }}</a>
+    {%- else %}
+    <span class="item-title">{{ event.text }}</span>
+    {%- endif %}
+    <div class="meta">
+      <span class="badge {{ event.tone }}">{{ event.kind }}</span>
+      <span class="muted"><time datetime="{{ event.at.iso }}">{{ event.at.text }}</time> · {{ event.detail }}</span>
+    </div>
+  </li>
+  {%- endfor %}
+</ul>
+{%- endif %}

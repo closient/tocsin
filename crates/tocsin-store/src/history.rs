@@ -77,32 +77,189 @@ pub(crate) fn results(
             ":before": before,
             ":limit": page.limit,
         },
-        |row| {
-            let detail = row
-                .get::<_, Option<String>>(7)?
-                .map(|text| {
-                    serde_json::from_str(&text).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            7,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })
-                })
-                .transpose()?;
-            Ok(CheckResult {
-                id: row.get(0)?,
-                node_id: row.get(1)?,
-                started_at: Timestamp::from_millis(row.get(2)?),
-                duration_ms: row.get(3)?,
-                health: parse_column(4, &row.get::<_, String>(4)?)?,
-                error: row.get(5)?,
-                status_code: row.get(6)?,
-                detail,
-            })
-        },
+        result_row,
     )?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// A row of [`RESULTS`] or [`NEWEST`] as a result.
+fn result_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CheckResult> {
+    let detail = row
+        .get::<_, Option<String>>(7)?
+        .map(|text| {
+            serde_json::from_str(&text).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    7,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()?;
+    Ok(CheckResult {
+        id: row.get(0)?,
+        node_id: row.get(1)?,
+        started_at: Timestamp::from_millis(row.get(2)?),
+        duration_ms: row.get(3)?,
+        health: parse_column(4, &row.get::<_, String>(4)?)?,
+        error: row.get(5)?,
+        status_code: row.get(6)?,
+        detail,
+    })
+}
+
+/// Which of a check's results [`newest`] looks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResultFilter {
+    /// Any result.
+    Any,
+    /// A result that was degraded or down.
+    NotUp,
+    /// A result whose error, if it has one, does not begin with this:
+    /// a heartbeat's latest ping rather than a missed deadline.
+    ErrorNotStartingWith(String),
+}
+
+/// One check's newest result of a kind, from `since` on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Newest {
+    /// The check or heartbeat.
+    pub check_id: String,
+    /// The start of the window searched.
+    pub since: Timestamp,
+    /// Which results count.
+    pub filter: ResultFilter,
+}
+
+/// The newest result of `:check` from `:since` that the filter keeps.
+/// Rides `check_result_by_check` backwards and stops at the first match.
+const NEWEST: &str =
+    "SELECT id, node_id, started_at, duration_ms, health, error, status_code, detail
+     FROM check_result
+     WHERE check_id = :check AND started_at >= :since
+       AND (:not_up = 0 OR health != 'up')
+       AND (:prefix IS NULL OR error IS NULL OR substr(error, 1, length(:prefix)) != :prefix)
+     ORDER BY started_at DESC, id DESC LIMIT 1";
+
+/// For each of `queries`, in order, the newest result it asks for, if any.
+pub(crate) fn newest(conn: &Connection, queries: &[Newest]) -> Result<Vec<Option<CheckResult>>> {
+    let mut statement = conn.prepare_cached(NEWEST)?;
+    let mut found = Vec::with_capacity(queries.len());
+    for query in queries {
+        let (not_up, prefix) = match &query.filter {
+            ResultFilter::Any => (false, None),
+            ResultFilter::NotUp => (true, None),
+            ResultFilter::ErrorNotStartingWith(prefix) => (false, Some(prefix.as_str())),
+        };
+        found.push(
+            statement
+                .query_row(
+                    named_params! {
+                        ":check": query.check_id,
+                        ":since": query.since.as_millis(),
+                        ":not_up": not_up,
+                        ":prefix": prefix,
+                    },
+                    result_row,
+                )
+                .optional()?,
+        );
+    }
+    Ok(found)
+}
+
+/// One check's results in one slice of a window: how many, how many
+/// failed, and the latency of those that were not down.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResultSlice {
+    /// The check or heartbeat.
+    pub check_id: String,
+    /// Which slice, counting from 0 at the start of the window.
+    pub slice: i64,
+    /// Results in the slice.
+    pub results: u32,
+    /// Of those, results that were degraded.
+    pub degraded: u32,
+    /// Of those, results that were down.
+    pub down: u32,
+    /// The mean duration of the results that were not down, in
+    /// milliseconds; `None` when every one was down.
+    pub mean_ms: Option<f64>,
+    /// The shortest of them.
+    pub min_ms: Option<i64>,
+    /// The longest of them.
+    pub max_ms: Option<i64>,
+}
+
+/// What one slice of results sums up. Down results are left out of the
+/// latency: a timeout's duration is the timeout, and a refused
+/// connection's says nothing about the service.
+macro_rules! slice_columns {
+    () => {
+        "SELECT check_id, (started_at - :since) / :width AS slice, COUNT(*),
+         SUM(health = 'degraded'), SUM(health = 'down'),
+         AVG(CASE WHEN health != 'down' THEN duration_ms END),
+         MIN(CASE WHEN health != 'down' THEN duration_ms END),
+         MAX(CASE WHEN health != 'down' THEN duration_ms END)"
+    };
+}
+
+/// Every check's results from `:since` on, grouped into slices `:width`
+/// milliseconds wide. Pinned to `check_result_by_time`: left to itself
+/// the planner walks all of `check_result_by_check` to save the sort,
+/// which reads every retained result rather than the window's.
+const SLICES: &str = concat!(
+    slice_columns!(),
+    "
+     FROM check_result INDEXED BY check_result_by_time WHERE started_at >= :since
+     GROUP BY check_id, slice ORDER BY check_id, slice"
+);
+
+/// One check's results from `:since` on, in the same slices. Rides
+/// `check_result_by_check`.
+const CHECK_SLICES: &str = concat!(
+    slice_columns!(),
+    "
+     FROM check_result WHERE check_id = :check AND started_at >= :since
+     GROUP BY slice ORDER BY slice"
+);
+
+/// The results since `since` of `check`, or of every check, in slices
+/// `width_ms` wide, ordered by check and slice. A slice with no results
+/// is absent.
+pub(crate) fn slices(
+    conn: &Connection,
+    since: Timestamp,
+    width_ms: i64,
+    check: Option<&str>,
+) -> Result<Vec<ResultSlice>> {
+    let row = |row: &rusqlite::Row<'_>| {
+        Ok(ResultSlice {
+            check_id: row.get(0)?,
+            slice: row.get(1)?,
+            results: row.get(2)?,
+            degraded: row.get(3)?,
+            down: row.get(4)?,
+            mean_ms: row.get(5)?,
+            min_ms: row.get(6)?,
+            max_ms: row.get(7)?,
+        })
+    };
+    let (since, width) = (since.as_millis(), width_ms.max(1));
+    let rows = match check {
+        Some(check) => conn
+            .prepare_cached(CHECK_SLICES)?
+            .query_map(
+                named_params! { ":since": since, ":width": width, ":check": check },
+                row,
+            )?
+            .collect::<rusqlite::Result<_>>()?,
+        None => conn
+            .prepare_cached(SLICES)?
+            .query_map(named_params! { ":since": since, ":width": width }, row)?
+            .collect::<rusqlite::Result<_>>()?,
+    };
+    Ok(rows)
 }
 
 /// The error for a `before` that names no row this read can resume from.

@@ -13,6 +13,9 @@
 //!
 //! With `[server.auth] mode = "none"` both answer 404, so a page behind
 //! them does not exist until auth is configured.
+//!
+//! The read-only internal board takes [`Operator`]: the same proof, but
+//! every refusal, auth off included, is a 403.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -256,6 +259,38 @@ impl FromRequestParts<AppState> for Admin {
             auth: Arc::clone(auth),
         })
     }
+}
+
+/// A signed-in person allowed to read the internal board: the same proof
+/// as [`Admin`], refused with one 403 for every reason. The board exists
+/// whether or not auth is configured, so it answers 403, not 404, when it
+/// is off; the reason goes to the log.
+pub struct Operator {
+    /// Their email address, lowercased.
+    pub email: String,
+}
+
+impl FromRequestParts<AppState> for Operator {
+    type Rejection = HtmlError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, HtmlError> {
+        if state.admin.is_none() {
+            tracing::warn!("internal board refused: [server.auth] is not configured");
+            return Err(forbidden());
+        }
+        match Admin::from_request_parts(parts, state).await {
+            Ok(Admin { email, .. }) => Ok(Operator { email }),
+            Err(_) => Err(forbidden()),
+        }
+    }
+}
+
+/// The internal board's one refusal.
+fn forbidden() -> HtmlError {
+    HtmlError::new(
+        StatusCode::FORBIDDEN,
+        "This page is for signed-in operators. Open it through your sign-in proxy.",
+    )
 }
 
 /// A form submitted by a signed-in person from a page on this site, with

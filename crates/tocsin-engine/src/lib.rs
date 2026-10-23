@@ -28,8 +28,8 @@ pub mod ports;
 
 pub use crate::engine::{
     CheckSnapshot, ComponentSnapshot, Engine, HEARTBEAT_CONFIRM, HeartbeatHandle, LastResult,
-    NoticesHandle, PING_MESSAGE_LIMIT, PROBE_BACKSTOP, Parts, Ping, PingError, Snapshot,
-    StartError, StatusHandle,
+    MISSED_PING, NoticesHandle, PING_MESSAGE_LIMIT, PROBE_BACKSTOP, Parts, Ping, PingError,
+    Snapshot, StartError, StatusHandle,
 };
 pub use crate::event::{CheckChange, ComponentChange, EngineEvent, MemberKind};
 pub use crate::notice::{Notice, impact_health};

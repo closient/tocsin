@@ -1,0 +1,16 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{#- A check's latency over the last 24 hours; the including template binds
+    `spark` (a Spark, web/internal.rs). The drawing is hidden from screen
+    readers; the summary under it says the same in words. -#}
+<div class="spark">
+<svg class="spark" viewBox="0 0 480 48" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+  <line class="base" x1="0" y1="39" x2="480" y2="39"/>
+  {%- for line in spark.lines %}
+  <polyline points="{{ line }}"/>
+  {%- endfor %}
+  {%- for mark in spark.marks %}
+  <rect class="{{ mark.class }}" x="{{ mark.x }}" y="{{ mark.y }}" width="{{ mark.width }}" height="{{ mark.height }}"/>
+  {%- endfor %}
+</svg>
+<p class="bar-summary">{{ spark.summary }}</p>
+</div>

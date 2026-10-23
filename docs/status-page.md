@@ -15,6 +15,10 @@ same incidents, and releases of public projects only. Its look is set by
 | `/components/<id>` | One component: its status, its uptime bar, what is open against it, and its outages, incidents and deploys of the last 30 days. |
 | `/feeds/…` | Atom feeds of incidents and releases: see [Feeds](#feeds). |
 
+Checks and heartbeats on no component appear on none of these pages. The
+[internal board](admin.md#the-internal-board) at `/internal/` shows every
+check to signed-in operators, with targets, errors and links.
+
 Times are shown in `[page] timezone`. Update messages are Markdown,
 rendered by the same sanitizing renderer as the rest of tocsin. Every page
 reads in full without JavaScript and follows the reader's light or dark

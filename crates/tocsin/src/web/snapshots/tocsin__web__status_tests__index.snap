@@ -523,7 +523,7 @@ expression: normalize(&page)
       <li><a href="/">Current status</a></li>
       <li><a href="/history">Incident history</a></li>
       <li><a href="/releases">Releases</a></li>
-      <li><a href="/releases.atom">Release feed</a></li>
+      <li><a href="/feeds/releases.atom">Release feed</a></li>
       <li><a href="/api/v1/status.json">Status API</a></li>
     </ul>
   </nav>

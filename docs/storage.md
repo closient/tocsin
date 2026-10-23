@@ -23,7 +23,7 @@ WAL, and runs any pending migrations before doing anything else.
 | `synchronous` | `NORMAL` | Safe under WAL: a power cut can lose the last few commits but never corrupts the file. Probe results are cheap to lose; a full fsync per commit is not cheap. |
 | `foreign_keys` | `ON` | An incident's components, updates and edits cascade with it. |
 | `wal_autocheckpoint` | `0` on the writer | Commits never checkpoint; the checkpointer thread does (below). |
-| `journal_size_limit` | 16 MiB on the writer | A log that a long read let grow is cut back to this once it rewinds. |
+| `journal_size_limit` | 32 MiB on the writer | A log that a long read let grow is cut back to this once it rewinds. |
 | `busy_timeout` | 5 s | Covers a checkpoint or a hand-run `sqlite3` holding a lock briefly. |
 
 **One writer.** Every write goes through a single dedicated thread fed by a
@@ -65,43 +65,52 @@ that leave 1000 frames or more behind log a warning.
 
 **The log stays bounded.** A checkpoint copies only the frames committed
 before it started, and SQLite rewinds the log to its start only when a
-commit finds every frame copied. Under writes that never pause, every
+commit finds every frame copied. Under writes that never pause, a
 checkpoint the checkpointer runs is raced by the next commit, so the log
-would grow without bound. Once the log holds 4000 frames (about 16 MB),
-the writer runs a passive checkpoint itself after its commit: nothing can
+would grow without bound. Past a soft limit of 4000 frames (about 16 MB),
+every write wakes the checkpointer at once, and a pass that copied all it
+found is followed straight away by one for the frames committed during
+it; the first that no commit races leaves the whole log copied, and the
+next commit rewinds it. The writer itself does no checkpoint work below
+the hard limit of 8000 frames (about 32 MB): a checkpoint on the writer
+thread, however few frames it copies, fsyncs the log and the database
+inside the write, and under a disk busy with other work those fsyncs were
+the bench's whole tail (TOC-60). Once the log holds 8000 frames, the
+writer runs a passive checkpoint itself after its commit: nothing can
 commit while it runs, so it copies the rest unless a reader holds frames,
 and the next commit rewinds the log. Only one connection can checkpoint at
 a time, and a passive checkpoint that finds another one running copies
 nothing at all. The checkpointer's pass can take seconds on a disk busy
-flushing other work, and writes that went on past it let the log reach
-12005 frames (49 MB) on CI, then 16004 (TOC-59). So when the
+flushing other work, and when the limit was 4000 frames, writes that went
+on past it let the log reach 12005 frames (49 MB) on CI, then 16004
+(TOC-59). So when the
 checkpointer's pass holds the lock, the writer waits for it to end, on a
 condition variable the pass signals, committing nothing meanwhile, and
 then copies the rest; when another process holds it, the writer tries
-again every 10 ms. While the writer checkpoints at the limit, and for a
-second after, the checkpointer starts no pass of its own, which would
-only take the lock again the moment the last one ended. The log then
-holds at most 3999 frames plus those of the one commit that reached the
-limit. A frame is a 4096-byte page and a 24-byte header, after a 32-byte
-file header. A full batch of 256 check results commits 27 to 47 frames,
-so under results alone the log stays within 4046 frames, 16,669,552
-bytes; a bigger commit, such as a retention chunk, adds its own frames
-once instead.
+again every 10 ms. While the writer checkpoints at the hard limit, and
+for a second after, the checkpointer starts no pass of its own, which
+would only take the lock again the moment the last one ended. The log
+then holds at most 7999 frames plus those of the one commit that reached
+the hard limit. A frame is a 4096-byte page and a 24-byte header, after a
+32-byte file header. A full batch of 256 check results commits 27 to 47
+frames, so under results alone the log stays within 8046 frames,
+33,149,552 bytes; a bigger commit, such as a retention chunk, adds its
+own frames once instead.
 
 The bound has three exceptions. A long read can hold frames the
 checkpoint may not copy: the writer does not wait for readers, since
 `RESTART` or `TRUNCATE` would, but they wait while holding the write
 lock, which puts reads back in front of writes; instead the writer logs
-an error each time the log doubles past 8000 frames. The writer waits at
+an error each time the log doubles past 16000 frames. The writer waits at
 most 5 seconds (the connections' busy timeout), so a checkpoint that
 does not finish shows up instead of stalling every write. And the writer's
 checkpoint can fail. Either of the last two starts a lockout: the writer
-logs one error, with SQLite's if there is one, and writes past the limit
-try to checkpoint once each without waiting, until one succeeds. Then it
+logs one error, with SQLite's if there is one, and writes past the hard
+limit try to checkpoint once each without waiting, until one succeeds. Then it
 logs one line saying how long the lockout lasted and the most frames the
 log held. A writer waiting out the checkpointer's pass holds every write
-behind it for that long. Under a 60 GB file copy to the same disk, in
-twelve runs of the bound's test, 31 of 36 writes at the limit waited,
+behind it for that long. With TOC-59's single limit of 4000 frames, under
+a 60 GB file copy to the same disk, in twelve runs of the bound's test, 31 of 36 writes at the limit waited,
 for 0.57 seconds at the median and 4.9 at the most, and none timed out.
 The longest pass took 5.9 seconds, longer than the writer waits, so a
 pass like it can still start a lockout. The same load against a writer
@@ -109,6 +118,20 @@ that polled every 10 ms instead, beside a checkpointer that started its
 next pass straight away, timed out four times, once after a 4.9-second
 pass because the next pass had already started, and twice let the log
 reach 11928 and 16001 frames behind a pass that outlasted the wait.
+
+With the two limits (TOC-60), in the seven of ten runs each of the
+write-latency bench that nothing else on the disk slowed past 100 ms,
+writes reached TOC-59's single limit 88 times and the hard limit 3 times,
+and the writer's copies there stalled writes for 318 ms and 8 ms in all;
+the p99 ranged from 7.8 to 28.4 ms before and from 6.8 to 21.3 ms after.
+Under a disk kept busy by other writes, passes take seconds, the
+checkpointer falls behind, and the writer still reaches the hard limit,
+though less often: 17 times against 117 in ten runs beside a loop of 128
+MB synced writes. Most of the stall left there is the writer's own commits
+waiting on the disk, not checkpoint work. In twelve runs of the bound's
+test beside a 60 GB file copy, 21 of 43 writes at the hard limit waited,
+for 0.4 ms at the median; one waited the whole 5 seconds behind an
+11-second pass and started a lockout.
 
 The disk is still shared: on ext4 a write can wait for the filesystem
 journal while a checkpoint's fsync commits it. On a runner still flushing

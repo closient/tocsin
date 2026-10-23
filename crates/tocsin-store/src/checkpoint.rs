@@ -17,20 +17,27 @@
 //! A checkpoint racing the writer copies only the frames committed before it
 //! started. SQLite rewinds the log to its start only when a write finds every
 //! frame copied, so under writes that never pause the log would grow without
-//! bound. Once it holds [`LOG_LIMIT_FRAMES`], the writer checkpoints the rest
-//! itself: no commit can race that one, and its next commit rewinds the log.
+//! bound. Once it holds [`SOFT_LIMIT_FRAMES`], each write wakes this thread
+//! at once, and a pass that copied all it found is followed straight away by
+//! one for the frames committed during it: a pass that no commit races
+//! leaves the whole log copied, and the next commit rewinds it. The writer
+//! itself does no checkpoint work below [`HARD_LIMIT_FRAMES`]: a checkpoint
+//! on the writer thread, however few frames it copies, fsyncs twice inside
+//! the write (TOC-60).
 //!
-//! Only one connection can checkpoint at a time, and a `PASSIVE` checkpoint
-//! that finds another one running copies nothing. Writes go on during this
-//! thread's passes, which can take seconds on a disk still flushing other
-//! work (TOC-59), so a writer that carried on past the limit would grow the
-//! log by as much as it can write in that time. It waits for the other
-//! checkpoint instead, for up to [`CHECKPOINT_WAIT`], and commits nothing
-//! meanwhile. A wait that times out, or a checkpoint that fails, starts a
-//! lockout: one error is logged, and writes past the limit try once without
-//! waiting until a checkpoint succeeds again. While the writer checkpoints
-//! at the limit, this thread starts no pass of its own, which would only
-//! take the lock from it.
+//! Writes that never pause can race every pass, so at [`HARD_LIMIT_FRAMES`]
+//! the writer checkpoints the rest itself: no commit can race that one, and
+//! its next commit rewinds the log. Only one connection can checkpoint at a
+//! time, and a `PASSIVE` checkpoint that finds another one running copies
+//! nothing. Writes go on during this thread's passes, which can take seconds
+//! on a disk still flushing other work (TOC-59), so a writer that carried on
+//! past the hard limit would grow the log by as much as it can write in that
+//! time. It waits for the other checkpoint instead, for up to
+//! [`CHECKPOINT_WAIT`], and commits nothing meanwhile. A wait that times out,
+//! or a checkpoint that fails, starts a lockout: one error is logged, and
+//! writes past the hard limit try once without waiting until a checkpoint
+//! succeeds again. While the writer checkpoints at the hard limit, this
+//! thread starts no pass of its own, which would only take the lock from it.
 
 use std::cell::Cell;
 use std::os::raw::c_int;
@@ -61,12 +68,19 @@ const RETRY: Duration = Duration::from_secs(1);
 /// behind before a warning.
 const STALLED_WARNING: u32 = 10;
 
-/// Frames in the log at which the writer checkpoints the rest itself.
-pub(crate) const LOG_LIMIT_FRAMES: c_int = 4000;
+/// Frames in the log past which every write wakes the checkpointer, and a
+/// pass that copied all it found is followed by another straight away.
+pub(crate) const SOFT_LIMIT_FRAMES: c_int = 4000;
 
-/// Longest the writer waits at [`LOG_LIMIT_FRAMES`] for another connection's
-/// checkpoint to finish: the `busy_timeout` every connection uses, several
-/// times the longest pass measured on CI runners (794 ms, TOC-57).
+/// Frames in the log at which the writer checkpoints the rest itself: twice
+/// [`SOFT_LIMIT_FRAMES`], so the checkpointer has as many frames again to
+/// get a pass in between commits before the writer has to stop for one.
+pub(crate) const HARD_LIMIT_FRAMES: c_int = 2 * SOFT_LIMIT_FRAMES;
+
+/// Longest the writer waits at [`HARD_LIMIT_FRAMES`] for another
+/// connection's checkpoint to finish: the `busy_timeout` every connection
+/// uses, several times the longest pass measured on CI runners (794 ms,
+/// TOC-57).
 const CHECKPOINT_WAIT: Duration = schema::BUSY_TIMEOUT;
 
 /// How often the waiting writer tries its checkpoint again when the lock is
@@ -74,9 +88,9 @@ const CHECKPOINT_WAIT: Duration = schema::BUSY_TIMEOUT;
 const CHECKPOINT_POLL: Duration = Duration::from_millis(10);
 
 /// The log file's size once a rewind has emptied it: about
-/// [`LOG_LIMIT_FRAMES`] frames of 4 KiB pages. A log that a long read kept
+/// [`HARD_LIMIT_FRAMES`] frames of 4 KiB pages. A log that a long read kept
 /// from rewinding is cut back to this, not left at its largest.
-pub(crate) const LOG_LIMIT_BYTES: i64 = 16 * 1024 * 1024;
+pub(crate) const LOG_LIMIT_BYTES: i64 = 32 * 1024 * 1024;
 
 /// SQLite's default `wal_autocheckpoint`, restored on the writer if this
 /// thread is ever gone.
@@ -115,7 +129,7 @@ pub(crate) struct Checkpointer {
 }
 
 /// The writer's end: tells the checkpointer a write committed, and
-/// checkpoints on the writer once the log reaches [`LOG_LIMIT_FRAMES`].
+/// checkpoints on the writer once the log reaches [`HARD_LIMIT_FRAMES`].
 pub(crate) struct Nudge {
     link: Option<Link>,
     /// The log length that next logs an error; doubles each time.
@@ -126,9 +140,17 @@ pub(crate) struct Nudge {
 
 struct Link {
     sender: SyncSender<()>,
-    /// Frames appended to the log, ever.
-    appended: Arc<AtomicU64>,
+    log: Arc<Log>,
     passes: Arc<Passes>,
+}
+
+/// The log as of the writer's last write, for the checkpointer.
+#[derive(Default)]
+struct Log {
+    /// Frames appended to the log, ever.
+    appended: AtomicU64,
+    /// Frames in the log.
+    frames: AtomicU64,
 }
 
 /// The writer's checkpoints at the limit have timed out or failed since
@@ -154,6 +176,9 @@ pub(crate) struct Passes {
     /// Passes the checkpointer skipped to stand aside for the writer.
     #[cfg(test)]
     skips: AtomicU64,
+    /// Passes the checkpointer ran.
+    #[cfg(test)]
+    ran: AtomicU64,
 }
 
 #[derive(Default)]
@@ -222,14 +247,14 @@ impl Checkpointer {
     pub(crate) fn spawn(conn: Connection) -> Result<(Checkpointer, Nudge)> {
         // One pending nudge is enough: it means "the log has grown".
         let (sender, nudges) = mpsc::sync_channel(1);
-        let appended = Arc::new(AtomicU64::new(0));
+        let log = Arc::new(Log::default());
         let passes = Arc::new(Passes::default());
         let thread = {
-            let appended = Arc::clone(&appended);
+            let log = Arc::clone(&log);
             let passes = Arc::clone(&passes);
             std::thread::Builder::new()
                 .name("tocsin-store-checkpointer".into())
-                .spawn(move || run(&conn, &nudges, &appended, &passes))?
+                .spawn(move || run(&conn, &nudges, &log, &passes))?
         };
         Ok((
             Checkpointer {
@@ -237,7 +262,7 @@ impl Checkpointer {
                 #[cfg(test)]
                 passes: Arc::clone(&passes),
             },
-            Nudge::new(sender, appended, passes),
+            Nudge::new(sender, log, passes),
         ))
     }
 
@@ -268,35 +293,38 @@ impl Checkpointer {
 }
 
 impl Nudge {
-    fn new(sender: SyncSender<()>, appended: Arc<AtomicU64>, passes: Arc<Passes>) -> Nudge {
+    fn new(sender: SyncSender<()>, log: Arc<Log>, passes: Arc<Passes>) -> Nudge {
         Nudge {
             link: Some(Link {
                 sender,
-                appended,
+                log,
                 passes,
             }),
-            alarm: 2 * LOG_LIMIT_FRAMES,
+            alarm: 2 * HARD_LIMIT_FRAMES,
             lockout: None,
         }
     }
 
-    /// Called by the writer after each write. Waits only once the log has
-    /// reached [`LOG_LIMIT_FRAMES`], another checkpoint is running, and no
-    /// lockout is.
+    /// Called by the writer after each write. Checkpoints only once the log
+    /// has reached [`HARD_LIMIT_FRAMES`], and waits only if another
+    /// checkpoint is running then and no lockout is.
     pub(crate) fn after_write(&mut self, conn: &Connection) {
         let Some(link) = &self.link else {
             return;
         };
         let (frames, appended) = LOG.get();
-        link.appended.store(appended, Ordering::Relaxed);
-        // At the limit, the checkpointer starts no pass while this write
-        // checkpoints, nor for a while after in case the next write is at the
-        // limit too: a pass starting the moment the last ended, as a pass
-        // that commits raced does, would take the lock again before this
-        // checkpoint could. Set before the nudge, which could start one.
+        link.log.appended.store(appended, Ordering::Relaxed);
+        link.log
+            .frames
+            .store(u64::from(frames.unsigned_abs()), Ordering::Relaxed);
+        // At the hard limit, the checkpointer starts no pass while this
+        // write checkpoints, nor for a while after in case the next write is
+        // at the limit too: a pass starting the moment the last ended, as a
+        // pass that commits raced does, would take the lock again before
+        // this checkpoint could. Set before the nudge, which could start one.
         let started = Instant::now();
         link.passes.stand_aside_until(
-            (frames >= LOG_LIMIT_FRAMES).then(|| started + CHECKPOINT_WAIT + RETRY),
+            (frames >= HARD_LIMIT_FRAMES).then(|| started + CHECKPOINT_WAIT + RETRY),
         );
         // Full means a nudge is already pending, which is all one says.
         if let Err(TrySendError::Disconnected(())) = link.sender.try_send(()) {
@@ -313,9 +341,12 @@ impl Nudge {
             );
             return;
         }
-        if frames < LOG_LIMIT_FRAMES {
-            self.alarm = 2 * LOG_LIMIT_FRAMES;
-            // The log rewound, so a checkpoint copied all of it.
+        if frames < HARD_LIMIT_FRAMES {
+            // Past the soft limit the nudge has the checkpointer copy at
+            // once; a checkpoint here would put its fsyncs inside the write.
+            self.alarm = 2 * HARD_LIMIT_FRAMES;
+            // A lockout only starts at the hard limit, so a log below it has
+            // rewound since, and a checkpoint copied all of it.
             self.recovered();
             return;
         }
@@ -482,15 +513,22 @@ impl Passes {
     pub(crate) fn skips(&self) -> u64 {
         self.skips.load(Ordering::Relaxed)
     }
+
+    /// Passes the checkpointer ran.
+    pub(crate) fn ran(&self) -> u64 {
+        self.ran.load(Ordering::Relaxed)
+    }
 }
 
-fn run(conn: &Connection, nudges: &Receiver<()>, appended: &AtomicU64, passes: &Passes) {
+fn run(conn: &Connection, nudges: &Receiver<()>, log: &Log, passes: &Passes) {
     // The appended count the last checkpoint started from: frames past it
     // have not been copied.
     let mut copied_to = 0;
     // When the next checkpoint must run even below the threshold.
     let mut due: Option<Instant> = None;
     let mut stalled = 0;
+    // The last pass copied every frame it found: no read held it back.
+    let mut copied_all = true;
     loop {
         let woken = match due {
             None => nudges.recv().is_ok(),
@@ -503,9 +541,16 @@ fn run(conn: &Connection, nudges: &Receiver<()>, appended: &AtomicU64, passes: &
             return;
         }
         let now = Instant::now();
-        let target = appended.load(Ordering::Relaxed);
+        let target = log.appended.load(Ordering::Relaxed);
         let due_at = *due.get_or_insert(now + MAX_DELAY);
-        if target - copied_to < THRESHOLD_FRAMES && now < due_at {
+        // Past the soft limit, chase the commits: a pass that copied all it
+        // found is followed at once by one for the frames committed during
+        // it, until one that no commit raced lets the next commit rewind the
+        // log. One that a read held back waits for `due`, as below.
+        let past_soft_limit =
+            log.frames.load(Ordering::Relaxed) >= u64::from(SOFT_LIMIT_FRAMES.unsigned_abs());
+        let chase = past_soft_limit && copied_all && target > copied_to;
+        if target - copied_to < THRESHOLD_FRAMES && now < due_at && !chase {
             continue;
         }
         let Some(pass) = passes.begin() else {
@@ -521,9 +566,12 @@ fn run(conn: &Connection, nudges: &Receiver<()>, appended: &AtomicU64, passes: &
             let _pass = pass;
             checkpoint(conn, &mut stalled)
         };
+        #[cfg(test)]
+        passes.ran.fetch_add(1, Ordering::Relaxed);
+        copied_all = complete;
         due = if !complete {
             Some(Instant::now() + RETRY)
-        } else if appended.load(Ordering::Relaxed) > copied_to {
+        } else if log.appended.load(Ordering::Relaxed) > copied_to {
             Some(Instant::now() + MAX_DELAY)
         } else {
             None

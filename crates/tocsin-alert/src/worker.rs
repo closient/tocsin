@@ -14,6 +14,11 @@
 //! of alerts queues rather than floods it. Retries back off exponentially
 //! with full jitter, and a 429 or 503 `Retry-After` pauses the notifier
 //! for as long as it asks.
+//!
+//! [`Alerter::reconfigure`] swaps the notifiers and routes without a
+//! restart. A send already in flight finishes on the notifier it started
+//! on; a pending delivery to a notifier that is no longer configured fails
+//! for good.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -129,8 +134,24 @@ impl Default for WorkerSettings {
 #[derive(Debug)]
 pub struct Alerter {
     stop: watch::Sender<bool>,
+    setup: watch::Sender<Setup>,
     wake: Arc<Notify>,
     task: JoinHandle<()>,
+}
+
+/// What the worker sends with.
+#[derive(Clone)]
+struct Setup {
+    notifiers: Notifiers,
+    router: Arc<Router>,
+}
+
+impl std::fmt::Debug for Setup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Setup")
+            .field("notifiers", &self.notifiers.keys().collect::<Vec<_>>())
+            .finish_non_exhaustive()
+    }
 }
 
 /// An alert's two independent queues: its messages (fire, repeat,
@@ -171,6 +192,7 @@ struct Worker {
     metrics: AlertMetrics,
     settings: WorkerSettings,
     wake: Arc<Notify>,
+    setup: watch::Receiver<Setup>,
     in_flight: JoinSet<Result<(), SendError>>,
     sends: HashMap<task::Id, InFlight>,
     busy: HashSet<(i64, Lane)>,
@@ -193,6 +215,10 @@ impl Alerter {
         settings: WorkerSettings,
     ) -> Self {
         let (stop, stopped) = watch::channel(false);
+        let (setup, setup_changes) = watch::channel(Setup {
+            notifiers: notifiers.clone(),
+            router: Arc::clone(&router),
+        });
         let wake = Arc::new(Notify::new());
         let worker = Worker {
             store,
@@ -202,6 +228,7 @@ impl Alerter {
             metrics,
             settings,
             wake: Arc::clone(&wake),
+            setup: setup_changes,
             in_flight: JoinSet::new(),
             sends: HashMap::new(),
             busy: HashSet::new(),
@@ -209,7 +236,20 @@ impl Alerter {
             paused_until: HashMap::new(),
         };
         let task = tokio::spawn(worker.run(stopped));
-        Alerter { stop, wake, task }
+        Alerter {
+            stop,
+            setup,
+            wake,
+            task,
+        }
+    }
+
+    /// Sends with `notifiers` and `router` from now on. Sends in flight
+    /// finish on the notifier they started on; pending deliveries go to
+    /// the new notifier of the same id, or fail for good when there is
+    /// none.
+    pub fn reconfigure(&self, notifiers: Notifiers, router: Arc<Router>) {
+        self.setup.send_replace(Setup { notifiers, router });
     }
 
     /// What wakes the worker when a delivery is queued; hand it to
@@ -243,6 +283,11 @@ impl Worker {
             if *stopped.borrow() {
                 break;
             }
+            // Whatever woke the loop, a new setup applies before anything
+            // is sent.
+            if self.setup.has_changed().unwrap_or(false) {
+                self.reconfigure();
+            }
             let now = self.clock.now_ms();
             if now >= next_prune {
                 next_prune = now.saturating_add(millis(self.settings.prune_every));
@@ -265,6 +310,7 @@ impl Worker {
             tokio::select! {
                 _ = stopped.changed() => break,
                 () = self.wake.notified() => {}
+                Ok(()) = self.setup.changed() => self.reconfigure(),
                 Some(joined) = self.in_flight.join_next_with_id(), if !self.in_flight.is_empty() => {
                     self.finish(joined).await;
                 }
@@ -272,6 +318,23 @@ impl Worker {
             }
         }
         self.shut_down().await;
+    }
+
+    /// Takes the latest notifiers and routes, and forgets what it knew of
+    /// notifiers that are gone. A gone notifier's sends in flight still
+    /// count against it until they finish.
+    fn reconfigure(&mut self) {
+        let Setup { notifiers, router } = self.setup.borrow_and_update().clone();
+        self.notifiers = notifiers;
+        self.router = router;
+        let notifiers = &self.notifiers;
+        self.paused_until.retain(|id, _| notifiers.contains_key(id));
+        self.sending
+            .retain(|id, sending| *sending > 0 || notifiers.contains_key(id));
+        tracing::debug!(
+            notifiers = self.notifiers.len(),
+            "alert delivery reconfigured"
+        );
     }
 
     /// Queues due repeats and starts every due delivery whose alert lane

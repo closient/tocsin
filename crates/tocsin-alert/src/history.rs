@@ -3,7 +3,7 @@
 //! The engine's [`History`], with each outage change's alerting deliveries
 //! written in the same transaction.
 
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 
 use tocsin_engine::ports::{BoxFuture, Clock, History};
 use tocsin_store::{
@@ -20,9 +20,12 @@ use crate::route::Router;
 /// `alerted` fires on every notifier its routes name, and a recovery
 /// resolves whatever its predecessor fired. It never looks at maintenance
 /// windows; the engine already did.
+///
+/// [`set_router`](Self::set_router) changes the routes for outages opened
+/// from then on; alerts already open keep the notifiers they fired on.
 pub struct AlertingHistory {
     store: Arc<Store>,
-    router: Arc<Router>,
+    router: RwLock<Arc<Router>>,
     wake: Arc<Notify>,
     clock: Arc<dyn Clock>,
 }
@@ -45,10 +48,19 @@ impl AlertingHistory {
     ) -> Self {
         AlertingHistory {
             store,
-            router,
+            router: RwLock::new(router),
             wake,
             clock,
         }
+    }
+
+    /// Routes outages opened from now on with `router`.
+    pub fn set_router(&self, router: Arc<Router>) {
+        *self.router.write().unwrap_or_else(PoisonError::into_inner) = router;
+    }
+
+    fn router(&self) -> Arc<Router> {
+        Arc::clone(&self.router.read().unwrap_or_else(PoisonError::into_inner))
     }
 }
 
@@ -69,7 +81,7 @@ impl History for AlertingHistory {
                 .as_ref()
                 .filter(|open| open.alerted)
                 .map(|open| {
-                    self.router.routing(
+                    self.router().routing(
                         open.subject_kind,
                         &open.check_id,
                         open.component_id.as_deref(),

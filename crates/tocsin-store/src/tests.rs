@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use rusqlite::{TransactionBehavior, params};
 
-use crate::{DB_FILE, Error, NewCheckResult, Store, now_ms};
+use crate::{DB_FILE, Day, Error, NewCheckResult, Retention, Store, now_ms};
 
 fn open() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
@@ -66,7 +66,7 @@ async fn a_panicking_write_is_an_error_and_the_writer_carries_on() {
     assert_eq!(stored(&store, "after").await, 1);
 }
 
-/// Some failures (SQLITE_FULL, IOERR, NOMEM, a trigger's RAISE(ROLLBACK))
+/// Some failures (`SQLITE_FULL`, `IOERR`, `NOMEM`, a trigger's `RAISE(ROLLBACK)`)
 /// end the whole batch transaction, not just the failing insert's savepoint.
 /// Every reply must then match what is in the table: an `Ok` row is stored
 /// and an `Err` row is not.
@@ -175,4 +175,63 @@ async fn readers_are_not_blocked_by_an_uncommitted_delete() {
         .expect("a reader waited for an uncommitted write")
         .unwrap();
     assert_eq!(count, ROWS, "a reader saw an uncommitted delete");
+}
+
+/// Retention counts a day on a reader, then finalizes it on the writer. A
+/// result for that day committed in between (a node catching up on a
+/// backlog, a hand-run insert) must be in the day's rollup before the delete
+/// removes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_result_committed_between_count_and_finalize_is_counted() {
+    let (_dir, store) = open();
+    let day: Day = "2026-10-01".parse().unwrap();
+    let raw = rusqlite::Connection::open(store.path()).unwrap();
+    raw.busy_timeout(Duration::from_secs(5)).unwrap();
+    let insert = "INSERT INTO check_result (node_id, check_id, started_at, duration_ms, health)
+                  VALUES ('node-a', 'web', ?1, 1, 'up')";
+    for i in 0..100 {
+        raw.execute(insert, params![day.start_ms() + i * 1000])
+            .unwrap();
+    }
+    let store = std::sync::Arc::new(store);
+
+    // Park the writer so retention's count runs and its write waits.
+    let (parked, parking) = std::sync::mpsc::channel();
+    let park = {
+        let store = std::sync::Arc::clone(&store);
+        tokio::spawn(async move {
+            store
+                .writer
+                .run(move |_| {
+                    parked.send(()).unwrap();
+                    std::thread::sleep(Duration::from_millis(500));
+                    Ok(())
+                })
+                .await
+        })
+    };
+    tokio::task::spawn_blocking(move || parking.recv().unwrap())
+        .await
+        .unwrap();
+    let retention = {
+        let store = std::sync::Arc::clone(&store);
+        tokio::spawn(async move {
+            store
+                .apply_retention(Retention::days(3), day.plus(10).start_ms())
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    raw.execute(insert, params![day.start_ms() + 500_000])
+        .unwrap();
+    park.await.unwrap().unwrap();
+    let report = retention.await.unwrap().unwrap();
+
+    assert_eq!(report.deleted, 101);
+    let rolled = store.daily_rollups(day).await.unwrap();
+    assert_eq!(rolled[0].date, day);
+    assert_eq!(
+        rolled[0].total, 101,
+        "a result was deleted without being counted"
+    );
 }

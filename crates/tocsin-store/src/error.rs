@@ -25,6 +25,15 @@ pub enum Error {
     /// A write panicked; its transaction was rolled back and the writer
     /// carried on.
     WriterPanicked,
+    /// A check result starts more than [`crate::FUTURE_TOLERANCE`] after
+    /// now, too far to be clock skew between nodes; storing it would give a
+    /// day that has not happened a rollup.
+    FutureResult {
+        /// When the result says it started (unix milliseconds).
+        started_at_ms: i64,
+        /// This node's clock when it was refused.
+        now_ms: i64,
+    },
 }
 
 /// The result of a store operation.
@@ -44,6 +53,14 @@ impl fmt::Display for Error {
             Error::Closed => f.write_str("the store is closed"),
             Error::ReaderPanicked => f.write_str("a database read panicked"),
             Error::WriterPanicked => f.write_str("a database write panicked and was rolled back"),
+            Error::FutureResult {
+                started_at_ms,
+                now_ms,
+            } => write!(
+                f,
+                "a check result starts at {started_at_ms} ms, more than an hour after now \
+                 ({now_ms} ms); check the clock of the node that ran it"
+            ),
         }
     }
 }

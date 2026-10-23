@@ -8,8 +8,10 @@
 
 -- One row per probe run. Append-only: the trigger below rejects UPDATE;
 -- DELETE stays open for retention.
+-- AUTOINCREMENT: ids are never reused, so "id > n" means "committed after
+-- a reader saw max(id) = n"; retention relies on that.
 CREATE TABLE check_result (
-    id          INTEGER PRIMARY KEY,
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
     node_id     TEXT    NOT NULL CHECK (node_id <> ''),
     check_id    TEXT    NOT NULL CHECK (check_id <> ''),
     started_at  INTEGER NOT NULL CHECK (started_at >= 0),
@@ -89,6 +91,15 @@ CREATE TABLE retention (
     id            INTEGER PRIMARY KEY CHECK (id = 1),
     purged_before INTEGER NOT NULL CHECK (purged_before >= 0 AND purged_before % 86400000 = 0)
 ) STRICT;
+
+-- A result for a day retention has finalized would be deleted without ever
+-- being counted in its rollup, so it is refused outright.
+CREATE TRIGGER check_result_not_before_retention
+BEFORE INSERT ON check_result
+WHEN NEW.started_at < (SELECT purged_before FROM retention WHERE id = 1)
+BEGIN
+    SELECT RAISE(ABORT, 'check_result: started_at is before the retention watermark; that day is final');
+END;
 
 -- A push heartbeat received for a check. Append-only. Shape owned by the
 -- heartbeat ticket, which extends it with a new migration.

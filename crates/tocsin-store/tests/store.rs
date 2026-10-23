@@ -400,19 +400,148 @@ async fn retention_finishes_a_pass_that_stopped_part_way() {
     let first = day("2026-10-01");
     seed(&fixture.path, "web", first.start_ms(), 864_000, 1000);
     let now = first.plus(10).start_ms();
-    fixture
-        .store
-        .apply_retention(Retention::days(3), now)
-        .await
-        .unwrap();
-    // Simulate rows left behind by an interrupted delete.
-    seed(&fixture.path, "web", first.start_ms(), 864_000, 50);
+    // A pass cut off after its first 100-row chunk (serve stopping, say).
+    let slow = Retention {
+        days: 3,
+        chunk_rows: 100,
+        pause: Duration::from_secs(60),
+    };
+    let cut = tokio::time::timeout(
+        Duration::from_secs(1),
+        fixture.store.apply_retention(slow, now),
+    )
+    .await;
+    assert!(cut.is_err(), "the pass was meant to be cut off");
+    assert_eq!(count_results(&fixture.path), 900);
     let report = fixture
         .store
         .apply_retention(Retention::days(3), now)
         .await
         .unwrap();
-    assert_eq!((report.rolled_up, report.deleted), (0, 50));
+    assert_eq!((report.rolled_up, report.deleted), (0, 600));
+    assert_eq!(count_results(&fixture.path), 300);
+}
+
+/// Once retention has finalized a day, a result for it is refused rather
+/// than stored and later deleted without ever being counted.
+#[tokio::test]
+async fn a_result_for_a_finalized_day_is_refused() {
+    let fixture = open();
+    let first = day("2026-10-01");
+    seed(&fixture.path, "web", first.start_ms(), 864_000, 1000);
+    let now = first.plus(10).start_ms();
+    fixture
+        .store
+        .apply_retention(Retention::days(3), now)
+        .await
+        .unwrap();
+    let late = fixture
+        .store
+        .append(result("web", first.plus(6).start_ms() + 5, Health::Down))
+        .await;
+    let error = late.expect_err("a result for a finalized day was stored");
+    assert!(error.to_string().contains("retention watermark"), "{error}");
+    // The first day kept is still open.
+    fixture
+        .store
+        .append(result("web", first.plus(7).start_ms(), Health::Down))
+        .await
+        .unwrap();
+}
+
+/// Holds SQLite's write lock from a second connection, as `tocsin db rollup`
+/// or a hand-run `sqlite3` beside `serve` would, with a commit in it, for
+/// `hold`. Returns once the lock is held.
+fn hold_write_lock(path: &Path, hold: Duration) -> std::thread::JoinHandle<()> {
+    let conn = raw(path);
+    let (locked, lock_taken) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        conn.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             INSERT INTO check_result (node_id, check_id, started_at, duration_ms, health)
+             VALUES ('node-b', 'web', {}, 1, 'up');",
+            tocsin_store::now_ms()
+        ))
+        .unwrap();
+        locked.send(()).unwrap();
+        std::thread::sleep(hold);
+        conn.execute_batch("COMMIT").unwrap();
+    });
+    lock_taken.recv().unwrap();
+    thread
+}
+
+/// Rollups and retention read before they write. In a DEFERRED transaction
+/// that upgrade fails with `SQLITE_BUSY` without waiting when another
+/// connection holds the write lock; IMMEDIATE waits for it like any write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rollups_and_retention_wait_for_another_process_writing() {
+    let fixture = open();
+    let first = day("2026-10-01");
+    seed(&fixture.path, "web", first.start_ms(), 864_000, 1000);
+
+    let other = hold_write_lock(&fixture.path, Duration::from_millis(300));
+    let rolled = fixture.store.rollup_since(first).await;
+    other.join().unwrap();
+    assert!(rolled.is_ok(), "{rolled:?}");
+
+    let other = hold_write_lock(&fixture.path, Duration::from_millis(300));
+    let retained = fixture
+        .store
+        .apply_retention(Retention::days(3), first.plus(10).start_ms())
+        .await;
+    other.join().unwrap();
+    assert_eq!(retained.unwrap().deleted, 700);
+}
+
+/// A rollup dated in the future (a node with a wrong clock, before appends
+/// were bounded) must not freeze the hourly recompute of earlier days.
+#[tokio::test]
+async fn a_future_dated_rollup_does_not_stop_todays_recompute() {
+    let fixture = open();
+    raw(&fixture.path)
+        .execute(
+            "INSERT INTO daily_rollup (check_id, node_id, date, total, up, degraded, down, worst)
+             VALUES ('web', 'node-a', '2099-01-01', 1, 1, 0, 0, 'up')",
+            [],
+        )
+        .unwrap();
+    let now = tocsin_store::now_ms();
+    fixture
+        .store
+        .append(result("web", now, Health::Degraded))
+        .await
+        .unwrap();
+    fixture.store.rollup_recent().await.unwrap();
+    let today = Day::containing(now);
+    let rolled = fixture.store.daily_rollups(today).await.unwrap();
+    assert!(
+        rolled
+            .iter()
+            .any(|r| r.date == today && r.worst == Health::Degraded),
+        "today was not rolled up: {rolled:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_result_far_in_the_future_is_refused() {
+    let fixture = open();
+    let tolerance = i64::try_from(tocsin_store::FUTURE_TOLERANCE.as_millis()).unwrap();
+    let now = tocsin_store::now_ms();
+    let refused = fixture
+        .store
+        .append(result("web", now + tolerance + 60_000, Health::Up))
+        .await;
+    assert!(
+        matches!(refused, Err(tocsin_store::Error::FutureResult { .. })),
+        "{refused:?}"
+    );
+    // Clock skew inside the tolerance is fine.
+    fixture
+        .store
+        .append(result("web", now + 60_000, Health::Up))
+        .await
+        .unwrap();
 }
 
 /// Retention deletes in chunks through the writer: a reader sees the count

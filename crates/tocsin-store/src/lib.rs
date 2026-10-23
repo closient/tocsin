@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 use tocsin_core::Health;
 
 pub use crate::day::Day;
@@ -38,6 +38,10 @@ pub const DB_FILE: &str = "tocsin.db";
 
 /// Read connections in the pool.
 const READERS: usize = 4;
+
+/// How far after this node's clock a check result may start: room for clock
+/// skew between nodes, not for a clock that is simply wrong.
+pub const FUTURE_TOLERANCE: Duration = Duration::from_hours(1);
 
 /// The tables `tocsin db info` counts, in schema order.
 pub const TABLES: [&str; 8] = [
@@ -199,9 +203,19 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// A value breaks a constraint (an empty id, a negative time), or the
+    /// The result starts more than [`FUTURE_TOLERANCE`] after now
+    /// ([`Error::FutureResult`]) or on a day retention has already finalized,
+    /// a value breaks a constraint (an empty id, a negative time), or the
     /// write fails.
     pub async fn append(&self, result: NewCheckResult) -> Result<i64> {
+        let now_ms = now_ms();
+        let tolerance_ms = i64::try_from(FUTURE_TOLERANCE.as_millis()).unwrap_or(i64::MAX);
+        if result.started_at_ms > now_ms.saturating_add(tolerance_ms) {
+            return Err(Error::FutureResult {
+                started_at_ms: result.started_at_ms,
+                now_ms,
+            });
+        }
         self.writer.insert(Insert::CheckResult(result)).await
     }
 
@@ -274,8 +288,9 @@ impl Store {
     async fn recompute(&self, since: Option<Day>) -> Result<RollupReport> {
         let (since, rollups) = self
             .read(move |conn| {
+                let today = Day::containing(now_ms());
                 let Some(asked) =
-                    since.map_or_else(|| rollup::resume_day(conn), |day| Ok(Some(day)))?
+                    since.map_or_else(|| rollup::resume_day(conn, today), |day| Ok(Some(day)))?
                 else {
                     return Ok((None, Vec::new()));
                 };
@@ -290,7 +305,11 @@ impl Store {
         let rows = self
             .writer
             .run(move |conn| {
-                let transaction = conn.transaction()?;
+                // IMMEDIATE: the upsert reads the watermark before writing,
+                // and a DEFERRED read-then-write fails with SQLITE_BUSY,
+                // unretried, if another process (`tocsin db rollup` beside
+                // `serve`) commits in between.
+                let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let rows = rollup::upsert(&transaction, &rollups)?;
                 transaction.commit()?;
                 Ok(rows)
@@ -300,10 +319,12 @@ impl Store {
     }
 
     /// Deletes results older than `policy.days` whole UTC days before
-    /// `now_ms`. The days being dropped are rolled up first, in the same
-    /// transaction that moves the watermark, so the daily bar never loses a
-    /// day. The delete runs in chunks through the writer, so writes queued
-    /// meanwhile go through between chunks and readers never wait.
+    /// `now_ms`. Each day being dropped is counted on a reader, then its
+    /// rollups are written in the write transaction that moves the watermark
+    /// past it, recounting there if a result for it was committed in
+    /// between, so the daily bar never loses a day or a result. The delete
+    /// then runs in chunks through the writer, so writes queued meanwhile go
+    /// through between chunks and readers never wait.
     ///
     /// # Errors
     ///
@@ -313,35 +334,20 @@ impl Store {
         let cutoff = Day::containing(now_ms)
             .plus(-i64::from(policy.days))
             .start_ms();
-        let (watermark, rollups) = self
-            .read(move |conn| {
-                let watermark = rollup::purged_before(conn)?;
-                if cutoff <= 0 || watermark.is_some_and(|ms| ms >= cutoff) {
-                    return Ok((watermark, None));
-                }
-                let from = watermark.unwrap_or(0);
-                Ok((watermark, Some(rollup::aggregate(conn, from, cutoff)?)))
-            })
-            .await?;
         let mut rolled_up = 0;
-        let target = match rollups {
-            Some(rollups) => {
-                rolled_up = self
-                    .writer
-                    .run(move |conn| {
-                        let transaction = conn.transaction()?;
-                        let rows = rollup::upsert(&transaction, &rollups)?;
-                        rollup::raise_purged_before(&transaction, cutoff)?;
-                        transaction.commit()?;
-                        Ok(rows)
-                    })
-                    .await?;
-                Some(cutoff)
-            }
-            // Finish any earlier pass that stopped part-way.
-            None => watermark,
-        };
-        let Some(target) = target else {
+        // A cutoff before 1970 finalizes nothing: the watermark starts at 0.
+        while let Some(plan) = self
+            .read(move |conn| rollup::plan_finalize(conn, cutoff))
+            .await?
+        {
+            rolled_up += self
+                .writer
+                .run(move |conn| rollup::finalize(conn, plan))
+                .await?;
+        }
+        // The watermark, which may be from an earlier pass that stopped
+        // part-way through its delete; this one finishes it.
+        let Some(target) = self.read(rollup::purged_before).await? else {
             return Ok(RetentionReport {
                 purged_before_ms: None,
                 rolled_up,

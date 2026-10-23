@@ -1,0 +1,20 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{#- A short subscription page (web/subscribe.rs `NoticePage`): a heading,
+    a few sentences, perhaps one button that posts. -#}
+{% extends "status/layout.html" %}
+{% block content %}
+<div class="intro">
+<h1>{{ heading }}</h1>
+</div>
+{%- for line in lines %}
+<p>{{ line }}</p>
+{%- endfor %}
+{%- if let Some(action) = action %}
+<form class="actions" method="post" action="{{ action.path }}">
+  <button type="submit">{{ action.label }}</button>
+</form>
+{%- endif %}
+{%- if let Some(onward) = onward %}
+<p class="onward"><a href="{{ onward.href }}">{{ onward.text }}</a></p>
+{%- endif %}
+{% endblock %}

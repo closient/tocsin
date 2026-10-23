@@ -456,6 +456,35 @@ Every email tocsin sends can be answered: neither address may be a `noreply`, `n
 | `reply_to` | string |  |  | The Reply-To address: a mailbox a person reads. |
 | `smtp_url` | [`Secret`](#type-secret) |  |  | The SMTP server, as `smtp://user:password@host:587` or `smtps://...`. Secret. |
 
+<a id="table-subscribers"></a>
+
+### `[subscribers]`
+
+`[subscribers]`: lets people subscribe by email to incidents on the components they choose and to the releases of public projects. Without this table the page shows no form and the subscriber API answers 404.
+
+It needs `[server] public_url`, for the links in each email, and a complete `[server.email]` to send from. Like `[server]`, it is read only at startup.
+
+| Key | Type | Required | Default | Description |
+|-----|------|----------|---------|-------------|
+| `client_ip_header` | string |  |  | A header your proxy sets to the client's IP address, such as `CF-Connecting-IP`. It is believed only when the TCP peer is inside `trusted_proxies`; otherwise the peer's own address is the client's. |
+| `confirm_within` | [`Duration`](#type-duration) |  | `"2d"` | How long a confirmation link works. An address not confirmed in time is forgotten. |
+| `rate_window` | [`Duration`](#type-duration) |  | `"1h"` | The window both sign-up limits count over. |
+| `signups_per_email` | integer |  | `3` | Sign-ups for one email address per `rate_window`, from anywhere. Past it, a sign-up is refused with 429 and `Retry-After`. |
+| `signups_per_ip` | integer |  | `10` | Sign-ups one client IP address may make per `rate_window`. Past it, a sign-up is refused with 429 and `Retry-After`. |
+| `trusted_proxies` | array of [`Cidr`](#type-cidr) |  |  | The networks your proxy connects from. Required with `client_ip_header`. |
+| `turnstile` | [table](#table-turnstile) |  |  | Cloudflare Turnstile on the sign-up form, as `[subscribers.turnstile]`. With it, signing up needs JavaScript. |
+
+<a id="table-turnstile"></a>
+
+#### `[subscribers.turnstile]`
+
+`[subscribers.turnstile]`: a Cloudflare Turnstile widget every sign-up must pass.
+
+| Key | Type | Required | Default | Description |
+|-----|------|----------|---------|-------------|
+| `secret_key` | [`Secret`](#type-secret) | yes |  | The widget's secret key, which tocsin sends to Cloudflare to check each answer. Secret. |
+| `site_key` | string | yes |  | The widget's site key, which the page shows. |
+
 <a id="table-token"></a>
 
 ### `[[token]]`
@@ -631,4 +660,5 @@ What a token may do.
 | `"incident"` | Incidents and maintenance. |
 | `"release"` | Releases and deploys. |
 | `"status:read"` | Reading what is not public in the read API: checks and heartbeats on no component, non-public projects' releases and deploys, check targets, raw check results, and how the configuration last reloaded. The internal board behind proxy auth reads the same. |
+| `"subscribers:admin"` | Listing, counting and removing email subscribers. |
 

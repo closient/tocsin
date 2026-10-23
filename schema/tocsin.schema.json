@@ -1584,6 +1584,70 @@
       ],
       "type": "object"
     },
+    "Subscribers": {
+      "additionalProperties": false,
+      "description": "`[subscribers]`: lets people subscribe by email to incidents on the\ncomponents they choose and to the releases of public projects. Without\nthis table the page shows no form and the subscriber API answers 404.\n\nIt needs `[server] public_url`, for the links in each email, and a\ncomplete `[server.email]` to send from. Like `[server]`, it is read only\nat startup.",
+      "properties": {
+        "client_ip_header": {
+          "description": "A header your proxy sets to the client's IP address, such as\n`CF-Connecting-IP`. It is believed only when the TCP peer is inside\n`trusted_proxies`; otherwise the peer's own address is the client's.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "confirm_within": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Duration"
+            }
+          ],
+          "default": "2d",
+          "description": "How long a confirmation link works. An address not confirmed in\ntime is forgotten."
+        },
+        "rate_window": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Duration"
+            }
+          ],
+          "default": "1h",
+          "description": "The window both sign-up limits count over."
+        },
+        "signups_per_email": {
+          "default": 3,
+          "description": "Sign-ups for one email address per `rate_window`, from anywhere.\nPast it, a sign-up is refused with 429 and `Retry-After`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "signups_per_ip": {
+          "default": 10,
+          "description": "Sign-ups one client IP address may make per `rate_window`. Past\nit, a sign-up is refused with 429 and `Retry-After`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trusted_proxies": {
+          "description": "The networks your proxy connects from. Required with\n`client_ip_header`.",
+          "items": {
+            "$ref": "#/definitions/Cidr"
+          },
+          "type": "array"
+        },
+        "turnstile": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Turnstile"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Cloudflare Turnstile on the sign-up form, as `[subscribers.turnstile]`.\nWith it, signing up needs JavaScript."
+        }
+      },
+      "type": "object"
+    },
     "TcpSettings": {
       "additionalProperties": false,
       "description": "`[check.tcp]`.",
@@ -1731,8 +1795,36 @@
           "const": "status:read",
           "description": "Reading what is not public in the read API: checks and heartbeats\non no component, non-public projects' releases and deploys, check\ntargets, raw check results, and how the configuration last\nreloaded. The internal board behind proxy auth reads the same.",
           "type": "string"
+        },
+        {
+          "const": "subscribers:admin",
+          "description": "Listing, counting and removing email subscribers.",
+          "type": "string"
         }
       ]
+    },
+    "Turnstile": {
+      "additionalProperties": false,
+      "description": "`[subscribers.turnstile]`: a Cloudflare Turnstile widget every sign-up\nmust pass.",
+      "properties": {
+        "secret_key": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            }
+          ],
+          "description": "The widget's secret key, which tocsin sends to Cloudflare to check\neach answer. Secret."
+        },
+        "site_key": {
+          "description": "The widget's site key, which the page shows.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "site_key",
+        "secret_key"
+      ],
+      "type": "object"
     },
     "WebhookSettings": {
       "additionalProperties": false,
@@ -1841,6 +1933,17 @@
         }
       ],
       "description": "Server settings. At most one file may hold `[server]`."
+    },
+    "subscribers": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Subscribers"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Email subscriptions on the public page. At most one file may hold\n`[subscribers]`; without it, there are none."
     },
     "token": {
       "description": "Bearer tokens for the write API.",

@@ -17,7 +17,8 @@
 //! `[server]` is read only at startup: it names the socket, the database
 //! and the node the history belongs to, none of which can move under a
 //! running server. A reload keeps the running `[server]` and warns when the
-//! files say something else.
+//! files say something else. `[subscribers]` is the same: its rate limits
+//! and mailer start with the server.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
@@ -243,6 +244,13 @@ impl Running {
             );
         }
         config.server = running.server.clone();
+        if config.subscribers != running.subscribers {
+            tracing::warn!(
+                "`[subscribers]` changed; it is read only at startup, so the running one is kept \
+                 until tocsin restarts"
+            );
+        }
+        config.subscribers.clone_from(&running.subscribers);
 
         let unfinished = match self.monitor.reload(&config).await {
             Ok(()) => None,
@@ -598,6 +606,7 @@ scopes = ["release"]
                 heartbeats: monitor.heartbeats(),
                 config_status: status.clone(),
                 metrics: Arc::clone(&metrics),
+                subscribers: None,
             };
             let app = LiveRouter::new(http::router(state.clone()));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

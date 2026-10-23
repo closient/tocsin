@@ -101,6 +101,7 @@ fn api() -> Api {
         heartbeats: HeartbeatHandle::default(),
         config_status: crate::reload::steady_status(),
         metrics: Arc::new(crate::metrics::Metrics::new()),
+        subscribers: None,
     };
     Api {
         _dir: dir,

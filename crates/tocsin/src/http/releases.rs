@@ -225,8 +225,9 @@ pub async fn stamp_deploy(
     Ok((status(written), Json(release)))
 }
 
-/// Publishes `new` as `actor`: checks, stores, logs and emits
-/// [`Event::ReleasePublished`].
+/// Publishes `new` as `actor`: checks, stores, logs, emits
+/// [`Event::ReleasePublished`] and, for a public project, announces it to
+/// subscribers.
 ///
 /// # Errors
 ///
@@ -261,6 +262,9 @@ pub async fn publish(
         public: state.project_is_public(&release.project),
         release: Arc::clone(&release),
     });
+    if let Some(subscribers) = &state.subscribers {
+        subscribers.release_published(state, &release).await;
+    }
     Ok((release, written))
 }
 

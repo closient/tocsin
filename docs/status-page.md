@@ -14,6 +14,8 @@ same incidents, and releases of public projects only. Its look is set by
 | `/history` | Every incident and maintenance window, newest first, 25 to a page, with a link to older ones. |
 | `/components/<id>` | One component: its status, its uptime bar, what is open against it, and its outages, incidents and deploys of the last 30 days. |
 | `/feeds/…` | Atom feeds of incidents and releases: see [Feeds](#feeds). |
+| `/subscribe` | With [`[subscribers]`](subscribers.md) on: the sign-up form with every choice. `/` shows a short one at the bottom, with links to the feeds. |
+| `/subscribe/manage/<token>` | A subscriber's address and choices, to change or leave. Linked from every email. |
 
 Checks and heartbeats on no component appear on none of these pages. The
 [internal board](admin.md#the-internal-board) at `/internal/` shows every

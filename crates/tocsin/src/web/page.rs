@@ -172,11 +172,17 @@ pub const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'
      frame-ancestors 'none'; base-uri 'none'";
 
 /// Adds the security headers every HTML response gets, and `no-store`
-/// unless the response set its own caching.
+/// unless the response set its own caching. A response that set its own
+/// CSP keeps it: only `/subscribe` does, to let Turnstile in.
 pub async fn security_headers(mut response: Response) -> Response {
     let headers = response.headers_mut();
+    if !headers.contains_key(header::CONTENT_SECURITY_POLICY) {
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+        );
+    }
     for (name, value) in [
-        (header::CONTENT_SECURITY_POLICY, CONTENT_SECURITY_POLICY),
         (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
         (header::REFERRER_POLICY, "same-origin"),
         (header::X_FRAME_OPTIONS, "DENY"),

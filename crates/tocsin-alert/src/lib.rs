@@ -11,6 +11,7 @@
 
 pub mod alert;
 pub mod history;
+pub mod mail;
 pub mod metrics;
 pub mod notifier;
 pub mod notifiers;
@@ -19,6 +20,7 @@ pub mod worker;
 
 pub use alert::{Alert, AlertEvent};
 pub use history::AlertingHistory;
+pub use mail::{Mailer, Outgoing};
 pub use metrics::AlertMetrics;
 pub use notifier::{HTTP_TIMEOUT, Notifier, Redactor, SendError};
 pub use notifiers::{Notifiers, build, build_all};

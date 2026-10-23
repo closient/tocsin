@@ -17,7 +17,7 @@ use utoipa::ToSchema;
 pub struct ErrorBody {
     /// Stable machine-readable code: `unauthorized`, `forbidden`,
     /// `not_found`, `method_not_allowed`, `bad_request`, `too_large`, `invalid`,
-    /// `unavailable` or `internal`.
+    /// `too_many_requests`, `unavailable` or `internal`.
     pub error: &'static str,
     /// What went wrong, for a person.
     pub message: String,
@@ -31,6 +31,8 @@ pub struct ErrorBody {
 pub struct ApiError {
     status: StatusCode,
     body: ErrorBody,
+    /// Sent as `Retry-After`, in whole seconds.
+    retry_after: Option<std::time::Duration>,
 }
 
 impl ApiError {
@@ -42,6 +44,7 @@ impl ApiError {
                 message: message.into(),
                 fields: Vec::new(),
             },
+            retry_after: None,
         }
     }
 
@@ -89,6 +92,20 @@ impl ApiError {
         let mut error = Self::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid", message);
         error.body.fields = fields;
         error
+    }
+
+    /// 429: too many requests from this client or for this subject; try
+    /// again after `retry_after`, which is sent as `Retry-After`.
+    pub fn too_many_requests(message: impl Into<String>, retry_after: std::time::Duration) -> Self {
+        ApiError {
+            retry_after: Some(retry_after),
+            ..Self::new(StatusCode::TOO_MANY_REQUESTS, "too_many_requests", message)
+        }
+    }
+
+    /// When the client may try again, for a 429.
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        self.retry_after
     }
 
     /// 503: the server cannot take the request now, such as while it shuts
@@ -140,8 +157,19 @@ impl IntoResponse for ApiError {
                 .headers_mut()
                 .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
         }
+        if let Some(wait) = self.retry_after {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, retry_after_value(wait));
+        }
         response
     }
+}
+
+/// A `Retry-After` value: whole seconds, rounded up, at least one.
+pub fn retry_after_value(wait: std::time::Duration) -> HeaderValue {
+    let seconds = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
+    HeaderValue::from(seconds.max(1))
 }
 
 /// A JSON request body. Unlike `axum::Json`, a body that parses as JSON

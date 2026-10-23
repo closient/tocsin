@@ -49,6 +49,7 @@ use super::feeds;
 use super::markdown;
 use super::page::{HtmlError, Layout};
 use super::releases::{Stamp, href as release_href, project_name, versions};
+use super::subscribe;
 use super::timeline::{Row, Rows, row};
 use super::uptime::{self, Bar, Tallies};
 use crate::http::auth::Viewer;
@@ -101,8 +102,8 @@ pub(super) struct Chrome {
     /// The page's JSON-LD, escaped for a `<script>` element; empty for
     /// none.
     pub(super) json_ld: String,
-    /// The scripts the page loads, in order; only `/` and the internal
-    /// board load any.
+    /// The scripts the page loads, in order: htmx on `/` and the internal
+    /// board, and Turnstile on `/subscribe` when it is on.
     pub(super) scripts: Vec<&'static str>,
 }
 
@@ -154,6 +155,12 @@ impl Chrome {
             assets::url("htmx.min.js"),
             assets::url("htmx-ext-sse.min.js"),
         ];
+        self
+    }
+
+    /// The same, also loading `script`.
+    pub(super) fn with_script(mut self, script: &'static str) -> Self {
+        self.scripts.push(script);
         self
     }
 }
@@ -298,6 +305,8 @@ struct IndexPage {
     active: Vec<Card>,
     resolved: Vec<Card>,
     releases: Option<Vec<ReleaseRow>>,
+    /// The sign-up form, when `[subscribers]` is on.
+    subscribe: Option<subscribe::SignupForm>,
 }
 
 #[derive(Template)]
@@ -637,7 +646,7 @@ async fn recent_releases(
 }
 
 /// The `WebPage` node for `path`.
-fn web_page(config: &Config, name: &str, path: &str) -> Value {
+pub(super) fn web_page(config: &Config, name: &str, path: &str) -> Value {
     let mut page = json!({
         "@type": "WebPage",
         "name": name,
@@ -709,6 +718,10 @@ async fn index(State(state): State<AppState>, request: HeaderMap) -> Result<Resp
             .collect(),
         resolved: recently_resolved(&state, &zone).await?,
         releases: recent_releases(&state, &zone).await?,
+        subscribe: state
+            .subscribers
+            .as_deref()
+            .map(|subscriptions| subscribe::SignupForm::compact(&state, subscriptions)),
     };
     Ok(respond(&request, PAGE_CACHE, &page))
 }

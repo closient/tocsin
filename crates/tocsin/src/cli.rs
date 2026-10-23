@@ -224,6 +224,10 @@ pub enum IncidentCommand {
         /// The update, in markdown.
         #[arg(long)]
         message: String,
+
+        /// Post it without emailing subscribers.
+        #[arg(long)]
+        quiet: bool,
     },
     /// Change the title, impact, components or schedule.
     Edit {

@@ -1,0 +1,45 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{#- /subscribe/manage/<token>: what a subscriber hears about, and
+    unsubscribing (web/subscribe.rs `ManagePage`). -#}
+{% extends "status/layout.html" %}
+{% block content %}
+<div class="intro">
+<h1>Your subscription</h1>
+<p class="lede">Email from {{ chrome.site }} to {{ email }}.</p>
+</div>
+{%- if let Some(done) = done %}
+<div class="notice done" role="status"><p>{{ done }}</p></div>
+{%- endif %}
+{%- if !errors.is_empty() %}
+<div class="notice error" role="alert">
+  <p>Not saved:</p>
+  <ul>
+    {%- for error in errors %}
+    <li class="field-error">{{ error }}</li>
+    {%- endfor %}
+  </ul>
+</div>
+{%- endif %}
+<form class="stack subscribe" method="post" action="{{ path }}">
+  <fieldset>
+    <legend>Incidents and maintenance</legend>
+    {%- for choice in components %}
+    <label for="subscribe-components-{{ loop.index }}"><input type="checkbox" id="subscribe-components-{{ loop.index }}" name="components" value="{{ choice.value }}"{% if choice.checked %} checked{% endif %}> {{ choice.label }}</label>
+    {%- endfor %}
+  </fieldset>
+  {%- if !projects.is_empty() %}
+  <fieldset>
+    <legend>Releases</legend>
+    {%- for choice in projects %}
+    <label for="subscribe-projects-{{ loop.index }}"><input type="checkbox" id="subscribe-projects-{{ loop.index }}" name="projects" value="{{ choice.value }}"{% if choice.checked %} checked{% endif %}> {{ choice.label }}</label>
+    {%- endfor %}
+  </fieldset>
+  {%- endif %}
+  <div class="actions"><button type="submit">Save</button></div>
+</form>
+<h2 id="unsubscribe-heading">Unsubscribe</h2>
+<p>Stop all email from {{ chrome.site }} to this address. You can sign up again at any time.</p>
+<form class="actions" method="post" action="{{ unsubscribe }}" aria-labelledby="unsubscribe-heading">
+  <button type="submit" class="secondary">Unsubscribe</button>
+</form>
+{% endblock %}

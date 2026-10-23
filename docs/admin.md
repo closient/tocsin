@@ -136,6 +136,15 @@ listener an IPv4 proxy connects as `::ffff:10.0.0.5`; it matches either
 networks that hold the proxy: anything else that can connect from inside
 them can name any person.
 
+## Subscribers
+
+With [`[subscribers]`](subscribers.md) on, `/admin/subscribers`, linked
+from `/admin/`, lists every address, 50 to a page in the order they signed
+up, with whether it has confirmed and what it chose, the confirmed and
+unconfirmed totals, and a button that removes one. Removing deletes the
+address, its choices and any email still queued for it. The button is a
+form like the others here, under the same origin and token checks.
+
 ## What it protects against
 
 | Threat | Defence |

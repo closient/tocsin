@@ -24,6 +24,7 @@ mod release;
 mod rollup;
 mod schema;
 mod stats;
+mod subscriber;
 #[cfg(test)]
 mod tests;
 mod writer;
@@ -52,6 +53,10 @@ use crate::readers::Readers;
 pub use crate::release::{ComponentScope, Order, Projects, ReleaseQuery, TimelineQuery, Written};
 pub use crate::rollup::DailyRollup;
 pub use crate::stats::{CheckpointEvent, CheckpointStats};
+pub use crate::subscriber::{
+    ClaimedMail, EVERY, MailOutcome, Mailbag, NewAnnouncement, NewSignup, Preferences, Scope,
+    Signup, Subscriber, SubscriberCounts, SubscriberPrune,
+};
 use crate::writer::{Insert, Writer};
 
 /// The database file's name inside the data folder.
@@ -65,7 +70,7 @@ const READERS: usize = 4;
 pub const FUTURE_TOLERANCE: Duration = Duration::from_hours(1);
 
 /// The tables `tocsin db info` counts, in schema order.
-pub const TABLES: [&str; 11] = [
+pub const TABLES: [&str; 16] = [
     "check_result",
     "outage",
     "daily_rollup",
@@ -77,6 +82,11 @@ pub const TABLES: [&str; 11] = [
     "retention",
     "alert",
     "alert_delivery",
+    "subscriber",
+    "subscription",
+    "subscriber_event",
+    "subscriber_event_target",
+    "subscriber_delivery",
 ];
 
 /// One probe run, as handed to [`Store::append`].
@@ -906,6 +916,193 @@ impl Store {
     pub async fn open_outages(&self, node_id: &str) -> Result<Vec<Outage>> {
         let node_id = node_id.to_owned();
         self.read(move |conn| outage::open(conn, &node_id)).await
+    }
+
+    /// Signs `signup.email` up, or refreshes the confirmation of an address
+    /// that signed up but never confirmed. An address already confirmed is
+    /// left as it is.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn sign_up(&self, signup: NewSignup) -> Result<Signup> {
+        self.writer
+            .run(move |conn| subscriber::sign_up(conn, &signup))
+            .await
+    }
+
+    /// The unconfirmed subscriber whose confirmation token hashes to
+    /// `hash`, if the token has not expired.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn subscriber_to_confirm(
+        &self,
+        hash: String,
+        now_ms: i64,
+    ) -> Result<Option<Subscriber>> {
+        self.read(move |conn| subscriber::by_confirmation(conn, &hash, now_ms))
+            .await
+    }
+
+    /// Confirms the subscriber whose unexpired confirmation token hashes to
+    /// `hash`. Resolves with them, or `None` if no token matches.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn confirm_subscriber(
+        &self,
+        hash: String,
+        now_ms: i64,
+    ) -> Result<Option<Subscriber>> {
+        self.writer
+            .run(move |conn| subscriber::confirm(conn, &hash, now_ms))
+            .await
+    }
+
+    /// The subscriber with this id.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn subscriber(&self, id: i64) -> Result<Option<Subscriber>> {
+        self.read(move |conn| subscriber::by_id(conn, id)).await
+    }
+
+    /// Replaces what a subscriber hears about. Resolves with whether they
+    /// exist.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn set_subscriber_preferences(
+        &self,
+        id: i64,
+        preferences: Preferences,
+    ) -> Result<bool> {
+        self.writer
+            .run(move |conn| subscriber::set_preferences(conn, id, &preferences))
+            .await
+    }
+
+    /// Deletes a subscriber, with their subscriptions and every delivery
+    /// still queued for them. Resolves with whether they existed.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn remove_subscriber(&self, id: i64) -> Result<bool> {
+        self.writer
+            .run(move |conn| subscriber::remove(conn, id))
+            .await
+    }
+
+    /// Up to `limit` subscribers with ids after `after`, in id order.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn subscribers(&self, after: Option<i64>, limit: u32) -> Result<Vec<Subscriber>> {
+        self.read(move |conn| subscriber::list(conn, after, limit))
+            .await
+    }
+
+    /// How many subscribers are confirmed and how many wait.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn subscriber_counts(&self) -> Result<SubscriberCounts> {
+        self.read(subscriber::counts).await
+    }
+
+    /// Queues an announcement for subscribers, unless one with the same key
+    /// already was. Resolves with whether it was queued.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn queue_announcement(&self, announcement: NewAnnouncement) -> Result<bool> {
+        self.writer
+            .run(move |conn| subscriber::queue_announcement(conn, &announcement))
+            .await
+    }
+
+    /// Queues a delivery of each new announcement to every confirmed
+    /// subscriber it matches. Resolves with how many it queued.
+    ///
+    /// # Errors
+    ///
+    /// The write fails. An announcement whose transaction committed stays
+    /// expanded.
+    pub async fn expand_announcements(&self, now_ms: i64) -> Result<usize> {
+        self.writer
+            .run(move |conn| subscriber::expand(conn, now_ms))
+            .await
+    }
+
+    /// Up to `limit` deliveries due at `now_ms`, and when the next is.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn mailbag(&self, now_ms: i64, limit: u32) -> Result<Mailbag> {
+        self.read(move |conn| subscriber::mailbag(conn, now_ms, limit))
+            .await
+    }
+
+    /// Marks a due delivery `sending`, committed before it returns, and
+    /// resolves with what to send. `None` when it is no longer pending or
+    /// its subscriber is gone or unconfirmed.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn claim_mail(&self, id: i64) -> Result<Option<ClaimedMail>> {
+        self.writer
+            .run(move |conn| subscriber::claim(conn, id))
+            .await
+    }
+
+    /// Records how sending a claimed delivery ended.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn finish_mail(&self, id: i64, outcome: MailOutcome, now_ms: i64) -> Result<()> {
+        self.writer
+            .run(move |conn| subscriber::finish(conn, id, &outcome, now_ms))
+            .await
+    }
+
+    /// Fails every delivery a stopped process left `sending`, so none is
+    /// sent twice. Resolves with how many.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn interrupt_mail(&self, now_ms: i64) -> Result<usize> {
+        self.writer
+            .run(move |conn| subscriber::interrupt(conn, now_ms))
+            .await
+    }
+
+    /// Forgets unconfirmed subscribers whose link expired, and finished
+    /// deliveries from before `finished_before_ms`.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn prune_subscribers(
+        &self,
+        now_ms: i64,
+        finished_before_ms: i64,
+    ) -> Result<SubscriberPrune> {
+        self.writer
+            .run(move |conn| subscriber::prune(conn, now_ms, finished_before_ms))
+            .await
     }
 
     /// Runs `query` on a pooled read connection. Read connections refuse

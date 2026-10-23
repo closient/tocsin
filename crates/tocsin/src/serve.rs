@@ -37,6 +37,8 @@ use crate::lock;
 use crate::metrics::{Metered, Metrics};
 use crate::output::{Failure, Report};
 use crate::reload::{ConfigStatus, LiveRouter, Reloader, Reloading};
+use crate::subscribers::Subscriptions;
+use crate::subscribers::worker::Postman;
 use crate::web::identity::AdminAuth;
 
 pub fn run(config: &Path, data: Option<&Path>) -> Result<Report, Failure> {
@@ -106,6 +108,18 @@ fn open_store(data: &Path) -> Result<Arc<Store>, Failure> {
     Ok(Arc::new(store))
 }
 
+/// The subscriber feature, if `[subscribers]` turns it on.
+fn subscriptions(config: &Config) -> Result<Option<Arc<Subscriptions>>, Failure> {
+    Subscriptions::from_config(config)
+        .map(|subscriptions| subscriptions.map(Arc::new))
+        .map_err(|error| {
+            Failure::new(
+                Exit::Runtime,
+                format!("cannot start email subscriptions: {error}"),
+            )
+        })
+}
+
 /// Serves and runs the checks until a shutdown signal, then stops the
 /// checks, drains requests and closes the store.
 /// Resolves with the signal's name, or fails if the server ends first.
@@ -128,6 +142,7 @@ async fn serve(
             )
         })?
         .map(Arc::new);
+    let subscriptions = subscriptions(config)?;
     let store = open_store(data)?;
     let listen = config.server.listen;
     let listener = TcpListener::bind(listen).await.map_err(|error| {
@@ -138,7 +153,7 @@ async fn serve(
     })?;
     let events = EventBus::new();
     let metrics = Arc::new(Metrics::new());
-    let (monitor, maintenance) = match start_checks(
+    let (mut monitor, maintenance) = match start_checks(
         config,
         &store,
         &events,
@@ -153,6 +168,12 @@ async fn serve(
             return Err(failure);
         }
     };
+    if let Some(subscriptions) = &subscriptions {
+        monitor.attach_postman(Postman::start(
+            Arc::clone(&store),
+            Arc::clone(subscriptions),
+        ));
+    }
     let (status, config_status) = watch::channel(ConfigStatus::loaded(http::now()));
     let state = AppState {
         store: Arc::clone(&store),
@@ -163,6 +184,7 @@ async fn serve(
         heartbeats: monitor.heartbeats(),
         config_status,
         metrics: Arc::clone(&metrics),
+        subscribers: subscriptions,
     };
     let app = LiveRouter::new(http::router(state.clone()));
     let service = app.service();
@@ -221,6 +243,8 @@ pub(crate) struct Monitor {
     router: Arc<Router>,
     client: reqwest::Client,
     store: Arc<Store>,
+    /// Sends subscriber mail, when `[subscribers]` is on.
+    postman: Option<Postman>,
 }
 
 /// Why [`Monitor::reload`] failed.
@@ -336,6 +360,7 @@ impl Monitor {
             router,
             client,
             store: Arc::clone(store),
+            postman: None,
         })
     }
 
@@ -414,6 +439,15 @@ impl Monitor {
         let _ = self.wake.await;
         self.engine.shutdown().await;
         self.alerter.stop().await;
+        if let Some(postman) = self.postman {
+            postman.stop().await;
+        }
+    }
+
+    /// Stops `postman` with the checks. Subscriber mail is not part of a
+    /// reload: `[subscribers]` is read only at startup.
+    pub(crate) fn attach_postman(&mut self, postman: Postman) {
+        self.postman = Some(postman);
     }
 }
 
@@ -966,6 +1000,7 @@ mod tests {
             heartbeats: tocsin_engine::HeartbeatHandle::default(),
             config_status: crate::reload::steady_status(),
             metrics: Arc::new(crate::metrics::Metrics::new()),
+            subscribers: None,
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1250,6 +1285,7 @@ mod tests {
             heartbeats: monitor.heartbeats(),
             config_status: crate::reload::steady_status(),
             metrics,
+            subscribers: None,
         });
 
         let body = json!({

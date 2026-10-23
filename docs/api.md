@@ -3,7 +3,8 @@
 What a running `tocsin serve` says about itself: the status now, each
 component and check, raw check results, outages, incidents, releases and
 the timeline. Writes are documented with their models in
-[incidents.md](incidents.md#http-api) and [releases.md](releases.md#http-api).
+[incidents.md](incidents.md#http-api) and [releases.md](releases.md#http-api),
+and the subscriber routes in [subscribers.md](subscribers.md).
 
 The OpenAPI 3.1 document is served at `GET /api/v1/openapi.json` and
 committed as [`schema/openapi.json`](../schema/openapi.json); it is the
@@ -90,6 +91,9 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
 | `GET /api/v1/openapi.json` | none | 200, the OpenAPI document |
 | `GET /llms.txt` | none | 200, `text/plain` |
 | `GET /metrics` | `status:read` | 200, Prometheus text format 0.0.4; not in the OpenAPI document, see [metrics.md](metrics.md) |
+| `POST /api/v1/subscribers` | none | 202, the same for every address; 429 past a limit. Only with `[subscribers]`; see [subscribers.md](subscribers.md#signing-up) |
+| `GET /api/v1/subscribers?after=&limit=` | `subscribers:admin` | 200, `{subscribers, next_after, totals}`; see [subscribers.md](subscribers.md#for-operators) |
+| `DELETE /api/v1/subscribers/{id}` | `subscribers:admin` | 204 |
 
 ### Status now
 

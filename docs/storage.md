@@ -411,6 +411,40 @@ alert's oldest pending delivery, which is what keeps a resolve behind its
 fire. Delivered rows are pruned after a week and failed ones after 90 days;
 an `alert` whose deliveries are all gone and which has ended goes with them.
 
+### `subscriber`, `subscription`, `subscriber_event` and `subscriber_delivery`
+
+Email subscribers to the public page, added by 0009 (see
+[subscribers.md](subscribers.md)).
+
+A `subscriber` is one address, lowercased and unique, with `created_at`,
+`confirmed_at` (null until confirmed) and `manage_secret`, the random half
+of its manage and unsubscribe links. Until it is confirmed it has a
+`confirm_hash`, the SHA-256 of its confirmation token, so the database
+never holds a working link, and `confirm_expires_at`. `CHECK`s keep the
+two null together, and null exactly when the address is confirmed.
+Unconfirmed rows past their expiry are deleted each hour.
+
+A `subscription` is one `(subscriber_id, kind, target)`: `kind` is
+`component` or `project`, and `target` an id or `*`.
+
+A `subscriber_event` is one announcement: its unique `key`
+(`incident:7`, `incident:7:update:12`, `release:api:1.4.0`), the `scope`
+it matches (`component` or `project`), its rendered `subject` and `body`,
+`created_at`, and `expanded_at`, set when its deliveries are queued.
+`subscriber_event_target` lists the components or project it is about.
+It is written in the same transaction as the incident, update or release
+it announces, and kept after its deliveries are pruned, so its key is
+never queued twice.
+
+A `subscriber_delivery` is one `(subscriber_id, event_id)`, unique: the
+delivery log. `status` is `pending`, `sending`, `sent` or `failed`, with
+`attempts`, `next_attempt_at`, `last_error` and `finished_at` (null exactly
+while `pending` or `sending`). A delivery is set to `sending` in its own
+committed transaction before the SMTP server sees it, and one found
+`sending` at startup is failed, never resent. Finished rows are deleted
+after 30 days. Deleting a subscriber deletes its subscriptions and every
+delivery still queued for it.
+
 ## Rollups
 
 Rollups are recomputed from raw results, never incremented, so recomputing

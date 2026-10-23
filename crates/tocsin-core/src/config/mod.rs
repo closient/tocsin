@@ -13,6 +13,7 @@ mod colour;
 mod diagnostic;
 mod load;
 mod notifier;
+mod subscribers;
 mod values;
 
 use std::net::SocketAddr;
@@ -36,6 +37,7 @@ pub use notifier::{
     AlertmanagerSettings, DiscordSettings, EmailSettings, Notifier, NotifierSettings, NotifierType,
     NtfySettings, PushoverSettings, SlackSettings, TelegramSettings, WebhookSettings,
 };
+pub use subscribers::{Subscribers, Turnstile};
 pub use values::{
     Cidr, DURATION_PATTERN, Duration, ID_PATTERN, Id, SECRET_PATTERN, Secret, Text, email_address,
     is_unanswerable,
@@ -80,6 +82,10 @@ pub struct ConfigFile {
     /// The public status page. At most one file may hold `[page]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<Page>,
+    /// Email subscriptions on the public page. At most one file may hold
+    /// `[subscribers]`; without it, there are none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscribers: Option<Subscribers>,
 }
 
 /// The merged, validated configuration of a whole folder.
@@ -116,6 +122,8 @@ pub struct Config {
     pub tokens: Vec<Token>,
     /// `[page]`, with defaults filled in.
     pub page: Page,
+    /// `[subscribers]`, if email subscriptions are on.
+    pub subscribers: Option<Subscribers>,
 }
 
 /// `[server]`.
@@ -542,6 +550,9 @@ pub enum TokenScope {
     /// reloaded. The internal board behind proxy auth reads the same.
     #[serde(rename = "status:read")]
     StatusRead,
+    /// Listing, counting and removing email subscribers.
+    #[serde(rename = "subscribers:admin")]
+    SubscribersAdmin,
 }
 
 /// The JSON Schema for one configuration file ([`ConfigFile`]), in draft 7

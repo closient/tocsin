@@ -25,6 +25,8 @@
 - [Incidents and maintenance](incidents.md).
 - [Releases and the timeline](releases.md), and
   [recording them from CI](release-ci.md).
+- [Email subscribers](subscribers.md): sign-up with double opt-in, what
+  is sent, one-click unsubscribe, and managing subscribers.
 - [The admin page](admin.md): signing in through a proxy, and its threat
   model.
 - [HTTP API](api.md), described by the OpenAPI document

@@ -196,7 +196,7 @@ async fn maintenance_records_changes_but_suppresses_alerts() {
     let notices = FakeNotices::new(vec![Notice::Maintenance {
         components: vec!["api".into()],
         starts_at_ms: at(window_start),
-        ends_at_ms: Some(at(window_end)),
+        ends_at_ms: at(window_end),
     }]);
     let events = common::Events::new();
     let toml = component("api", "worst") + &check("api", Some("api"), 60, 1);

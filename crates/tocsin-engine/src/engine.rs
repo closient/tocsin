@@ -123,6 +123,18 @@ pub struct ComponentSnapshot {
     pub status: ComponentStatus,
 }
 
+/// Tells a running engine incidents or maintenance windows changed; see
+/// [`Engine::notices_handle`]. Calls after the engine stopped do nothing.
+#[derive(Debug, Clone)]
+pub struct NoticesHandle(Arc<Notify>);
+
+impl NoticesHandle {
+    /// Asks the engine to re-read incidents and maintenance windows now.
+    pub fn notices_changed(&self) {
+        self.0.notify_one();
+    }
+}
+
 /// A running engine. Call [`Engine::shutdown`] to stop it and wait for its
 /// tasks; dropping it also stops them, without waiting.
 #[derive(Debug)]
@@ -220,7 +232,7 @@ impl Engine {
             node_id: plan.node_id,
             limit: Semaphore::new(plan.max_concurrent),
             state: Mutex::new(state),
-            notices_changed: Notify::new(),
+            notices_changed: Arc::new(Notify::new()),
             parts,
         });
         let (stop, stopped) = watch::channel(false);
@@ -254,6 +266,14 @@ impl Engine {
         self.shared.notices_changed.notify_one();
     }
 
+    /// A handle that does what [`Engine::notices_changed`] does, for a task
+    /// that outlives its borrow of the engine (a bus subscriber). It holds
+    /// nothing else of the engine's, so it never keeps the store open.
+    #[must_use]
+    pub fn notices_handle(&self) -> NoticesHandle {
+        NoticesHandle(Arc::clone(&self.shared.notices_changed))
+    }
+
     /// Stops every task and waits for them. A check whose probe is in
     /// flight abandons it; one already recording its result finishes
     /// recording first.
@@ -273,7 +293,7 @@ struct Shared {
     node_id: String,
     limit: Semaphore,
     state: Mutex<State>,
-    notices_changed: Notify,
+    notices_changed: Arc<Notify>,
     parts: Parts,
 }
 

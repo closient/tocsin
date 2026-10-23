@@ -84,13 +84,12 @@ pub trait Notices: Send + Sync + 'static {
     fn current(&self) -> BoxFuture<'_, Result<Vec<Notice>>>;
 }
 
-/// A [`Notices`] with nothing in it, for a node with no incident store.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct NoNotices;
-
-impl Notices for NoNotices {
+impl Notices for Store {
     fn current(&self) -> BoxFuture<'_, Result<Vec<Notice>>> {
-        Box::pin(async { Ok(Vec::new()) })
+        Box::pin(async {
+            let incidents = self.open_incidents().await?;
+            Ok(incidents.iter().filter_map(Notice::from_incident).collect())
+        })
     }
 }
 
@@ -100,14 +99,6 @@ pub trait Sink: Send + Sync + 'static {
     /// events arrive in the order the engine made the changes; it must not
     /// block.
     fn emit(&self, event: EngineEvent);
-}
-
-impl Sink for tokio::sync::broadcast::Sender<EngineEvent> {
-    fn emit(&self, event: EngineEvent) {
-        // An error only means nobody is subscribed right now; the change is
-        // already recorded in the store and the engine's state.
-        let _ = self.send(event);
-    }
 }
 
 /// Wall-clock time for result timestamps and maintenance windows.

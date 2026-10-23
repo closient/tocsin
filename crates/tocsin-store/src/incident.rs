@@ -192,6 +192,20 @@ pub(crate) fn list(conn: &Connection, before: Option<i64>, limit: u32) -> Result
     })
 }
 
+/// Every incident not yet resolved and every maintenance not yet
+/// completed, oldest first.
+pub(crate) fn open(conn: &Connection) -> Result<Vec<Incident>> {
+    snapshot(conn, |conn| {
+        let incidents = conn
+            .prepare_cached(&format!(
+                "SELECT {INCIDENT_COLUMNS} FROM incident WHERE resolved_at IS NULL ORDER BY id"
+            ))?
+            .query_map([], incident_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        complete(conn, incidents)
+    })
+}
+
 /// Runs `read` against one snapshot of the database, so an incident's row,
 /// components and updates all come from the same moment even while the
 /// writer commits. A write already runs inside its own transaction, which

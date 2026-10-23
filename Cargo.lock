@@ -2263,6 +2263,7 @@ dependencies = [
  "subtle",
  "tempfile",
  "tocsin-core",
+ "tocsin-engine",
  "tocsin-probe",
  "tocsin-store",
  "tokio",

@@ -645,3 +645,41 @@ fn serve_applies_retention_at_startup() {
     assert_eq!(info["rows"]["daily_rollup"], 2);
     assert_ne!(info["purged_before"], Value::Null);
 }
+
+/// Serve runs the configured checks: results are stored, and a check that
+/// cannot connect opens an outage while one that can does not.
+#[test]
+fn serve_runs_the_checks_and_records_an_outage() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let open = listener.local_addr().unwrap();
+    let closed = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let config = config_folder();
+    let checks = format!(
+        "[[check]]\nid = \"open\"\ntype = \"tcp\"\ntarget = \"{open}\"\n\
+         interval = \"1s\"\ntimeout = \"500ms\"\nconfirm = 1\n\n\
+         [[check]]\nid = \"closed\"\ntype = \"tcp\"\ntarget = \"{closed}\"\n\
+         interval = \"1s\"\ntimeout = \"500ms\"\nconfirm = 1\n"
+    );
+    std::fs::write(config.path().join("checks.toml"), checks).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let mut server = Server::start(config.path(), data.path());
+    let lines = wait_ready(&mut server);
+    let drain = std::thread::spawn(move || lines.map_while(Result::ok).collect::<Vec<_>>());
+
+    std::thread::sleep(Duration::from_millis(2_500));
+    server.signal("-TERM");
+    let status = server.wait_with_deadline();
+    let log = drain.join().unwrap().join("\n");
+    assert_eq!(status.code(), Some(0), "stderr:\n{log}");
+    drop(listener);
+
+    let output = tocsin(&["--json", "db", "info", "--data", data_arg(&data)]);
+    assert_eq!(output.status.code(), Some(0));
+    let info = json_stdout(&output);
+    let results = info["rows"]["check_result"].as_i64().unwrap();
+    assert!(results >= 4, "{results} results; stderr:\n{log}");
+    assert_eq!(info["rows"]["outage"], 1, "stderr:\n{log}");
+}

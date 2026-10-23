@@ -255,6 +255,52 @@ async fn unknown_ids_are_none() {
 }
 
 #[tokio::test]
+async fn open_incidents_leave_out_resolved_and_completed_ones() {
+    let fixture = open();
+    let store = &fixture.store;
+    let ci = Actor::token("ci");
+    let mut ids = Vec::new();
+    for new in [outage(), maintenance(), outage(), maintenance()] {
+        ids.push(
+            store
+                .create_incident(new, ci.clone(), at(1000))
+                .await
+                .unwrap()
+                .id,
+        );
+    }
+    for (id, status) in [
+        (ids[2], IncidentStatus::Resolved),
+        (ids[3], IncidentStatus::Completed),
+    ] {
+        let update = NewUpdate {
+            status,
+            message: "Over.".into(),
+        };
+        store
+            .add_incident_update(id, update, ci.clone(), at(2000))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    let open: Vec<_> = store
+        .open_incidents()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|incident| (incident.id, incident.components))
+        .collect();
+    assert_eq!(
+        open,
+        [
+            (ids[0], vec!["api".to_owned(), "web".to_owned()]),
+            (ids[1], vec!["api".to_owned()]),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn listing_is_newest_first_and_pages_by_id() {
     let fixture = open();
     for minute in 0..5 {

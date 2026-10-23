@@ -350,6 +350,18 @@ impl Store {
             .await
     }
 
+    /// Every incident not yet resolved and every maintenance not yet
+    /// completed, oldest first: what the engine needs to derive component
+    /// status. The schema keeps `resolved_at` set exactly when the status is
+    /// `resolved` or `completed`.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn open_incidents(&self) -> Result<Vec<Incident>> {
+        self.read(incident::open).await
+    }
+
     /// Every outage `node_id` has open, ordered by check.
     ///
     /// # Errors

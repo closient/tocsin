@@ -8,7 +8,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use tocsin_core::config::Config;
+use tocsin_core::config::{CheckType, Config};
+use tocsin_engine::ports::{ProbeRunner, SystemClock};
+use tocsin_engine::{Engine, Parts, Plan};
+use tocsin_probe::ProbeContext;
 use tocsin_store::{DB_FILE, Retention, Store};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::oneshot;
@@ -16,7 +19,8 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
 use crate::exit::Exit;
-use crate::http::{self, AppState, events::EventBus};
+use crate::http::events::{EventBus, wake_on_incident_changes};
+use crate::http::{self, AppState};
 use crate::lock;
 use crate::output::{Failure, Report};
 
@@ -75,7 +79,8 @@ pub fn run(config: &Path, data: Option<&Path>) -> Result<Report, Failure> {
     })
 }
 
-/// Serves until a shutdown signal, then drains and closes the store.
+/// Serves and runs the checks until a shutdown signal, then stops the
+/// checks, drains requests and closes the store.
 /// Resolves with the signal's name, or fails if the server ends first.
 async fn serve(
     config_folder: &Path,
@@ -102,6 +107,14 @@ async fn serve(
     let address = listener.local_addr().map_err(|error| {
         Failure::new(Exit::Runtime, format!("cannot listen on {listen}: {error}"))
     })?;
+    let events = EventBus::new();
+    let monitor = match Monitor::start(config, &store, &events).await {
+        Ok(monitor) => monitor,
+        Err(failure) => {
+            close(store).await;
+            return Err(failure);
+        }
+    };
     let maintenance = tokio::spawn(maintain(
         Arc::clone(&store),
         Retention::days(retention_days),
@@ -109,7 +122,7 @@ async fn serve(
     let app = http::router(AppState {
         store: Arc::clone(&store),
         config: Arc::clone(config),
-        events: EventBus::new(),
+        events,
     });
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(async move {
@@ -131,18 +144,95 @@ async fn serve(
         retention_days,
         "tocsin serving; waiting for SIGINT or SIGTERM"
     );
-    let (outcome, _closed) = supervise(shutdown.wait(), stop, server, maintenance, store).await;
+    let (outcome, _closed) = supervise(
+        shutdown.wait(),
+        stop,
+        server,
+        maintenance,
+        Some(monitor),
+        store,
+    )
+    .await;
     outcome
 }
 
+/// The running checks: the engine, and the task that wakes it when an
+/// incident or maintenance window changes.
+struct Monitor {
+    engine: Engine,
+    wake: JoinHandle<()>,
+}
+
+impl Monitor {
+    /// Starts the engine on `store`, publishing on `events`.
+    async fn start(
+        config: &Config,
+        store: &Arc<Store>,
+        events: &EventBus,
+    ) -> Result<Self, Failure> {
+        let plan = Plan::from_config(config).map_err(|error| {
+            Failure::new(
+                Exit::Runtime,
+                format!("cannot schedule the checks: {error}"),
+            )
+        })?;
+        let parts = Parts {
+            runner: Arc::new(ProbeRunner::new(probe_context(config)?)),
+            history: Arc::clone(store) as _,
+            notices: Arc::clone(store) as _,
+            sink: Arc::new(events.clone()),
+            clock: Arc::new(SystemClock),
+        };
+        // Subscribed before the engine starts, so no incident write can fall
+        // between its first read and the subscription.
+        let incident_changes = events.subscribe();
+        let engine = Engine::start(plan, parts).await.map_err(|error| {
+            Failure::new(Exit::Runtime, format!("cannot start the checks: {error}"))
+        })?;
+        let wake = tokio::spawn(wake_on_incident_changes(
+            incident_changes,
+            engine.notices_handle(),
+        ));
+        Ok(Monitor { engine, wake })
+    }
+
+    /// Stops the checks and waits for them, so nothing still holds the
+    /// store afterwards.
+    async fn stop(self) {
+        self.wake.abort();
+        let _ = self.wake.await;
+        self.engine.shutdown().await;
+    }
+}
+
+/// The root certificates HTTP and TLS checks verify against. Without a
+/// system root store only those checks are impossible, so the others still
+/// run.
+fn probe_context(config: &Config) -> Result<ProbeContext, Failure> {
+    match ProbeContext::system() {
+        Ok(context) => Ok(context),
+        Err(error)
+            if config
+                .checks
+                .iter()
+                .any(|check| matches!(check.check_type, CheckType::Http | CheckType::Tls)) =>
+        {
+            Err(Failure::new(Exit::Runtime, error.message))
+        }
+        Err(_) => Ok(ProbeContext::with_roots(rustls::RootCertStore::empty())),
+    }
+}
+
 /// Waits for `shutdown` or for the server to end on its own, then stops
-/// everything that holds the store and closes it. Every way out runs the
-/// same cleanup; the flag says whether the store closed.
+/// everything that holds the store and closes it: the checks first, then
+/// the requests in flight. Every way out runs the same cleanup; the flag
+/// says whether the store closed.
 async fn supervise(
     shutdown: impl Future<Output = &'static str>,
     stop: oneshot::Sender<()>,
     mut server: JoinHandle<io::Result<()>>,
     maintenance: JoinHandle<()>,
+    monitor: Option<Monitor>,
     store: Arc<Store>,
 ) -> (Result<&'static str, Failure>, bool) {
     let ended = tokio::select! {
@@ -152,7 +242,6 @@ async fn supervise(
     let outcome = match ended {
         Ok(signal_name) => {
             tracing::info!(signal = signal_name, "shutting down");
-            drain(stop, server).await;
             Ok(signal_name)
         }
         Err(result) => {
@@ -165,6 +254,12 @@ async fn supervise(
             Err(Failure::new(Exit::Runtime, message))
         }
     };
+    if let Some(monitor) = monitor {
+        monitor.stop().await;
+    }
+    if outcome.is_ok() {
+        drain(stop, server).await;
+    }
     maintenance.abort();
     // An aborted task drops its handle on the store at its next await,
     // which `await` on the join handle waits for.
@@ -294,12 +389,21 @@ impl Shutdown {
 mod tests {
     use std::future::{pending, ready};
     use std::sync::{Arc, Weak};
+    use std::time::Duration;
 
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use serde_json::json;
+    use tocsin_core::config::{Environment, Source};
+    use tocsin_core::state::ComponentStatus;
     use tocsin_store::{DB_FILE, Store};
     use tokio::sync::oneshot;
+    use tower::ServiceExt;
 
-    use super::{io, supervise};
+    use super::{Monitor, close, io, supervise};
     use crate::exit::Exit;
+    use crate::http::events::{Event, EventBus};
+    use crate::http::{self, AppState};
 
     fn open() -> (tempfile::TempDir, Arc<Store>) {
         let dir = tempfile::tempdir().unwrap();
@@ -328,7 +432,7 @@ mod tests {
         let maintenance = holding(&store);
         let (stop, _stopped) = oneshot::channel();
 
-        let (outcome, closed) = supervise(pending(), stop, server, maintenance, store).await;
+        let (outcome, closed) = supervise(pending(), stop, server, maintenance, None, store).await;
 
         let failure = outcome.unwrap_err();
         assert_eq!(failure.exit, Exit::Runtime);
@@ -350,7 +454,8 @@ mod tests {
         });
         let maintenance = holding(&store);
 
-        let (outcome, closed) = supervise(ready("SIGTERM"), stop, server, maintenance, store).await;
+        let (outcome, closed) =
+            supervise(ready("SIGTERM"), stop, server, maintenance, None, store).await;
 
         assert_eq!(outcome.unwrap(), "SIGTERM");
         assert!(closed, "the store was not closed");
@@ -368,10 +473,74 @@ mod tests {
         });
         let maintenance = holding(&store);
 
-        let (outcome, closed) = supervise(ready("SIGINT"), stop, server, maintenance, store).await;
+        let (outcome, closed) =
+            supervise(ready("SIGINT"), stop, server, maintenance, None, store).await;
 
         assert_eq!(outcome.unwrap(), "SIGINT");
         assert!(!closed, "closed a store something else still holds");
         assert_eq!(Arc::strong_count(&straggler), 1);
+    }
+
+    /// The engine re-reads incidents on its own only once a minute; a write
+    /// through the API must move the component's status straight away.
+    #[tokio::test]
+    async fn an_incident_written_through_the_api_moves_a_component_at_once() {
+        const SECRET: &str = "oncall-secret-0123456789";
+        let (_dir, store) = open();
+        let toml = "[[component]]\nid = \"api\"\nname = \"API\"\n\n\
+                    [[token]]\nid = \"oncall\"\nsecret = \"${ENV:ONCALL_TOKEN}\"\n\
+                    scopes = [\"incident\"]\n";
+        let config = tocsin_core::config::load(
+            &[Source {
+                name: "tocsin.toml".into(),
+                text: Ok(toml.into()),
+            }],
+            &Environment {
+                hostname: "test".into(),
+                variable: &|name| (name == "ONCALL_TOKEN").then(|| SECRET.to_owned()),
+            },
+        )
+        .unwrap();
+        let config = Arc::new(config);
+        let events = EventBus::new();
+        let mut seen = events.subscribe();
+        let monitor = Monitor::start(&config, &store, &events).await.unwrap();
+        let app = http::router(AppState {
+            store: Arc::clone(&store),
+            config,
+            events,
+        });
+
+        let body = json!({
+            "title": "API errors",
+            "impact": "major",
+            "components": ["api"],
+            "message": "Looking into it."
+        });
+        let request = Request::post("/api/v1/incidents")
+            .header(header::AUTHORIZATION, format!("Bearer {SECRET}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let change = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Event::ComponentChanged(change) = seen.recv().await.unwrap() {
+                    return change;
+                }
+            }
+        })
+        .await
+        .expect("the write woke the engine");
+        assert_eq!(change.component_id, "api");
+        assert_eq!(
+            (change.from, change.to),
+            (ComponentStatus::Operational, ComponentStatus::Down)
+        );
+
+        monitor.stop().await;
+        assert!(close(store).await, "the stopped engine released the store");
     }
 }

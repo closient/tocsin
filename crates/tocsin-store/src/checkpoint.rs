@@ -387,11 +387,26 @@ impl Nudge {
         self.write_started = Some(Instant::now());
     }
 
-    /// Called by the writer after each write. Checkpoints only once the log
-    /// has reached [`HARD_LIMIT_FRAMES`], and waits only if another
-    /// checkpoint is running then and no lockout is.
+    /// Called by the writer after each job, before it replies: tells the
+    /// checkpointer how long the log is now, so a caller that paces on it
+    /// never reads the length from before its own write.
+    pub(crate) fn publish(&self) {
+        let Some(link) = &self.link else {
+            return;
+        };
+        let (frames, appended, _) = LOG.get();
+        link.log.appended.store(appended, Ordering::Relaxed);
+        link.log
+            .frames
+            .store(u64::from(frames.unsigned_abs()), Ordering::Relaxed);
+    }
+
+    /// Called by the writer after each write and its replies. Publishes the
+    /// log's length again, for callers that skip [`Nudge::publish`], and
+    /// checkpoints only once the log has reached [`HARD_LIMIT_FRAMES`],
+    /// waiting only if another checkpoint is running then and no lockout is.
     pub(crate) fn after_write(&mut self, conn: &Connection) {
-        let (frames, appended, rewinds) = LOG.get();
+        let (frames, _, rewinds) = LOG.get();
         let rewound = rewinds > self.rewinds;
         self.rewinds = rewinds;
         let wrote = self.write_started.take();
@@ -401,13 +416,10 @@ impl Nudge {
             u64::from(frames.unsigned_abs()),
             rewound,
         );
+        self.publish();
         let Some(link) = &self.link else {
             return;
         };
-        link.log.appended.store(appended, Ordering::Relaxed);
-        link.log
-            .frames
-            .store(u64::from(frames.unsigned_abs()), Ordering::Relaxed);
         // At the hard limit, the checkpointer starts no pass while this
         // write checkpoints, nor for a while after in case the next write is
         // at the limit too: a pass starting the moment the last ended, as a

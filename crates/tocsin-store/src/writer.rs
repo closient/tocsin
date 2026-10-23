@@ -37,8 +37,12 @@ pub(crate) enum Insert {
     ChangeOutage(OutageChange),
 }
 
-/// Any other write; it runs alone and replies through its own channel.
-type Job = Box<dyn FnOnce(&mut Connection) + Send>;
+/// Any other write; it runs alone and returns its reply, which the writer
+/// sends once it has published the log's length.
+type Job = Box<dyn FnOnce(&mut Connection) -> Reply + Send>;
+
+/// Sends a job's outcome to its caller.
+type Reply = Box<dyn FnOnce() + Send>;
 
 enum Command {
     /// Boxed: a result with its outage change dwarfs a job.
@@ -93,8 +97,10 @@ impl Writer {
         let (reply, receive) = oneshot::channel();
         let job: Job = Box::new(move |conn| {
             let outcome = guarded(conn, |conn| job(conn));
-            // The caller may have stopped waiting; the write still happened.
-            let _ = reply.send(outcome);
+            Box::new(move || {
+                // The caller may have stopped waiting; the write still happened.
+                let _ = reply.send(outcome);
+            })
         });
         self.queued.fetch_add(1, Ordering::Relaxed);
         self.sender
@@ -108,7 +114,11 @@ impl Writer {
     /// the thread.
     #[cfg(test)]
     pub(crate) async fn run_unguarded(&self, job: impl FnOnce(&mut Connection) + Send + 'static) {
-        let _ = self.sender.send(Command::Run(Box::new(job))).await;
+        let job: Job = Box::new(move |conn| {
+            job(conn);
+            Box::new(|| ())
+        });
+        let _ = self.sender.send(Command::Run(job)).await;
     }
 
     /// Stops taking work, lets the queue drain and returns the thread, which
@@ -139,7 +149,13 @@ fn run(mut session: Session, mut receiver: mpsc::Receiver<Command>) {
         };
         nudge.before_write();
         match command {
-            Command::Run(job) => job(conn),
+            Command::Run(job) => {
+                // Retention acts on the log's length as soon as its job
+                // replies, so the checkpointer learns the length first.
+                let reply = job(conn);
+                nudge.publish();
+                reply();
+            }
             Command::Insert(insert, reply) => {
                 let mut batch = vec![(*insert, reply)];
                 while batch.len() < MAX_BATCH {

@@ -70,6 +70,7 @@ fn run(cli: Cli) -> Result<Report, Failure> {
         Some(Command::Incident { command }) => incident::run(command),
         Some(Command::Maintenance { command }) => incident::run_maintenance(command),
         Some(Command::Openapi) => Ok(Report {
+            exit: Exit::Ok,
             json: serde_json::to_value(http::openapi::spec())
                 .expect("the OpenAPI document serializes"),
             text: http::openapi::pretty().trim_end().to_owned(),

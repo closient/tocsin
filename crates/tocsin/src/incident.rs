@@ -79,6 +79,7 @@ pub fn run(command: IncidentCommand) -> Result<Report, Failure> {
         IncidentCommand::Show { server, id } => {
             let incident: Incident = Client::new(&server)?.get(&format!("{INCIDENTS}/{id}"))?;
             Ok(Report {
+                exit: Exit::Ok,
                 json: to_json(&incident),
                 text: describe(&incident),
             })
@@ -94,6 +95,7 @@ pub fn run(command: IncidentCommand) -> Result<Report, Failure> {
             }
             let list: IncidentList = Client::new(&server)?.get(&path)?;
             Ok(Report {
+                exit: Exit::Ok,
                 json: to_json(&list),
                 text: table(&list),
             })
@@ -135,11 +137,13 @@ fn export_one(client: &Client, id: i64, out: Option<&Path>) -> Result<Report, Fa
         Some(out) => {
             let path = write_file(out, &incident, &markdown)?;
             Ok(Report {
+                exit: Exit::Ok,
                 json: json!({ "format": "md", "files": [{ "id": id, "path": path }] }),
                 text: format!("wrote {path}"),
             })
         }
         None => Ok(Report {
+            exit: Exit::Ok,
             json: json!({ "id": id, "format": "md", "markdown": markdown }),
             text: markdown.trim_end().to_owned(),
         }),
@@ -193,6 +197,7 @@ fn export_all(client: &Client, out: &Path) -> Result<Report, Failure> {
         }
     }
     Ok(Report {
+        exit: Exit::Ok,
         text: format!(
             "wrote {} incident file(s) to {}",
             files.len(),
@@ -221,6 +226,7 @@ fn write_file(out: &Path, incident: &Incident, markdown: &str) -> Result<String,
 
 fn written(incident: &Incident, verb: &str) -> Report {
     Report {
+        exit: Exit::Ok,
         json: to_json(incident),
         text: format!(
             "{} {} {verb}: {} ({})",

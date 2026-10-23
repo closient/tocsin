@@ -26,10 +26,13 @@ the `status:read` scope to read the rest:
 | Releases and deploys of a project with `public = true` | yes | yes |
 | Releases and deploys of a project with `public = false` | no | yes |
 
-A request with an `Authorization` header is always checked: an unknown
-token is 401 and a token without `status:read` (an `incident` or
-`release` token, say) is 403, even on an endpoint the public may read.
-Leave the header off to read as the public. A non-public project is left
+On the endpoints that show a reader more (components, checks, check
+results, releases and the timeline), an `Authorization` header is always
+checked: an unknown token is 401 and a token without `status:read` (an
+`incident` or `release` token, say) is 403, even though the public may
+read them. Leave the header off to read as the public. `status.json`,
+outages, incidents and `/llms.txt` are the same for everyone and ignore
+the header. A non-public project is left
 out wholesale, not redacted: it is not in the release list, its deploys
 are not on the timeline, and `/llms.txt` does not mention it.
 
@@ -136,8 +139,9 @@ what `status.json` shows the public. Links are absolute when
 
 The query commands are HTTP clients of a running server. `--url` or
 `TOCSIN_URL` names it; `--token` or `TOCSIN_TOKEN` is sent with every read
-when set, so it must be a `status:read` token (an `incident` or `release`
-token gets 403). Leave it unset to read as the public.
+when set, so for `history` and `timeline` it must be a `status:read`
+token (an `incident` or `release` token gets 403). Leave it unset to read
+as the public.
 
 ```sh
 export TOCSIN_URL=https://status.example.com TOCSIN_TOKEN=...

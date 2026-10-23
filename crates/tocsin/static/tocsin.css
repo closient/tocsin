@@ -67,6 +67,7 @@ footer.site { color: var(--muted); font-size: 0.875rem; padding-bottom: 2rem; }
 
 h1 { font-size: 1.5rem; line-height: 1.25; margin: 0.5rem 0 1rem; overflow-wrap: anywhere; }
 h2 { font-size: 1.125rem; margin: 2rem 0 0.75rem; }
+h3 { font-size: 1rem; margin: 1.25rem 0 0.5rem; }
 a { color: var(--accent); }
 p, ul, ol { margin: 0 0 0.75rem; }
 
@@ -75,9 +76,9 @@ p, ul, ol { margin: 0 0 0.75rem; }
 .notice.error { border-color: var(--bad); }
 
 /* Lists of incidents and timelines */
-ul.items { list-style: none; padding: 0; margin: 0; }
-ul.items > li { padding: 0.75rem 0; border-bottom: 1px solid var(--line); }
-ul.items > li:last-child { border-bottom: 0; }
+.items { list-style: none; padding: 0; margin: 0; }
+.items > li { padding: 0.75rem 0; border-bottom: 1px solid var(--line); }
+.items > li:last-child { border-bottom: 0; }
 .item-title { font-weight: 600; overflow-wrap: anywhere; }
 .meta { color: var(--muted); font-size: 0.875rem; }
 

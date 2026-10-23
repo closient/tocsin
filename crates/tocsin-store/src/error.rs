@@ -4,6 +4,8 @@
 
 use std::fmt;
 
+use tocsin_core::incident::FieldError;
+
 /// Anything that stopped a store operation.
 #[derive(Debug)]
 pub enum Error {
@@ -34,6 +36,9 @@ pub enum Error {
         /// This node's clock when it was refused.
         now_ms: i64,
     },
+    /// A write broke a rule that depends on what is already stored, such as
+    /// an update whose status does not suit the incident's kind.
+    Invalid(Vec<FieldError>),
 }
 
 /// The result of a store operation.
@@ -61,6 +66,14 @@ impl fmt::Display for Error {
                 "a check result starts at {started_at_ms} ms, more than an hour after now \
                  ({now_ms} ms); check the clock of the node that ran it"
             ),
+            Error::Invalid(errors) => {
+                f.write_str("invalid write")?;
+                for (index, error) in errors.iter().enumerate() {
+                    f.write_str(if index == 0 { ": " } else { "; " })?;
+                    write!(f, "{error}")?;
+                }
+                Ok(())
+            }
         }
     }
 }

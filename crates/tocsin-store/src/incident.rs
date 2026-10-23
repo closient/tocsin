@@ -1,0 +1,266 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//! Reading and writing incidents. Writes run on the writer thread, each in
+//! one IMMEDIATE transaction; reads assemble an [`Incident`] from its row,
+//! its components and its updates.
+
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
+use tocsin_core::incident::{
+    Actor, ActorKind, Impact, Incident, IncidentEdit, IncidentKind, IncidentStatus, IncidentUpdate,
+    NewIncident, NewUpdate, Timestamp,
+};
+
+use crate::error::{Error, Result};
+
+const INCIDENT_COLUMNS: &str = "id, kind, title, impact, status, scheduled_start, scheduled_end, \
+     resolved_at, created_at, created_by_kind, created_by, updated_at, updated_by_kind, updated_by";
+
+/// Inserts a new incident with its components and first update; returns
+/// its id.
+pub(crate) fn insert(
+    transaction: &Transaction<'_>,
+    new: &NewIncident,
+    actor: &Actor,
+    at: Timestamp,
+) -> Result<i64> {
+    let status = new.first_status();
+    transaction.execute(
+        "INSERT INTO incident (kind, title, impact, status, scheduled_start, scheduled_end, \
+         resolved_at, created_at, created_by_kind, created_by, updated_at, updated_by_kind, \
+         updated_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?8, ?9, ?10)",
+        params![
+            new.kind.as_str(),
+            new.title,
+            new.impact.as_str(),
+            status.as_str(),
+            new.scheduled_start.map(Timestamp::as_millis),
+            new.scheduled_end.map(Timestamp::as_millis),
+            status.is_terminal().then_some(at.as_millis()),
+            at.as_millis(),
+            actor.kind.as_str(),
+            actor.id,
+        ],
+    )?;
+    let id = transaction.last_insert_rowid();
+    replace_components(transaction, id, &new.components)?;
+    append_update(transaction, id, status, &new.message, actor, at)?;
+    Ok(id)
+}
+
+/// Appends `update` and moves the incident to its status. `None` if no
+/// incident has that id.
+pub(crate) fn add_update(
+    transaction: &Transaction<'_>,
+    id: i64,
+    update: &NewUpdate,
+    actor: &Actor,
+    at: Timestamp,
+) -> Result<Option<()>> {
+    let Some(incident) = load(transaction, id)? else {
+        return Ok(None);
+    };
+    incident.check_update(update).map_err(Error::Invalid)?;
+    append_update(transaction, id, update.status, &update.message, actor, at)?;
+    // `resolved_at` keeps the first resolution while the incident stays
+    // over, and is cleared if an update reopens it.
+    let resolved_at = if update.status.is_terminal() {
+        Some(
+            incident
+                .resolved_at
+                .map_or(at.as_millis(), Timestamp::as_millis),
+        )
+    } else {
+        None
+    };
+    transaction.execute(
+        "UPDATE incident SET status = ?2, resolved_at = ?3, updated_at = ?4, \
+         updated_by_kind = ?5, updated_by = ?6 WHERE id = ?1",
+        params![
+            id,
+            update.status.as_str(),
+            resolved_at,
+            at.as_millis(),
+            actor.kind.as_str(),
+            actor.id,
+        ],
+    )?;
+    Ok(Some(()))
+}
+
+/// Applies `edit` to the incident row and logs it. `None` if no incident
+/// has that id.
+pub(crate) fn edit(
+    transaction: &Transaction<'_>,
+    id: i64,
+    edit: &IncidentEdit,
+    actor: &Actor,
+    at: Timestamp,
+) -> Result<Option<()>> {
+    let Some(mut incident) = load(transaction, id)? else {
+        return Ok(None);
+    };
+    incident.apply_edit(edit).map_err(Error::Invalid)?;
+    transaction.execute(
+        "UPDATE incident SET title = ?2, impact = ?3, scheduled_start = ?4, scheduled_end = ?5, \
+         updated_at = ?6, updated_by_kind = ?7, updated_by = ?8 WHERE id = ?1",
+        params![
+            id,
+            incident.title,
+            incident.impact.as_str(),
+            incident.scheduled_start.map(Timestamp::as_millis),
+            incident.scheduled_end.map(Timestamp::as_millis),
+            at.as_millis(),
+            actor.kind.as_str(),
+            actor.id,
+        ],
+    )?;
+    if edit.components.is_some() {
+        replace_components(transaction, id, &incident.components)?;
+    }
+    let changes = serde_json::to_string(edit).map_err(|error| Error::Batch(error.to_string()))?;
+    transaction.execute(
+        "INSERT INTO incident_edit (incident_id, changes, created_at, created_by_kind, \
+         created_by) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, changes, at.as_millis(), actor.kind.as_str(), actor.id],
+    )?;
+    Ok(Some(()))
+}
+
+fn replace_components(transaction: &Transaction<'_>, id: i64, components: &[String]) -> Result<()> {
+    transaction.execute(
+        "DELETE FROM incident_component WHERE incident_id = ?1",
+        [id],
+    )?;
+    let mut insert = transaction.prepare_cached(
+        "INSERT INTO incident_component (incident_id, component_id) VALUES (?1, ?2)",
+    )?;
+    for component in components {
+        insert.execute(params![id, component])?;
+    }
+    Ok(())
+}
+
+fn append_update(
+    transaction: &Transaction<'_>,
+    id: i64,
+    status: IncidentStatus,
+    message: &str,
+    actor: &Actor,
+    at: Timestamp,
+) -> Result<()> {
+    transaction.execute(
+        "INSERT INTO incident_update (incident_id, status, message, created_at, \
+         created_by_kind, created_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            id,
+            status.as_str(),
+            message,
+            at.as_millis(),
+            actor.kind.as_str(),
+            actor.id
+        ],
+    )?;
+    Ok(())
+}
+
+/// The incident with that id, with its components and updates.
+pub(crate) fn load(conn: &Connection, id: i64) -> Result<Option<Incident>> {
+    let incident = conn
+        .prepare_cached(&format!(
+            "SELECT {INCIDENT_COLUMNS} FROM incident WHERE id = ?1"
+        ))?
+        .query_row([id], incident_row)
+        .optional()?;
+    incident
+        .map(|incident| complete(conn, incident))
+        .transpose()
+}
+
+/// Up to `limit` incidents, newest first, with ids below `before` when it
+/// is given.
+pub(crate) fn list(conn: &Connection, before: Option<i64>, limit: u32) -> Result<Vec<Incident>> {
+    let incidents = conn
+        .prepare_cached(&format!(
+            "SELECT {INCIDENT_COLUMNS} FROM incident WHERE id < ?1 ORDER BY id DESC LIMIT ?2"
+        ))?
+        .query_map(params![before.unwrap_or(i64::MAX), limit], incident_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    incidents
+        .into_iter()
+        .map(|incident| complete(conn, incident))
+        .collect()
+}
+
+/// Fills in components and updates.
+fn complete(conn: &Connection, mut incident: Incident) -> Result<Incident> {
+    incident.components = conn
+        .prepare_cached(
+            "SELECT component_id FROM incident_component WHERE incident_id = ?1 \
+             ORDER BY component_id",
+        )?
+        .query_map([incident.id], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    incident.updates = conn
+        .prepare_cached(
+            "SELECT id, status, message, created_at, created_by_kind, created_by \
+             FROM incident_update WHERE incident_id = ?1 ORDER BY id",
+        )?
+        .query_map([incident.id], |row| {
+            Ok(IncidentUpdate {
+                id: row.get(0)?,
+                status: text(row, 1)?,
+                message: row.get(2)?,
+                created_at: Timestamp::from_millis(row.get(3)?),
+                created_by: actor(row, 4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(incident)
+}
+
+fn incident_row(row: &Row<'_>) -> rusqlite::Result<Incident> {
+    let instant = |index: usize| -> rusqlite::Result<Option<Timestamp>> {
+        Ok(row
+            .get::<_, Option<i64>>(index)?
+            .map(Timestamp::from_millis))
+    };
+    Ok(Incident {
+        id: row.get(0)?,
+        kind: text::<IncidentKind>(row, 1)?,
+        title: row.get(2)?,
+        impact: text::<Impact>(row, 3)?,
+        status: text(row, 4)?,
+        components: Vec::new(),
+        scheduled_start: instant(5)?,
+        scheduled_end: instant(6)?,
+        resolved_at: instant(7)?,
+        created_at: Timestamp::from_millis(row.get(8)?),
+        created_by: actor(row, 9)?,
+        updated_at: Timestamp::from_millis(row.get(11)?),
+        updated_by: actor(row, 12)?,
+        updates: Vec::new(),
+    })
+}
+
+/// The `*_by_kind` column at `index` and the id after it.
+fn actor(row: &Row<'_>, index: usize) -> rusqlite::Result<Actor> {
+    Ok(Actor {
+        kind: text::<ActorKind>(row, index)?,
+        id: row.get(index + 1)?,
+    })
+}
+
+/// A text column holding one of a fixed set of names.
+fn text<T>(row: &Row<'_>, index: usize) -> rusqlite::Result<T>
+where
+    T: std::str::FromStr<Err = String>,
+{
+    let value: String = row.get(index)?;
+    value.parse().map_err(|message: String| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Text,
+            message.into(),
+        )
+    })
+}

@@ -13,6 +13,7 @@
 
 pub mod day;
 mod error;
+mod incident;
 mod readers;
 mod rollup;
 mod schema;
@@ -26,6 +27,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, TransactionBehavior};
 use tocsin_core::Health;
+use tocsin_core::incident::{Actor, Incident, IncidentEdit, NewIncident, NewUpdate, Timestamp};
 
 pub use crate::day::Day;
 pub use crate::error::{Error, Result};
@@ -44,13 +46,15 @@ const READERS: usize = 4;
 pub const FUTURE_TOLERANCE: Duration = Duration::from_hours(1);
 
 /// The tables `tocsin db info` counts, in schema order.
-pub const TABLES: [&str; 8] = [
+pub const TABLES: [&str; 10] = [
     "check_result",
     "outage",
     "daily_rollup",
     "heartbeat_ping",
     "incident",
+    "incident_component",
     "incident_update",
+    "incident_edit",
     "release",
     "retention",
 ];
@@ -242,6 +246,106 @@ impl Store {
             .insert(Insert::EndOutage { id, ended_at_ms })
             .await
             .map(drop)
+    }
+
+    /// Opens an incident (or announces maintenance) with its first update,
+    /// written by `actor` at `at`. The caller has validated `new`, including
+    /// that its components are configured.
+    ///
+    /// # Errors
+    ///
+    /// A value breaks a constraint, or the write fails.
+    pub async fn create_incident(
+        &self,
+        new: NewIncident,
+        actor: Actor,
+        at: Timestamp,
+    ) -> Result<Incident> {
+        self.writer
+            .run(move |conn| {
+                let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let id = incident::insert(&transaction, &new, &actor, at)?;
+                let incident = incident::load(&transaction, id)?;
+                transaction.commit()?;
+                // The row was inserted by this transaction, so it is there.
+                incident.ok_or(Error::Sqlite(rusqlite::Error::QueryReturnedNoRows))
+            })
+            .await
+    }
+
+    /// Appends an update to incident `id` and moves it to the update's
+    /// status. `None` if no incident has that id.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] if the status does not suit the incident's kind;
+    /// otherwise the write fails.
+    pub async fn add_incident_update(
+        &self,
+        id: i64,
+        update: NewUpdate,
+        actor: Actor,
+        at: Timestamp,
+    ) -> Result<Option<Incident>> {
+        self.writer
+            .run(move |conn| {
+                let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                if incident::add_update(&transaction, id, &update, &actor, at)?.is_none() {
+                    return Ok(None);
+                }
+                let incident = incident::load(&transaction, id)?;
+                transaction.commit()?;
+                Ok(incident)
+            })
+            .await
+    }
+
+    /// Changes incident `id`'s title, impact, components or schedule, and
+    /// logs the edit with its author. `None` if no incident has that id.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] if the result would break a rule (a schedule on
+    /// an incident, a window ending before it starts); otherwise the write
+    /// fails.
+    pub async fn edit_incident(
+        &self,
+        id: i64,
+        edit: IncidentEdit,
+        actor: Actor,
+        at: Timestamp,
+    ) -> Result<Option<Incident>> {
+        self.writer
+            .run(move |conn| {
+                let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                if incident::edit(&transaction, id, &edit, &actor, at)?.is_none() {
+                    return Ok(None);
+                }
+                let incident = incident::load(&transaction, id)?;
+                transaction.commit()?;
+                Ok(incident)
+            })
+            .await
+    }
+
+    /// The incident with that id, with its components and updates.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn incident(&self, id: i64) -> Result<Option<Incident>> {
+        self.read(move |conn| incident::load(conn, id)).await
+    }
+
+    /// Up to `limit` incidents, newest first; with `before`, only those
+    /// with a lower id (the cursor for the next page).
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn incidents(&self, before: Option<i64>, limit: u32) -> Result<Vec<Incident>> {
+        self.read(move |conn| incident::list(conn, before, limit))
+            .await
     }
 
     /// Runs `query` on a pooled read connection. Read connections refuse

@@ -12,7 +12,10 @@ use crate::error::{Error, Result};
 
 /// Every migration, oldest first. Append only: a shipped migration is never
 /// edited, because databases in the field have already run it.
-static MIGRATIONS: &[M<'static>] = &[M::up(include_str!("../migrations/0001_history.sql"))];
+static MIGRATIONS: &[M<'static>] = &[
+    M::up(include_str!("../migrations/0001_history.sql")),
+    M::up(include_str!("../migrations/0002_incidents.sql")),
+];
 
 /// How long a connection waits for another process's lock before failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);

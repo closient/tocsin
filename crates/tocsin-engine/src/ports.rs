@@ -79,6 +79,11 @@ pub trait History: Send + Sync + 'static {
         node_id: &'a str,
         check_ids: Vec<String>,
     ) -> BoxFuture<'a, Result<Vec<LatestResult>>>;
+    /// Ends outage `outage`, whose check or heartbeat is no longer
+    /// configured, at `at_ms`, and ends any alert it fired without a
+    /// resolve: nobody saw it recover. Ending one that is not open does
+    /// nothing.
+    fn withdraw(&self, outage: i64, at_ms: i64) -> BoxFuture<'_, Result<()>>;
 }
 
 impl History for Store {
@@ -109,6 +114,10 @@ impl History for Store {
         check_ids: Vec<String>,
     ) -> BoxFuture<'a, Result<Vec<LatestResult>>> {
         Box::pin(Store::latest_results(self, node_id, check_ids))
+    }
+
+    fn withdraw(&self, outage: i64, at_ms: i64) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move { Store::withdraw_outage(self, outage, at_ms).await.map(drop) })
     }
 }
 

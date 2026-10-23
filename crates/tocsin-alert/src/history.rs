@@ -106,4 +106,13 @@ impl History for AlertingHistory {
     ) -> BoxFuture<'a, Result<Vec<LatestResult>>> {
         Box::pin(self.store.latest_results(node_id, check_ids))
     }
+
+    fn withdraw(&self, outage: i64, at_ms: i64) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            if self.store.withdraw_outage(outage, at_ms).await? > 0 {
+                self.wake.notify_one();
+            }
+            Ok(())
+        })
+    }
 }

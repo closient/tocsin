@@ -2,11 +2,11 @@
 
 //! The running engine: one task per check, one per heartbeat, one task
 //! watching incidents and maintenance windows, and the shared state they
-//! update.
+//! update. [`Engine::reconcile`] moves a running engine to a new plan.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, Weak};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -23,7 +23,7 @@ use tocsin_store::{
 use tokio::sync::{Notify, Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
-use tracing::{error, warn};
+use tracing::{error, info};
 
 use crate::event::{CheckChange, ComponentChange, EngineEvent, MemberKind};
 use crate::notice::{Notice, in_maintenance, incident_impact, next_boundary};
@@ -90,7 +90,7 @@ impl fmt::Debug for Parts {
     }
 }
 
-/// The engine could not start.
+/// The engine could not start, or could not move to a new plan.
 #[derive(Debug)]
 pub enum StartError {
     /// Reading the outages left open before a restart failed.
@@ -239,7 +239,9 @@ impl std::error::Error for PingError {}
 #[derive(Clone)]
 pub struct HeartbeatHandle {
     clock: Arc<dyn Clock>,
-    senders: Arc<HashMap<String, mpsc::Sender<PingRequest>>>,
+    /// Replaced in place as [`Engine::reconcile`] adds and removes
+    /// heartbeats, so every clone sees the running set.
+    senders: Arc<RwLock<HashMap<String, mpsc::Sender<PingRequest>>>>,
 }
 
 impl Default for HeartbeatHandle {
@@ -254,7 +256,7 @@ impl Default for HeartbeatHandle {
 impl fmt::Debug for HeartbeatHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HeartbeatHandle")
-            .field("heartbeats", &self.senders.keys().collect::<Vec<_>>())
+            .field("heartbeats", &self.read().keys().collect::<Vec<_>>())
             .finish_non_exhaustive()
     }
 }
@@ -263,7 +265,16 @@ impl HeartbeatHandle {
     /// Whether a heartbeat has id `id`.
     #[must_use]
     pub fn knows(&self, id: &str) -> bool {
-        self.senders.contains_key(id)
+        self.read().contains_key(id)
+    }
+
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<String, mpsc::Sender<PingRequest>>> {
+        // Nothing done under the lock panics; carry on as `Shared::lock` does.
+        self.senders.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<String, mpsc::Sender<PingRequest>>> {
+        self.senders.write().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Records `ping` for heartbeat `id`, stamped with the engine's clock
@@ -277,7 +288,7 @@ impl HeartbeatHandle {
     /// No heartbeat has that id, the engine has stopped, or storing the
     /// result failed, in which case nothing changed; see [`PingError`].
     pub async fn ping(&self, id: &str, ping: Ping) -> Result<i64, PingError> {
-        let sender = self.senders.get(id).ok_or(PingError::Unknown)?;
+        let sender = self.read().get(id).cloned().ok_or(PingError::Unknown)?;
         let arrived_ms = self.clock.now_ms();
         let (ack, acked) = oneshot::channel();
         sender
@@ -308,121 +319,87 @@ struct PingRequest {
 pub struct Engine {
     shared: Arc<Shared>,
     heartbeats: HeartbeatHandle,
+    /// Stops the notices task.
     stop: watch::Sender<bool>,
-    tasks: Vec<(String, JoinHandle<()>)>,
+    notices: JoinHandle<()>,
+    /// Every running check and heartbeat, by id.
+    members: BTreeMap<String, Member>,
 }
 
 impl Engine {
     /// Starts running `plan`.
     ///
     /// Before any check runs it seeds every check's and heartbeat's state
-    /// from what this node recorded before a restart (see `seed_checks`),
-    /// resumes each heartbeat's deadline from its latest stored result (see
+    /// from what this node recorded before a restart (see `seed`), resumes
+    /// each heartbeat's deadline from its latest stored result (see
     /// `heartbeat_anchors`) and reads the current incidents and
     /// maintenance windows, so the first statuses are right. Seeding emits
-    /// nothing.
+    /// nothing. Outages left open for checks and heartbeats `plan` no
+    /// longer has are withdrawn, as [`Engine::reconcile`] does.
     ///
     /// # Errors
     ///
     /// A read fails.
     pub async fn start(plan: Plan, parts: Parts) -> Result<Engine, StartError> {
-        let start_ms = parts.clock.now_ms();
-        let mut seeds = seed_checks(&plan, parts.history.as_ref(), start_ms).await?;
-        let anchors = heartbeat_anchors(&plan, parts.history.as_ref()).await?;
         let notices = parts.notices.current().await.map_err(StartError::Notices)?;
-
-        let mut runs = Vec::with_capacity(plan.checks.len());
-        let mut checks = BTreeMap::new();
-        for compiled in &plan.checks {
-            let check = compiled.check();
-            let id = check.id.to_string();
-            let component = check.component.as_ref().map(ToString::to_string);
-            let Seed {
-                confirmation,
-                outage,
-            } = seeds
-                .remove(&id)
-                .unwrap_or_else(|| Seed::unknown(check.confirm));
-            checks.insert(
-                id.clone(),
-                CheckEntry {
-                    kind: MemberKind::Check,
-                    component: component.clone(),
-                    state: confirmation.state(),
-                    last: None,
-                },
-            );
-            runs.push(CheckRun {
-                compiled: Arc::clone(compiled),
-                tracker: Tracker {
-                    id,
-                    kind: MemberKind::Check,
-                    component,
-                    confirmation,
-                    outage,
-                },
-            });
-        }
-        let (beats, senders) = heartbeat_runs(&plan, &mut seeds, &anchors, start_ms, &mut checks);
-        let mut components = BTreeMap::new();
-        for (id, rule) in &plan.components {
-            let members = checks
-                .iter()
-                .filter(|(_, entry)| entry.component.as_deref() == Some(id))
-                .map(|(check, _)| check.clone())
-                .collect();
-            components.insert(
-                id.clone(),
-                ComponentEntry {
-                    rule: *rule,
-                    checks: members,
-                    health: None,
-                    status: ComponentStatus::Unknown,
-                },
-            );
-        }
-        let mut state = State {
-            checks,
-            components,
-            notices,
-        };
-        // The starting statuses are not changes, so nothing is emitted.
-        let _ = state.refresh_all(parts.clock.now_ms());
-
         let heartbeats = HeartbeatHandle {
             clock: Arc::clone(&parts.clock),
-            senders: Arc::new(senders),
+            senders: Arc::default(),
         };
         let shared = Arc::new(Shared {
-            node_id: plan.node_id,
+            node_id: plan.node_id.clone(),
             limit: Semaphore::new(plan.max_concurrent),
-            state: Mutex::new(state),
+            state: Mutex::new(State {
+                checks: BTreeMap::new(),
+                components: BTreeMap::new(),
+                notices,
+            }),
             notices_changed: Arc::new(Notify::new()),
             parts,
         });
+        let mut members = BTreeMap::new();
+        reconcile(&shared, &heartbeats, &mut members, &plan).await?;
         let (stop, stopped) = watch::channel(false);
-        let start = Instant::now();
-        let mut tasks = Vec::with_capacity(runs.len() + beats.len() + 1);
-        for run in runs {
-            let name = run.tracker.id.clone();
-            let handle = tokio::spawn(check_loop(Arc::clone(&shared), run, start, stopped.clone()));
-            tasks.push((name, handle));
-        }
-        for run in beats {
-            let name = run.tracker.id.clone();
-            let handle = tokio::spawn(heartbeat_loop(Arc::clone(&shared), run, stopped.clone()));
-            tasks.push((name, handle));
-        }
-        tasks.push((
-            "notices".to_owned(),
-            tokio::spawn(notices_loop(Arc::clone(&shared), stopped)),
-        ));
+        let notices = tokio::spawn(notices_loop(Arc::clone(&shared), stopped));
         Ok(Engine {
             shared,
             heartbeats,
             stop,
-            tasks,
+            notices,
+            members,
         })
+    }
+
+    /// Moves the running engine to `plan`, keyed by id:
+    ///
+    /// - A check or heartbeat `plan` adds is seeded from history as
+    ///   [`Engine::start`] seeds it, then started.
+    /// - One `plan` changes is stopped and started again with the state its
+    ///   task held: its confirmed state, its open outage and, for a
+    ///   heartbeat, its queued pings and the time of its latest result, from
+    ///   which its deadline is measured again with the new interval and
+    ///   grace. A new `confirm` keeps the confirmed state but starts the
+    ///   count towards the next change over. A check that becomes a
+    ///   heartbeat, or the reverse, is removed and added.
+    /// - One `plan` removes is stopped, and its open outage, if any, is
+    ///   withdrawn: ended now, its alerts ended without a resolve. Its
+    ///   results and past outages stay in history.
+    /// - Unchanged ones keep running untouched.
+    ///
+    /// Components are rebuilt from `plan`, and a status that moves because
+    /// of it is emitted; a new component's first status is not. The node id
+    /// and the concurrency limit are fixed when the engine starts, and
+    /// `plan`'s are ignored.
+    ///
+    /// Every read happens before anything is stopped, so an error leaves
+    /// the engine running its old plan. A task found to have panicked is
+    /// logged and left out; the next reconcile adds it again.
+    ///
+    /// # Errors
+    ///
+    /// Seeding an added check or heartbeat fails.
+    pub async fn reconcile(&mut self, plan: &Plan) -> Result<(), StartError> {
+        reconcile(&self.shared, &self.heartbeats, &mut self.members, plan).await
     }
 
     /// The current state of every check, heartbeat and component.
@@ -455,7 +432,9 @@ impl Engine {
     /// A handle that records heartbeat pings, for the write API. Like
     /// [`Engine::notices_handle`], it holds nothing that keeps the store
     /// open; once the engine stops, its pings fail with
-    /// [`PingError::Stopped`].
+    /// [`PingError::Stopped`]. It follows [`Engine::reconcile`]: a heartbeat
+    /// added later accepts pings through it, and one removed refuses them
+    /// as unknown.
     #[must_use]
     pub fn heartbeats(&self) -> HeartbeatHandle {
         self.heartbeats.clone()
@@ -465,13 +444,341 @@ impl Engine {
     /// flight abandons it; one already recording its result finishes
     /// recording first.
     pub async fn shutdown(self) {
-        // Every task holds a receiver until it ends, so this only fails once
-        // they have all ended already.
+        // Every task holds a receiver until it ends, so these only fail once
+        // they have ended already.
         let _ = self.stop.send(true);
-        for (name, handle) in self.tasks {
-            if let Err(join) = handle.await {
+        for member in self.members.values() {
+            let _ = member.stop.send(true);
+        }
+        for (name, member) in self.members {
+            if let Err(join) = member.task.await {
                 error!(task = %name, error = %join, "an engine task ended abnormally");
             }
+        }
+        if let Err(join) = self.notices.await {
+            error!(task = "notices", error = %join, "an engine task ended abnormally");
+        }
+    }
+}
+
+/// A running check or heartbeat: what it runs, and its task, which hands its
+/// state back when stopped.
+struct Member {
+    spec: Spec,
+    stop: watch::Sender<bool>,
+    task: JoinHandle<Run>,
+}
+
+impl fmt::Debug for Member {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Member")
+            .field("id", &self.spec.id())
+            .finish_non_exhaustive()
+    }
+}
+
+/// A check or heartbeat as configured.
+#[derive(Clone)]
+enum Spec {
+    Check(Arc<CompiledCheck>),
+    Heartbeat(Heartbeat),
+}
+
+impl Spec {
+    fn all(plan: &Plan) -> Vec<Spec> {
+        plan.checks
+            .iter()
+            .map(|compiled| Spec::Check(Arc::clone(compiled)))
+            .chain(plan.heartbeats.iter().cloned().map(Spec::Heartbeat))
+            .collect()
+    }
+
+    fn id(&self) -> String {
+        match self {
+            Spec::Check(compiled) => compiled.check().id.to_string(),
+            Spec::Heartbeat(heartbeat) => heartbeat.id.to_string(),
+        }
+    }
+
+    fn kind(&self) -> MemberKind {
+        match self {
+            Spec::Check(_) => MemberKind::Check,
+            Spec::Heartbeat(_) => MemberKind::Heartbeat,
+        }
+    }
+
+    fn component(&self) -> Option<String> {
+        match self {
+            Spec::Check(compiled) => compiled.check().component.as_ref(),
+            Spec::Heartbeat(heartbeat) => heartbeat.component.as_ref(),
+        }
+        .map(ToString::to_string)
+    }
+
+    /// How many agreeing results confirm a change.
+    fn confirm(&self) -> u32 {
+        match self {
+            Spec::Check(compiled) => compiled.check().confirm,
+            Spec::Heartbeat(_) => HEARTBEAT_CONFIRM,
+        }
+    }
+
+    /// How long after its latest `up` result it is still up; see `seed`.
+    fn up_window_ms(&self) -> i64 {
+        match self {
+            Spec::Check(compiled) => up_window_ms(compiled.check()),
+            Spec::Heartbeat(heartbeat) => allowance_ms(heartbeat),
+        }
+    }
+
+    /// Whether `other` is configured exactly as this one is.
+    fn same(&self, other: &Spec) -> bool {
+        match (self, other) {
+            (Spec::Check(this), Spec::Check(other)) => this.check() == other.check(),
+            (Spec::Heartbeat(this), Spec::Heartbeat(other)) => this == other,
+            _ => false,
+        }
+    }
+}
+
+/// A member's private state, which its task owns while it runs.
+enum Run {
+    Check(CheckRun),
+    Heartbeat(HeartbeatRun),
+}
+
+impl Run {
+    fn tracker(&self) -> &Tracker {
+        match self {
+            Run::Check(run) => &run.tracker,
+            Run::Heartbeat(run) => &run.tracker,
+        }
+    }
+
+    /// The same member's state, carried over to `spec`, a changed
+    /// configuration of the same kind.
+    fn carry_over(self, spec: &Spec) -> Run {
+        match (self, spec) {
+            (Run::Check(mut run), Spec::Check(compiled)) => {
+                let confirm = compiled.check().confirm;
+                if confirm != run.compiled.check().confirm {
+                    run.tracker.confirmation = match run.tracker.confirmation.state() {
+                        Some(state) => Confirmation::resume(confirm, state.health, state.since_ms),
+                        None => Confirmation::new(confirm),
+                    };
+                }
+                run.tracker.component = spec.component();
+                run.compiled = Arc::clone(compiled);
+                Run::Check(run)
+            }
+            (Run::Heartbeat(mut run), Spec::Heartbeat(heartbeat)) => {
+                // The deadline was measured from the latest result (or, after
+                // a miss the engine slept through, from when it woke); measure
+                // the new allowance from the same point. A miss waiting to be
+                // stored again is due again only if the new deadline passed.
+                let anchor_ms = run.deadline_ms.saturating_sub(run.allowance_ms);
+                run.allowance_ms = allowance_ms(heartbeat);
+                run.deadline_ms = anchor_ms.saturating_add(run.allowance_ms);
+                run.retry = None;
+                run.tracker.component = spec.component();
+                run.heartbeat = heartbeat.clone();
+                Run::Heartbeat(run)
+            }
+            (run, _) => run,
+        }
+    }
+}
+
+/// Moves `members` to `plan`; see [`Engine::reconcile`].
+async fn reconcile(
+    shared: &Arc<Shared>,
+    heartbeats: &HeartbeatHandle,
+    members: &mut BTreeMap<String, Member>,
+    plan: &Plan,
+) -> Result<(), StartError> {
+    let specs = Spec::all(plan);
+    let mut added = Vec::new();
+    let mut changed = Vec::new();
+    for spec in &specs {
+        match members.get(&spec.id()) {
+            Some(member) if member.spec.same(spec) => {}
+            Some(member) if member.spec.kind() == spec.kind() => changed.push(spec.clone()),
+            _ => added.push(spec.clone()),
+        }
+    }
+    let wanted: HashMap<String, MemberKind> =
+        specs.iter().map(|spec| (spec.id(), spec.kind())).collect();
+    let removed: Vec<String> = members
+        .iter()
+        .filter(|(id, member)| wanted.get(*id) != Some(&member.spec.kind()))
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    // Every read, before anything stops.
+    let now_ms = shared.parts.clock.now_ms();
+    let history = shared.parts.history.as_ref();
+    let mut seeds = seed(history, &shared.node_id, &added, now_ms).await?;
+    let anchors = heartbeat_anchors(history, &shared.node_id, &added).await?;
+
+    // New pings for a removed heartbeat are refused as unknown from here;
+    // a changed one's keep queueing for its next task.
+    {
+        let mut senders = heartbeats.write();
+        for id in &removed {
+            senders.remove(id);
+        }
+    }
+    let changed_ids: Vec<String> = changed.iter().map(Spec::id).collect();
+    let mut handed_back = stop(members, removed.iter().chain(&changed_ids)).await;
+
+    let running: HashSet<(SubjectKind, String)> = specs
+        .iter()
+        .map(|spec| (subject_kind(spec.kind()), spec.id()))
+        .collect();
+    withdraw_orphans(shared, &running).await;
+
+    let start_ms = shared.parts.clock.now_ms();
+    let mut runs = Vec::with_capacity(added.len() + changed.len());
+    let mut panicked = Vec::new();
+    for spec in &changed {
+        match handed_back.remove(&spec.id()) {
+            Some(run) => runs.push((spec.clone(), run.carry_over(spec))),
+            None => panicked.push(spec.id()),
+        }
+    }
+    let mut new_senders = Vec::new();
+    for spec in &added {
+        let seed = seeds
+            .remove(&spec.id())
+            .unwrap_or_else(|| Seed::unknown(spec.confirm()));
+        let (run, sender) = new_run(spec, seed, &anchors, start_ms);
+        if let Some(sender) = sender {
+            new_senders.push((spec.id(), sender));
+        }
+        runs.push((spec.clone(), run));
+    }
+
+    let gone: Vec<&String> = removed.iter().chain(&panicked).collect();
+    publish(
+        shared,
+        &gone,
+        runs.iter().map(|(_, run)| run.tracker()),
+        plan,
+    );
+    heartbeats.write().extend(new_senders);
+    let start = Instant::now();
+    for (spec, run) in runs {
+        let (stop, stopped) = watch::channel(false);
+        let shared = Arc::clone(shared);
+        let task =
+            match run {
+                Run::Check(run) => tokio::spawn(async move {
+                    Run::Check(check_loop(shared, run, start, stopped).await)
+                }),
+                Run::Heartbeat(run) => tokio::spawn(async move {
+                    Run::Heartbeat(heartbeat_loop(shared, run, stopped).await)
+                }),
+            };
+        members.insert(spec.id(), Member { spec, stop, task });
+    }
+    Ok(())
+}
+
+/// Stops the members with `ids` and waits for them, returning the state
+/// each handed back. A task that panicked is logged and left out.
+async fn stop<'a>(
+    members: &mut BTreeMap<String, Member>,
+    ids: impl Iterator<Item = &'a String>,
+) -> HashMap<String, Run> {
+    let stopping: Vec<(String, Member)> = ids.filter_map(|id| members.remove_entry(id)).collect();
+    for (_, member) in &stopping {
+        // The task holds the receiver until it ends.
+        let _ = member.stop.send(true);
+    }
+    let mut handed_back = HashMap::with_capacity(stopping.len());
+    for (id, member) in stopping {
+        match member.task.await {
+            Ok(run) => {
+                handed_back.insert(id, run);
+            }
+            Err(join) => error!(
+                task = %id,
+                error = %join,
+                "an engine task ended abnormally; it is left out until the next reload or restart"
+            ),
+        }
+    }
+    handed_back
+}
+
+/// Shows the reconciled members in the shared state: drops those `gone`,
+/// enters each of `trackers` (a changed one keeping its latest raw result),
+/// rebuilds the components from `plan` and emits the statuses that moved.
+fn publish<'a>(
+    shared: &Shared,
+    gone: &[&String],
+    trackers: impl Iterator<Item = &'a Tracker>,
+    plan: &Plan,
+) {
+    let mut state = shared.lock();
+    for id in gone {
+        state.checks.remove(*id);
+    }
+    for tracker in trackers {
+        let last = state.checks.get(&tracker.id).and_then(|entry| entry.last);
+        state.checks.insert(
+            tracker.id.clone(),
+            CheckEntry {
+                kind: tracker.kind,
+                component: tracker.component.clone(),
+                state: tracker.confirmation.state(),
+                last,
+            },
+        );
+    }
+    for change in state.rebuild_components(&plan.components, shared.parts.clock.now_ms()) {
+        shared.emit(EngineEvent::ComponentChanged(change));
+    }
+}
+
+/// Withdraws every outage this node has open for a check or heartbeat not
+/// in `running`, so it neither stays open forever nor ends with a resolve
+/// claiming a recovery nobody saw. A failure is logged, and the outage is
+/// tried again at the next reconcile or start.
+async fn withdraw_orphans(shared: &Shared, running: &HashSet<(SubjectKind, String)>) {
+    let history = shared.parts.history.as_ref();
+    let open = match history.open_outages(&shared.node_id).await {
+        Ok(open) => open,
+        Err(error) => {
+            error!(
+                %error,
+                "reading open outages failed, so those of removed checks and heartbeats stay \
+                 open until the next reload or restart"
+            );
+            return;
+        }
+    };
+    let now_ms = shared.parts.clock.now_ms();
+    for outage in open
+        .into_iter()
+        .filter(|outage| !running.contains(&(outage.subject_kind, outage.check_id.clone())))
+    {
+        match history.withdraw(outage.id, now_ms).await {
+            Ok(()) => info!(
+                kind = %outage.subject_kind,
+                check = %outage.check_id,
+                outage = outage.id,
+                "withdrew the open outage of a check or heartbeat that is no longer configured; \
+                 its alerts end without a resolve"
+            ),
+            Err(error) => error!(
+                kind = %outage.subject_kind,
+                check = %outage.check_id,
+                outage = outage.id,
+                %error,
+                "withdrawing the open outage of a check or heartbeat that is no longer \
+                 configured failed; it stays open until the next reload or restart"
+            ),
         }
     }
 }
@@ -565,68 +872,57 @@ impl Seed {
     }
 }
 
-/// Each heartbeat's run and the sender its pings arrive on, entering each
-/// in `checks` as a member of its component.
-fn heartbeat_runs(
-    plan: &Plan,
-    seeds: &mut HashMap<String, Seed>,
+/// A new member's run, from its seed and, for a heartbeat, its anchor (see
+/// `heartbeat_anchors`), with the sender a heartbeat's pings arrive on.
+fn new_run(
+    spec: &Spec,
+    seed: Seed,
     anchors: &HashMap<String, i64>,
     start_ms: i64,
-    checks: &mut BTreeMap<String, CheckEntry>,
-) -> (
-    Vec<HeartbeatRun>,
-    HashMap<String, mpsc::Sender<PingRequest>>,
-) {
-    let mut beats = Vec::with_capacity(plan.heartbeats.len());
-    let mut senders = HashMap::with_capacity(plan.heartbeats.len());
-    for heartbeat in &plan.heartbeats {
-        let id = heartbeat.id.to_string();
-        let component = heartbeat.component.as_ref().map(ToString::to_string);
-        let Seed {
-            confirmation,
-            outage,
-        } = seeds
-            .remove(&id)
-            .unwrap_or_else(|| Seed::unknown(HEARTBEAT_CONFIRM));
-        checks.insert(
-            id.clone(),
-            CheckEntry {
-                kind: MemberKind::Heartbeat,
-                component: component.clone(),
-                state: confirmation.state(),
-                last: None,
-            },
-        );
-        let (sender, pings) = mpsc::channel(PING_QUEUE);
-        senders.insert(id.clone(), sender);
-        let allowance_ms = allowance_ms(heartbeat);
-        // Measured from the latest stored result, so a restart does not
-        // reset the clock; a heartbeat that never reported is measured
-        // from now.
-        let anchor = anchors.get(&id).copied();
-        let anchor_ms = anchor.unwrap_or(start_ms);
-        beats.push(HeartbeatRun {
-            heartbeat: heartbeat.clone(),
-            tracker: Tracker {
-                id,
-                kind: MemberKind::Heartbeat,
-                component,
-                confirmation,
-                outage,
-            },
-            allowance_ms,
-            deadline_ms: anchor_ms.saturating_add(allowance_ms),
-            last_ms: anchor.unwrap_or(i64::MIN),
-            retry: None,
-            pings,
-        });
+) -> (Run, Option<mpsc::Sender<PingRequest>>) {
+    let Seed {
+        confirmation,
+        outage,
+    } = seed;
+    let tracker = Tracker {
+        id: spec.id(),
+        kind: spec.kind(),
+        component: spec.component(),
+        confirmation,
+        outage,
+    };
+    match spec {
+        Spec::Check(compiled) => (
+            Run::Check(CheckRun {
+                compiled: Arc::clone(compiled),
+                tracker,
+            }),
+            None,
+        ),
+        Spec::Heartbeat(heartbeat) => {
+            let (sender, pings) = mpsc::channel(PING_QUEUE);
+            let allowance_ms = allowance_ms(heartbeat);
+            // Measured from the latest stored result, so a restart does not
+            // reset the clock; a heartbeat that never reported is measured
+            // from now.
+            let anchor = anchors.get(&tracker.id).copied();
+            let anchor_ms = anchor.unwrap_or(start_ms);
+            let run = HeartbeatRun {
+                heartbeat: heartbeat.clone(),
+                tracker,
+                allowance_ms,
+                deadline_ms: anchor_ms.saturating_add(allowance_ms),
+                last_ms: anchor.unwrap_or(i64::MIN),
+                retry: None,
+                pings,
+            };
+            (Run::Heartbeat(run), Some(sender))
+        }
     }
-    (beats, senders)
 }
 
-/// Seeds every check and heartbeat in `plan` from what `history` holds for
-/// this node, so a restart (or a reload) neither forgets a state nor
-/// repeats a change:
+/// Seeds every one of `specs` from what `history` holds for `node_id`, so
+/// a restart (or a reload) neither forgets a state nor repeats a change:
 ///
 /// - One with an open outage resumes in that outage's state, since it
 ///   began, and the outage stays open.
@@ -638,37 +934,19 @@ fn heartbeat_runs(
 ///   since no deadline has passed since that ping.
 /// - Any other starts with no state.
 ///
-/// Outages open for checks or heartbeats no longer configured are left
-/// open, with a warning.
-async fn seed_checks(
-    plan: &Plan,
+/// An outage resumes only for the kind it was opened for. Those left over
+/// are withdrawn by `withdraw_orphans` once nothing else can claim them.
+async fn seed(
     history: &dyn History,
+    node_id: &str,
+    specs: &[Spec],
     now_ms: i64,
 ) -> Result<HashMap<String, Seed>, StartError> {
-    // (kind, id, confirm, how long an up result keeps it up)
-    let members: Vec<(SubjectKind, String, u32, i64)> = plan
-        .checks
-        .iter()
-        .map(|compiled| {
-            let check = compiled.check();
-            (
-                SubjectKind::Check,
-                check.id.to_string(),
-                check.confirm,
-                up_window_ms(check),
-            )
-        })
-        .chain(plan.heartbeats.iter().map(|heartbeat| {
-            (
-                SubjectKind::Heartbeat,
-                heartbeat.id.to_string(),
-                HEARTBEAT_CONFIRM,
-                allowance_ms(heartbeat),
-            )
-        }))
-        .collect();
+    if specs.is_empty() {
+        return Ok(HashMap::new());
+    }
     let open = history
-        .open_outages(&plan.node_id)
+        .open_outages(node_id)
         .await
         .map_err(StartError::Outages)?;
     // An outage resumes only the kind it was opened for: a check that
@@ -677,22 +955,24 @@ async fn seed_checks(
         .into_iter()
         .map(|outage| ((outage.subject_kind, outage.check_id.clone()), outage))
         .collect();
-    let without_outage = members
+    let without_outage = specs
         .iter()
-        .filter(|(kind, id, _, _)| !open.contains_key(&(*kind, id.clone())))
-        .map(|(_, id, _, _)| id.clone())
+        .filter(|spec| !open.contains_key(&(subject_kind(spec.kind()), spec.id())))
+        .map(Spec::id)
         .collect();
     let last_up: HashMap<String, LastUp> = history
-        .last_up(&plan.node_id, without_outage)
+        .last_up(node_id, without_outage)
         .await
         .map_err(StartError::Results)?
         .into_iter()
         .map(|last| (last.check_id.clone(), last))
         .collect();
 
-    let mut seeds = HashMap::with_capacity(members.len());
-    for (kind, id, confirm, window_ms) in members {
-        let seed = if let Some(outage) = open.remove(&(kind, id.clone())) {
+    let mut seeds = HashMap::with_capacity(specs.len());
+    for spec in specs {
+        let id = spec.id();
+        let confirm = spec.confirm();
+        let seed = if let Some(outage) = open.remove(&(subject_kind(spec.kind()), id.clone())) {
             Seed {
                 confirmation: Confirmation::resume(confirm, outage.health, outage.started_at_ms),
                 outage: Some(OpenOutage {
@@ -702,7 +982,7 @@ async fn seed_checks(
             }
         } else if let Some(last) = last_up
             .get(&id)
-            .filter(|last| now_ms.saturating_sub(last.last_up_ms) <= window_ms)
+            .filter(|last| now_ms.saturating_sub(last.last_up_ms) <= spec.up_window_ms())
         {
             Seed {
                 confirmation: Confirmation::resume(confirm, Health::Up, last.since_ms),
@@ -713,31 +993,26 @@ async fn seed_checks(
         };
         seeds.insert(id, seed);
     }
-    for outage in open.values() {
-        warn!(
-            kind = %outage.subject_kind,
-            check = %outage.check_id,
-            outage = outage.id,
-            "an outage is open for a check or heartbeat that is no longer configured; leaving it \
-             open"
-        );
-    }
     Ok(seeds)
 }
 
-/// When each heartbeat in `plan` last recorded a result on this node, ping
-/// or miss (unix milliseconds). Its deadline resumes from there.
+/// When each heartbeat among `specs` last recorded a result on `node_id`,
+/// ping or miss (unix milliseconds). Its deadline resumes from there.
 async fn heartbeat_anchors(
-    plan: &Plan,
     history: &dyn History,
+    node_id: &str,
+    specs: &[Spec],
 ) -> Result<HashMap<String, i64>, StartError> {
-    let ids = plan
-        .heartbeats
+    let ids: Vec<String> = specs
         .iter()
-        .map(|heartbeat| heartbeat.id.to_string())
+        .filter(|spec| spec.kind() == MemberKind::Heartbeat)
+        .map(Spec::id)
         .collect();
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
     Ok(history
-        .latest_results(&plan.node_id, ids)
+        .latest_results(node_id, ids)
         .await
         .map_err(StartError::Results)?
         .into_iter()
@@ -825,6 +1100,46 @@ impl State {
         })
     }
 
+    /// Rebuilds the components from `rules` and the checks' components,
+    /// and returns the changes in status of those that existed before; a
+    /// new component's first status is not a change.
+    fn rebuild_components(
+        &mut self,
+        rules: &[(String, ComponentRule)],
+        now_ms: i64,
+    ) -> Vec<ComponentChange> {
+        let mut components = BTreeMap::new();
+        let mut new = HashSet::new();
+        for (id, rule) in rules {
+            let members = self
+                .checks
+                .iter()
+                .filter(|(_, entry)| entry.component.as_deref() == Some(id))
+                .map(|(check, _)| check.clone())
+                .collect();
+            let (health, status) = if let Some(entry) = self.components.get(id) {
+                (entry.health, entry.status)
+            } else {
+                new.insert(id.clone());
+                (None, ComponentStatus::Unknown)
+            };
+            components.insert(
+                id.clone(),
+                ComponentEntry {
+                    rule: *rule,
+                    checks: members,
+                    health,
+                    status,
+                },
+            );
+        }
+        self.components = components;
+        self.refresh_all(now_ms)
+            .into_iter()
+            .filter(|change| !new.contains(&change.component_id))
+            .collect()
+    }
+
     fn refresh_all(&mut self, now_ms: i64) -> Vec<ComponentChange> {
         let ids: Vec<String> = self.components.keys().cloned().collect();
         ids.iter()
@@ -858,8 +1173,8 @@ impl State {
     }
 }
 
-/// Runs one check forever: first at the start plus its jitter, then every
-/// interval. A run that cannot start on time because every slot is taken
+/// Runs one check until it is stopped, then hands its state back: first at
+/// the start plus its jitter, then every interval. A run that cannot start on time because every slot is taken
 /// starts late, and the ticks it overran are skipped rather than run in a
 /// burst.
 async fn check_loop(
@@ -867,22 +1182,23 @@ async fn check_loop(
     mut run: CheckRun,
     start: Instant,
     mut stopped: watch::Receiver<bool>,
-) {
-    let check = run.compiled.check();
+) -> CheckRun {
+    let compiled = Arc::clone(&run.compiled);
+    let check = compiled.check();
     let interval = check.interval.get();
     let mut ticks = tokio::time::interval_at(start + jitter(check.id.as_str(), interval), interval);
     ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             _ = ticks.tick() => {}
-            _ = stopped.changed() => return,
+            _ = stopped.changed() => return run,
         }
         let outcome = tokio::select! {
-            outcome = probe(&shared, &run.compiled) => outcome,
-            _ = stopped.changed() => return,
+            outcome = probe(&shared, &compiled) => outcome,
+            _ = stopped.changed() => return run,
         };
         let Some(outcome) = outcome else {
-            return;
+            return run;
         };
         let result = new_result(&shared.node_id, &run.tracker.id, &outcome);
         if let Err(error) = record(&shared, &mut run.tracker, result).await {
@@ -896,7 +1212,8 @@ async fn check_loop(
     }
 }
 
-/// Runs one heartbeat until the engine stops: records each ping it is
+/// Runs one heartbeat until it is stopped, then hands its state back, queued
+/// pings included: records each ping it is
 /// handed, stamped with when it arrived, and a down result whenever its
 /// deadline passes first, stamped with the deadline. A result moves the
 /// deadline only once it is stored: a ping's to its own time plus
@@ -916,7 +1233,7 @@ async fn heartbeat_loop(
     shared: Arc<Shared>,
     mut run: HeartbeatRun,
     mut stopped: watch::Receiver<bool>,
-) {
+) -> HeartbeatRun {
     loop {
         let wake = if let Some((at, _)) = run.retry {
             at
@@ -927,10 +1244,10 @@ async fn heartbeat_loop(
         };
         tokio::select! {
             biased;
-            _ = stopped.changed() => return,
+            _ = stopped.changed() => return run,
             request = run.pings.recv() => {
                 let Some(PingRequest { ping, arrived_ms, ack }) = request else {
-                    return;
+                    return run;
                 };
                 let taken = take_ping(&shared, &mut run, &ping, arrived_ms).await;
                 // The sender may have given up waiting; the ping stands.

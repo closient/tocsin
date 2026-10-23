@@ -664,3 +664,79 @@ async fn a_large_prune_deletes_in_chunks() {
     );
     assert_eq!(store.alerts().await.unwrap().len(), 0);
 }
+
+#[tokio::test]
+async fn withdrawing_an_outage_ends_its_alerts_without_a_resolve() {
+    let Fixture { _dir, store, .. } = open();
+    let id = open_outage(
+        &store,
+        None,
+        outage(Health::Down, T0, true),
+        ringing(
+            vec![target("slack", Some(60_000)), target("pushover", None)],
+            &["pushover"],
+        ),
+    )
+    .await;
+    drain(&store, T0).await;
+
+    // The check was removed: the pushover emergency that rang is cancelled,
+    // and neither notifier hears that the check recovered, because it did
+    // not.
+    assert_eq!(store.withdraw_outage(id, T0 + 90_000).await.unwrap(), 1);
+    assert_eq!(store.open_outages("node-a").await.unwrap(), []);
+    for alert in store.alerts().await.unwrap() {
+        assert_eq!(alert.ended_at_ms, Some(T0 + 90_000));
+        assert!(!alert.ringing);
+    }
+    let sent = drain(&store, T0 + 90_000).await;
+    let kinds: Vec<_> = sent
+        .iter()
+        .map(|(notifier, kind, _, _)| (notifier.as_str(), *kind))
+        .collect();
+    assert_eq!(kinds, [("pushover", DeliveryKind::Cancel)]);
+    // No repeat follows, however long it waits.
+    assert_eq!(store.queue_repeats(T0 + 999_000).await.unwrap(), 0);
+
+    // Withdrawing it again changes nothing.
+    assert_eq!(store.withdraw_outage(id, T0 + 99_000).await.unwrap(), 0);
+    let alerts = store.alerts().await.unwrap();
+    assert!(
+        alerts
+            .iter()
+            .all(|alert| alert.ended_at_ms == Some(T0 + 90_000))
+    );
+}
+
+#[tokio::test]
+async fn alerts_whose_notifier_is_gone_end_without_queueing_anything() {
+    let Fixture { _dir, store, .. } = open();
+    let id = open_outage(
+        &store,
+        None,
+        outage(Health::Down, T0, true),
+        routing(vec![
+            target("slack", Some(60_000)),
+            target("gone", Some(60_000)),
+        ]),
+    )
+    .await;
+    drain(&store, T0).await;
+
+    let ended = store
+        .end_alerts_without_notifier(vec!["slack".into()], T0 + 30_000)
+        .await
+        .unwrap();
+    assert_eq!(ended, 1);
+    assert_eq!(store.outbox().await.unwrap().pending.len(), 0);
+    // Only the kept notifier repeats, and only it hears the recovery.
+    assert_eq!(store.queue_repeats(T0 + 60_000).await.unwrap(), 1);
+    drain(&store, T0 + 60_000).await;
+    assert_eq!(recover(&store, id, T0 + 90_000).await, 1);
+    let sent = drain(&store, T0 + 90_000).await;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        (sent[0].0.as_str(), sent[0].1),
+        ("slack", DeliveryKind::Resolve)
+    );
+}

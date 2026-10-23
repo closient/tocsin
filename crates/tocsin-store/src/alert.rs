@@ -322,16 +322,7 @@ fn apply_alerting_change(
             subject_kind: open.subject_kind,
             subject_id: open.check_id.clone(),
         }),
-        (None, Some(end)) => transaction
-            .prepare_cached("SELECT node_id, subject_kind, check_id FROM outage WHERE id = ?1")?
-            .query_row(params![end.id], |row| {
-                Ok(Identity {
-                    node_id: row.get(0)?,
-                    subject_kind: parse_column(1, &row.get::<_, String>(1)?)?,
-                    subject_id: row.get(2)?,
-                })
-            })
-            .optional()?,
+        (None, Some(end)) => outage_identity(transaction, end.id, false)?,
         (None, None) => None,
     };
     let id = apply_outage_change(transaction, change)?;
@@ -351,7 +342,13 @@ fn apply_alerting_change(
             )?,
             _ => {
                 let ended_at_ms = change.end.map_or(now_ms, |end| end.ended_at_ms);
-                end_alerts(transaction, &open_alerts, ended_at_ms, now_ms)?
+                end_alerts(
+                    transaction,
+                    &open_alerts,
+                    ended_at_ms,
+                    now_ms,
+                    Ending::Recovered,
+                )?
             }
         }
     } else {
@@ -361,6 +358,97 @@ fn apply_alerting_change(
         opened: change.open.as_ref().map(|_| id),
         queued,
     })
+}
+
+/// The identity outage `id` alerts for; with `open_only`, only while the
+/// outage is open.
+fn outage_identity(conn: &Connection, id: i64, open_only: bool) -> Result<Option<Identity>> {
+    Ok(conn
+        .prepare_cached(
+            "SELECT node_id, subject_kind, check_id FROM outage
+             WHERE id = ?1 AND (?2 = 0 OR ended_at IS NULL)",
+        )?
+        .query_row(params![id, open_only], |row| {
+            Ok(Identity {
+                node_id: row.get(0)?,
+                subject_kind: parse_column(1, &row.get::<_, String>(1)?)?,
+                subject_id: row.get(2)?,
+            })
+        })
+        .optional()?)
+}
+
+/// Ends outage `id`, whose check or heartbeat is no longer configured, at
+/// `now_ms` (or its start, if that is later), and ends its alerts without
+/// resolving them, in one transaction. Returns the deliveries queued, or
+/// zero if the outage was not open.
+pub(crate) fn withdraw_outage(conn: &mut Connection, id: i64, now_ms: i64) -> Result<usize> {
+    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let Some(identity) = outage_identity(&transaction, id, true)? else {
+        return Ok(0);
+    };
+    transaction
+        .prepare_cached("UPDATE outage SET ended_at = max(?2, started_at) WHERE id = ?1")?
+        .execute(params![id, now_ms])?;
+    let open_alerts = open_alerts(&transaction, &identity)?;
+    let queued = end_alerts(
+        &transaction,
+        &open_alerts,
+        now_ms,
+        now_ms,
+        Ending::Withdrawn,
+    )?;
+    transaction.commit()?;
+    Ok(queued)
+}
+
+/// Ends every open alert whose notifier is not among `notifiers`, at
+/// `now_ms`, queueing nothing: there is no notifier to send a resolve
+/// through. Deliveries already queued for those alerts stay queued, and the
+/// worker abandons each one as it comes due. Returns the alerts ended.
+pub(crate) fn end_alerts_without_notifier(
+    conn: &mut Connection,
+    notifiers: &[String],
+    now_ms: i64,
+) -> Result<usize> {
+    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let orphans: Vec<i64> = {
+        let mut statement = transaction
+            .prepare_cached("SELECT id, notifier_id FROM alert WHERE ended_at IS NULL")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut orphans = Vec::new();
+        for row in rows {
+            let (id, notifier) = row?;
+            if !notifiers.contains(&notifier) {
+                orphans.push(id);
+            }
+        }
+        orphans
+    };
+    for id in &orphans {
+        transaction
+            .prepare_cached(
+                "UPDATE alert SET ended_at = max(?2, started_at), next_repeat_at = NULL,
+                     ringing = 0
+                 WHERE id = ?1",
+            )?
+            .execute(params![id, now_ms])?;
+    }
+    transaction.commit()?;
+    Ok(orphans.len())
+}
+
+/// How [`end_alerts`] ends an identity's alerts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// The check or heartbeat recovered: each alert resolves.
+    Recovered,
+    /// The check or heartbeat is no longer configured, so nobody saw it
+    /// recover: each alert ends without a resolve, which would claim a
+    /// recovery that never happened.
+    Withdrawn,
 }
 
 /// The outage an alerting change opened, and the identity it fires for.
@@ -464,7 +552,8 @@ fn fire_alerts(
 }
 
 /// A recovery: every alert firing for the identity ends and resolves, and
-/// one that rang gets a cancel beside its resolve. An outage that opens
+/// one that rang gets a cancel beside its resolve. A withdrawal ends them
+/// the same way, cancel included, but queues no resolve. An outage that opens
 /// without alerting cannot follow one that alerted (the engine keeps an
 /// alerted episode alerted until it recovers), but if it ever did, its
 /// alerts end here too rather than fire forever. Returns the deliveries
@@ -474,6 +563,7 @@ fn end_alerts(
     open_alerts: &[OpenAlert],
     ended_at_ms: i64,
     now_ms: i64,
+    ending: Ending,
 ) -> Result<usize> {
     let mut queued = 0;
     for alert in open_alerts {
@@ -495,14 +585,16 @@ fn end_alerts(
             )?;
             queued += 1;
         }
-        queue(
-            transaction,
-            alert.id,
-            DeliveryKind::Resolve,
-            alert.health,
-            now_ms,
-        )?;
-        queued += 1;
+        if ending == Ending::Recovered {
+            queue(
+                transaction,
+                alert.id,
+                DeliveryKind::Resolve,
+                alert.health,
+                now_ms,
+            )?;
+            queued += 1;
+        }
     }
     Ok(queued)
 }

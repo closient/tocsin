@@ -923,6 +923,14 @@ impl tocsin_engine::ports::History for RefusingHistory {
     {
         Box::pin(self.0.latest_results(node_id, check_ids))
     }
+
+    fn withdraw(
+        &self,
+        outage: i64,
+        at_ms: i64,
+    ) -> tocsin_engine::ports::BoxFuture<'_, tocsin_store::Result<()>> {
+        Box::pin(async move { self.0.withdraw_outage(outage, at_ms).await.map(drop) })
+    }
 }
 
 /// A ping is acknowledged only once it is stored: a failed write is a 500,

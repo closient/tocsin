@@ -7,10 +7,12 @@
 //!
 //! One thread owns the only write connection and is fed through a channel;
 //! reads go to a small pool of read connections. The database runs in WAL
-//! mode, so reads never wait for writes. Every timestamp is `i64` unix
+//! mode, so reads never wait for writes, and a second thread checkpoints the
+//! log so writes never wait for a checkpoint. Every timestamp is `i64` unix
 //! milliseconds, UTC; see [`day`]. The schema is documented in
 //! `docs/storage.md`.
 
+mod checkpoint;
 pub mod day;
 mod error;
 mod incident;
@@ -30,6 +32,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use tocsin_core::Health;
 use tocsin_core::incident::{Actor, Incident, IncidentEdit, NewIncident, NewUpdate, Timestamp};
 
+use crate::checkpoint::Checkpointer;
 pub use crate::day::Day;
 pub use crate::error::{Error, Result};
 pub use crate::incident::OpenIncident;
@@ -201,6 +204,7 @@ pub struct Store {
     path: PathBuf,
     writer: Writer,
     readers: Arc<Readers>,
+    checkpointer: Checkpointer,
 }
 
 impl Store {
@@ -215,11 +219,13 @@ impl Store {
     pub fn open(path: &Path) -> Result<Store> {
         let conn = schema::open_writer(path)?;
         let readers = Readers::open(path, READERS)?;
-        let writer = Writer::spawn(conn)?;
+        let (checkpointer, nudge) = Checkpointer::spawn(schema::open_checkpointer(path)?)?;
+        let writer = Writer::spawn(conn, nudge)?;
         Ok(Store {
             path: path.to_owned(),
             writer,
             readers,
+            checkpointer,
         })
     }
 
@@ -603,18 +609,32 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// The writer thread panicked.
+    /// The writer thread ([`Error::WriterThreadPanicked`]) or the
+    /// checkpointer thread ([`Error::CheckpointerPanicked`]) panicked.
     pub async fn close(self) -> Result<()> {
         let Store {
-            writer, readers, ..
+            writer,
+            readers,
+            checkpointer,
+            ..
         } = self;
         drop(readers);
         let thread = writer.close();
-        tokio::task::spawn_blocking(move || thread.join())
+        // The writer thread's end stops the checkpointer, whose connection
+        // closes last and so checkpoints and removes the log.
+        tokio::task::spawn_blocking(move || join(thread, checkpointer))
             .await
             .map_err(|_| Error::Closed)?
-            .map_err(|_| Error::Closed)
     }
+}
+
+/// Waits for the writer thread, then the checkpointer, and names the first
+/// that panicked.
+fn join(writer: std::thread::JoinHandle<()>, checkpointer: Checkpointer) -> Result<()> {
+    let writer = writer.join();
+    let checkpointer = checkpointer.join();
+    writer.map_err(|_| Error::WriterThreadPanicked)?;
+    checkpointer.map_err(|_| Error::CheckpointerPanicked)
 }
 
 /// The current time as unix milliseconds, UTC.

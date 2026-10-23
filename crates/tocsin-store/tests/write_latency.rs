@@ -3,7 +3,8 @@
 //! Write-latency bench: 100 checks appending results while retention purges
 //! a backlog and a reader polls the status query.
 //!
-//! Ignored by default; CI runs it pinned to one core, informationally:
+//! Ignored by default; CI runs it pinned to one core and fails the build if
+//! the p99 is over [`P99_BUDGET`]:
 //!
 //! ```text
 //! taskset -c 0 cargo test --release -p tocsin-store --test write_latency -- --ignored --nocapture
@@ -94,10 +95,17 @@ async fn run_check(
 }
 
 /// Runs the status page's query (each check's latest result) every 100 ms;
-/// returns how many ran.
-async fn poll_status(store: std::sync::Arc<Store>, run_for: Duration) -> u32 {
+/// returns how many ran, the log file's size before the first (the seed's
+/// one large transaction) and the largest it was after one.
+async fn poll_status(
+    store: std::sync::Arc<Store>,
+    log: std::path::PathBuf,
+    run_for: Duration,
+) -> (u32, u64, u64) {
     let deadline = Instant::now() + run_for;
     let mut reads = 0;
+    let seeded = log_bytes(&log);
+    let mut largest = 0;
     while Instant::now() < deadline {
         store
             .read(|conn| {
@@ -112,9 +120,14 @@ async fn poll_status(store: std::sync::Arc<Store>, run_for: Duration) -> u32 {
             .await
             .unwrap();
         reads += 1;
+        largest = largest.max(log_bytes(&log));
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    reads
+    (reads, seeded, largest)
+}
+
+fn log_bytes(log: &std::path::Path) -> u64 {
+    std::fs::metadata(log).map_or(0, |metadata| metadata.len())
 }
 
 /// Prints the summary and appends it to the GitHub job summary when set.
@@ -145,7 +158,7 @@ fn p99_append_latency_under_load() {
         .enable_all()
         .build()
         .unwrap();
-    let (latencies, retention, reads) = runtime.block_on(async {
+    let (latencies, retention, (reads, seeded_log, largest_log)) = runtime.block_on(async {
         let store = std::sync::Arc::new(Store::open(&path).unwrap());
         seed_backlog(&path, tocsin_store::now_ms());
 
@@ -158,7 +171,13 @@ fn p99_append_latency_under_load() {
                     .unwrap()
             })
         };
-        let reader = tokio::spawn(poll_status(std::sync::Arc::clone(&store), run_for));
+        let mut log = path.as_os_str().to_owned();
+        log.push("-wal");
+        let reader = tokio::spawn(poll_status(
+            std::sync::Arc::clone(&store),
+            log.into(),
+            run_for,
+        ));
 
         let mut checks = Vec::new();
         for check in 0..CHECKS {
@@ -192,16 +211,21 @@ fn p99_append_latency_under_load() {
     );
     let max = *sorted.last().unwrap();
     let rate = f64::from(CHECKS) / interval.as_secs_f64();
+    #[allow(clippy::cast_precision_loss)] // tens of MiB
+    let mib = |bytes: u64| bytes as f64 / f64::from(1 << 20);
     let summary = format!(
         "### tocsin-store write latency\n\n\
          {CHECKS} checks every {interval:?} ({rate:.0} writes/s, {speedup}x the 10 s target) for {seconds} s, \
-         while retention purged {deleted} backlog rows in {chunks} chunks and a reader ran {reads} status queries.\n\n\
+         while retention purged {deleted} backlog rows in {chunks} chunks and a reader ran {reads} status queries. \
+         The log file held {seeded:.1} MiB after the seed and at most {largest:.1} MiB during the run.\n\n\
          | samples | p50 | p95 | p99 | max | p99 budget |\n\
          |---|---|---|---|---|---|\n\
          | {samples} | {p50:.2?} | {p95:.2?} | {p99:.2?} | {max:.2?} | {P99_BUDGET:?} |\n",
         deleted = retention.deleted,
         chunks = retention.chunks,
         samples = sorted.len(),
+        seeded = mib(seeded_log),
+        largest = mib(largest_log),
     );
     publish(&summary);
     assert_eq!(

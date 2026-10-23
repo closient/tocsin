@@ -56,10 +56,15 @@ tocsin config check [--config <dir>] --json  # validate; every error with file, 
 tocsin config show [--config <dir>] --json   # the merged configuration, secrets redacted
 tocsin config schema                         # JSON Schema for one config file
 tocsin serve [--config <dir>] [--data <dir>] # until SIGINT/SIGTERM; --data defaults to [server] data_dir
+tocsin db info --data <dir> --json           # size, schema version, row counts, oldest result
+tocsin db rollup --data <dir> --since YYYY-MM-DD
+tocsin db vacuum --data <dir>
 ```
 
 `--config` defaults to `/etc/tocsin`; a folder with no `*.toml` file is an error (exit 2).
 
 The configuration format is documented in [`docs/config.md`](docs/config.md); [`examples/config/`](examples/config/) is a working example. After changing a config type, regenerate the committed schema with `cargo run -- config schema > schema/tocsin.schema.json` (a test fails until you do).
+
+The storage schema and its rules are in [`docs/storage.md`](docs/storage.md); `serve` keeps `[server] retention_days` of raw results.
 
 One-shot probes (`tocsin probe run <check> --json`, which runs a single check and explains its verdict) are not implemented yet; they arrive with the probe engine.

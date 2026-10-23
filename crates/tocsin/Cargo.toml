@@ -13,7 +13,8 @@ tocsin-core.workspace = true
 clap.workspace = true
 gethostname.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tocsin-store.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
@@ -22,3 +23,4 @@ workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+tocsin-core.workspace = true

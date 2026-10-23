@@ -11,6 +11,7 @@ compile_error!("tocsin supports Unix-like systems (Linux, macOS) only");
 
 mod cli;
 mod config;
+mod db;
 mod exit;
 mod output;
 mod serve;
@@ -56,6 +57,7 @@ fn run(cli: Cli) -> Result<Report, Failure> {
             ConfigCommand::Show { config } => config::show(&config),
             ConfigCommand::Schema => Ok(config::schema()),
         },
+        Some(Command::Db { command }) => db::run(command),
         None => Err(Failure::new(
             Exit::InvalidInput,
             "no command given; run `tocsin --help` for usage",

@@ -163,6 +163,10 @@ fn stops_cleanly_on(signal: &str, name: &str) {
         serde_json::json!({ "status": "stopped", "signal": name })
     );
     assert!(data.is_dir(), "serve creates the data folder");
+    assert!(
+        data.join("tocsin.db").is_file(),
+        "serve creates and migrates the database"
+    );
 }
 
 #[test]
@@ -286,6 +290,134 @@ fn version_with_a_command_is_invalid_input() {
     assert_eq!(json_stdout(&output)["error"]["kind"], "invalid_input");
 }
 
+/// A database with three results on 2026-10-20 and one on 2026-10-21 (UTC).
+fn seeded_database() -> tempfile::TempDir {
+    use tocsin_core::Health;
+    use tocsin_store::{NewCheckResult, Store};
+
+    let data = tempfile::tempdir().unwrap();
+    let day = 1_792_454_400_000; // 2026-10-20T00:00:00Z
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let store = Store::open(&data.path().join("tocsin.db")).unwrap();
+        for (offset_ms, health) in [
+            (1_000, Health::Up),
+            (2_000, Health::Down),
+            (3_000, Health::Degraded),
+            (86_400_000 + 1_000, Health::Up),
+        ] {
+            store
+                .append(NewCheckResult {
+                    node_id: "node-a".into(),
+                    check_id: "web".into(),
+                    started_at_ms: day + offset_ms,
+                    duration_ms: 12,
+                    health,
+                    detail: None,
+                    error: None,
+                    status_code: Some(200),
+                })
+                .await
+                .unwrap();
+        }
+        store.close().await.unwrap();
+    });
+    data
+}
+
+fn data_arg(data: &tempfile::TempDir) -> &str {
+    data.path().to_str().unwrap()
+}
+
+#[test]
+fn db_info_reports_rows_and_the_oldest_result() {
+    let data = seeded_database();
+    let output = tocsin(&["--json", "db", "info", "--data", data_arg(&data)]);
+    assert_eq!(output.status.code(), Some(0));
+    let info = json_stdout(&output);
+    assert_eq!(info["rows"]["check_result"], 4);
+    assert_eq!(info["rows"]["daily_rollup"], 0);
+    assert_eq!(info["schema_version"], 1);
+    assert!(info["size_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(
+        info["oldest_result"],
+        serde_json::json!({ "ms": 1_792_454_401_000_i64, "utc": "2026-10-20T00:00:01.000Z" })
+    );
+    assert_eq!(info["purged_before"], Value::Null);
+}
+
+#[test]
+fn db_rollup_recomputes_from_a_day_and_is_idempotent() {
+    let data = seeded_database();
+    let args = [
+        "--json",
+        "db",
+        "rollup",
+        "--data",
+        data_arg(&data),
+        "--since",
+        "2026-10-01",
+    ];
+    for _ in 0..2 {
+        let output = tocsin(&args);
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(
+            json_stdout(&output),
+            serde_json::json!({ "requested_since": "2026-10-01", "since": "2026-10-01", "rows": 2 })
+        );
+    }
+    let info = json_stdout(&tocsin(&[
+        "--json",
+        "db",
+        "info",
+        "--data",
+        data_arg(&data),
+    ]));
+    assert_eq!(info["rows"]["daily_rollup"], 2);
+}
+
+#[test]
+fn db_rollup_rejects_a_malformed_day() {
+    let data = seeded_database();
+    for since in ["2026-13-01", "2026-02-30", "yesterday", "2026-1-01"] {
+        let output = tocsin(&[
+            "--json",
+            "db",
+            "rollup",
+            "--data",
+            data_arg(&data),
+            "--since",
+            since,
+        ]);
+        assert_eq!(output.status.code(), Some(2), "--since {since}");
+        assert_eq!(json_stdout(&output)["error"]["kind"], "invalid_input");
+    }
+}
+
+#[test]
+fn db_vacuum_reports_sizes() {
+    let data = seeded_database();
+    let output = tocsin(&["--json", "db", "vacuum", "--data", data_arg(&data)]);
+    assert_eq!(output.status.code(), Some(0));
+    let report = json_stdout(&output);
+    assert!(report["size_before_bytes"].as_u64().unwrap() > 0);
+    assert!(report["size_after_bytes"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn db_commands_never_create_a_database() {
+    let data = tempfile::tempdir().unwrap();
+    for command in ["info", "vacuum"] {
+        let output = tocsin(&["--json", "db", command, "--data", data_arg(&data)]);
+        assert_eq!(output.status.code(), Some(2), "db {command}");
+        assert_eq!(json_stdout(&output)["error"]["kind"], "invalid_input");
+    }
+    assert!(!data.path().join("tocsin.db").exists());
+}
+
 #[test]
 fn serve_refuses_an_invalid_configuration() {
     let config = tempfile::tempdir().unwrap();
@@ -344,4 +476,52 @@ fn serve_needs_a_data_folder_from_the_flag_or_the_configuration() {
         config.path().join("taken").display()
     );
     assert_eq!(message, expected.as_str());
+}
+
+/// The first maintenance pass runs at startup: it rolls up the expired days
+/// and then deletes their raw results.
+#[test]
+fn serve_applies_retention_at_startup() {
+    let config = tempfile::tempdir().unwrap();
+    std::fs::write(
+        config.path().join("server.toml"),
+        "[server]\nretention_days = 1\n",
+    )
+    .unwrap();
+    let data = seeded_database();
+    let mut server = Server::start(config.path(), data.path());
+    // Lines arrive through a channel so a missing line fails at a deadline
+    // instead of blocking on a server that never exits.
+    let stderr = server.0.stderr.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let drain = std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let _ = sender.send(line);
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (mut ready, mut purged) = (false, false);
+    while !(ready && purged) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let Ok(line) = receiver.recv_timeout(left) else {
+            break;
+        };
+        ready |= line.contains(READY);
+        purged |= line.contains("retention purged old check results");
+    }
+    assert!(ready && purged, "ready: {ready}, purged: {purged}");
+    server.signal("-TERM");
+    assert_eq!(server.wait_with_deadline().code(), Some(0));
+    drain.join().unwrap();
+
+    let info = json_stdout(&tocsin(&[
+        "--json",
+        "db",
+        "info",
+        "--data",
+        data_arg(&data),
+    ]));
+    assert_eq!(info["rows"]["check_result"], 0);
+    assert_eq!(info["rows"]["daily_rollup"], 2);
+    assert_ne!(info["purged_before"], Value::Null);
 }

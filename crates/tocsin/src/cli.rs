@@ -42,6 +42,41 @@ pub enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Inspect and maintain the SQLite database.
+    Db {
+        #[command(subcommand)]
+        command: DbCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DbCommand {
+    /// Report the database size, schema version and row counts.
+    Info {
+        /// Folder holding `tocsin.db`.
+        #[arg(long, value_name = "DIR")]
+        data: PathBuf,
+    },
+
+    /// Rebuild the database file to reclaim space freed by retention.
+    Vacuum {
+        /// Folder holding `tocsin.db`.
+        #[arg(long, value_name = "DIR")]
+        data: PathBuf,
+    },
+
+    /// Recompute daily rollups from raw results, from a UTC day onwards.
+    ///
+    /// Days already finalized by retention are left as they are.
+    Rollup {
+        /// Folder holding `tocsin.db`.
+        #[arg(long, value_name = "DIR")]
+        data: PathBuf,
+
+        /// First UTC day to recompute, as YYYY-MM-DD.
+        #[arg(long, value_name = "DATE")]
+        since: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

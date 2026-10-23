@@ -63,6 +63,7 @@ tocsin db vacuum --data <dir>                # refused while serve runs on <dir>
 tocsin probe run <check> [--config <dir>] --json # one check, once: facts and each assertion's verdict
 tocsin openapi                               # the HTTP API's OpenAPI document
 tocsin incident new|update|edit|show|list|export ...  # HTTP client: TOCSIN_URL, TOCSIN_TOKEN (or --url, --token)
+tocsin release publish|deployed ...                    # HTTP client, as above; docs/releases.md
 tocsin maintenance schedule --start <rfc3339> --end <rfc3339> ...
 ```
 
@@ -74,6 +75,6 @@ The storage schema and its rules are in [`docs/storage.md`](docs/storage.md); `s
 
 `tocsin probe run` needs no server or database; it exits 0 when the check is up, 1 when it is degraded or down, 2 for an unknown check or invalid configuration, and 3 when the probe cannot run on this machine. Its output, each probe's facts and the ICMP permissions are documented in [`docs/probes.md`](docs/probes.md); the JSON shape is pinned by the snapshots in `crates/tocsin/tests/snapshots/`.
 
-`serve` answers HTTP on `[server] listen`. The incident API, CLI, export format and token setup are in [`docs/incidents.md`](docs/incidents.md). After changing an API type or route, regenerate the committed document with `cargo run -- openapi > schema/openapi.json` (a test fails until you do). New routes register in `crates/tocsin/src/http/openapi.rs`; writes take the `Authorized<scope::...>` extractor from `http/auth.rs`.
+`serve` answers HTTP on `[server] listen`. The incident API, CLI, export format and token setup are in [`docs/incidents.md`](docs/incidents.md). Releases, the timeline API, `/releases` and `/admin/timeline` are in [`docs/releases.md`](docs/releases.md). After changing an API type or route, regenerate the committed document with `cargo run -- openapi > schema/openapi.json` (a test fails until you do). New routes register in `crates/tocsin/src/http/openapi.rs`; writes take the `Authorized<scope::...>` extractor from `http/auth.rs`.
 
 Server-rendered pages (the admin page now) live in `crates/tocsin/src/web/`: askama templates in `crates/tocsin/templates/`, assets compiled in from `crates/tocsin/static/` and served by content hash, and the `Admin` / `AdminForm` extractors for a signed-in person. [`docs/admin.md`](docs/admin.md) has the pattern for a new page and the `[server.auth]` threat model.

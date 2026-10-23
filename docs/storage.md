@@ -240,9 +240,24 @@ reopens the incident. Triggers refuse an `UPDATE` of `incident_update` or
 
 ### `release`
 
-A release or deploy pushed by CI: `version`, optional `component_id` and
-`environment`, Markdown `notes`, `deployed_at` (when it shipped) and
-`received_at` (when tocsin heard about it). Indexed by `deployed_at`.
+One release of a `[[project]]` to one environment, pushed by CI
+([releases.md](releases.md)). Migration 0004 replaced 0001's placeholder,
+which nothing ever wrote. Columns: `project_id`, `version`, `environment`,
+`title`, Markdown `notes`, an optional `url`, `released_at`, `deployed_at`,
+and `created_*` / `updated_*` with who wrote each, like `incident`.
+
+**`(project_id, version, environment)` is unique**, and every write is one
+`INSERT … ON CONFLICT DO UPDATE`: a retried publish or deploy updates the
+row instead of adding one. A deploy stamped before its publish creates the
+row with an empty title and notes and a NULL `released_at` (a *stub*); the
+publish fills it in. `CHECK`s hold the version and environment to
+`A-Za-z0-9._+-` starting with a letter or digit (64 and 32 characters),
+titles to 200 characters, notes to 64 KiB, a row to being published or
+deployed, and a published row to having a title. Triggers refuse changing
+a row's id, key or creation, and moving `released_at` earlier or back to
+NULL. Indexed by `(project_id, released_at)`, by `released_at`, and by
+`coalesce(deployed_at, released_at)`, where the timeline places it. 0004
+also adds `outage_by_start` on `outage (started_at)` for the timeline.
 
 ## Rollups
 

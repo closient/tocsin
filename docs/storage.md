@@ -261,6 +261,40 @@ also adds `outage_by_start` on `outage (started_at)` and
 `incident_by_created` on `incident (created_at)`, so the timeline reads
 every kind of event from an index.
 
+### `alert` and `alert_delivery`
+
+The alerting outbox, added by 0004 (see [alerting.md](alerting.md)). Rows are
+written in the same transaction as the outage change that causes them, so an
+outage that alerted always has its deliveries queued and a recovery always
+has its resolve queued, across restarts and however far the delivery worker
+is behind.
+
+An `alert` is one notifier's view of one alert identity, from the change that
+fires it to the recovery that ends it, across every outage in between. A
+partial unique index (`alert_open`) allows at most one open alert
+(`ended_at IS NULL`) per node, subject and notifier.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | integer | Row id. |
+| `node_id`, `subject_id` | text | The identity, with `subject_kind`. |
+| `subject_kind` | text | `check` or `heartbeat`. |
+| `component_id` | text | Or null. |
+| `notifier_id`, `route_id` | text | Where it goes, and the first route that sent it there. |
+| `outage_id` | integer | The outage it fired for most recently. |
+| `health` | text | `degraded` or `down`: its latest. |
+| `started_at`, `ended_at` | integer | `ended_at` is null while it fires. |
+| `resolve` | integer | 1 if its end sends a resolve. |
+| `repeat_ms`, `next_repeat_at` | integer | The repeat interval (null never repeats) and when the next is due. |
+
+An `alert_delivery` is one message to send: `kind` (`fire`, `repeat` or
+`resolve`), the `health` it reports, `status` (`pending`, `delivered` or
+`failed`), `attempts`, `next_attempt_at`, `last_error` (redacted) and
+`finished_at` (null exactly while pending). The worker is only offered an
+alert's oldest pending delivery, which is what keeps a resolve behind its
+fire. Delivered rows are pruned after a week and failed ones after 90 days;
+an `alert` whose deliveries are all gone and which has ended goes with them.
+
 ## Rollups
 
 Rollups are recomputed from raw results, never incremented, so recomputing

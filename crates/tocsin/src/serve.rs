@@ -9,8 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
+use tocsin_alert::{AlertMetrics, Alerter, AlertingHistory, HTTP_TIMEOUT, Router, WorkerSettings};
 use tocsin_core::config::Config;
-use tocsin_engine::ports::{ProbeRunner, SystemClock};
+use tocsin_engine::ports::{Clock, ProbeRunner, SystemClock};
 use tocsin_engine::{Engine, Parts, Plan};
 use tocsin_probe::ProbeContext;
 use tocsin_store::{DB_FILE, Retention, Store};
@@ -23,6 +24,7 @@ use crate::exit::Exit;
 use crate::http::events::{EventBus, wake_on_incident_changes};
 use crate::http::{self, AppState};
 use crate::lock;
+use crate::metrics::Metrics;
 use crate::output::{Failure, Report};
 use crate::web::identity::AdminAuth;
 
@@ -92,6 +94,16 @@ async fn serve(
     retention_days: u32,
 ) -> Result<&'static str, Failure> {
     let shutdown = Shutdown::install()?;
+    // Before anything that holds the store starts, so failing here leaves
+    // nothing to stop.
+    let admin = AdminAuth::from_config(config)
+        .map_err(|error| {
+            Failure::new(
+                Exit::Runtime,
+                format!("cannot start the admin page: {error}"),
+            )
+        })?
+        .map(Arc::new);
     let path = data.join(DB_FILE);
     let store = Store::open(&path).map_err(|error| {
         Failure::new(
@@ -110,7 +122,8 @@ async fn serve(
         Failure::new(Exit::Runtime, format!("cannot listen on {listen}: {error}"))
     })?;
     let events = EventBus::new();
-    let monitor = match Monitor::start(config, &store, &events).await {
+    let metrics = Metrics::new();
+    let monitor = match Monitor::start(config, &store, &events, &metrics.alerting).await {
         Ok(monitor) => monitor,
         Err(failure) => {
             close(store).await;
@@ -121,14 +134,6 @@ async fn serve(
         Arc::clone(&store),
         Retention::days(retention_days),
     ));
-    let admin = AdminAuth::from_config(config)
-        .map_err(|error| {
-            Failure::new(
-                Exit::Runtime,
-                format!("cannot start the admin page: {error}"),
-            )
-        })?
-        .map(Arc::new);
     let app = http::router(AppState {
         store: Arc::clone(&store),
         config: Arc::clone(config),
@@ -172,19 +177,23 @@ async fn serve(
     outcome
 }
 
-/// The running checks: the engine, and the task that wakes it when an
-/// incident or maintenance window changes.
+/// The running checks: the engine, the task that wakes it when an
+/// incident or maintenance window changes, and the alert delivery worker.
 struct Monitor {
     engine: Engine,
     wake: JoinHandle<()>,
+    alerter: Alerter,
 }
 
 impl Monitor {
-    /// Starts the engine on `store`, publishing on `events`.
+    /// Starts the alert delivery worker and the engine on `store`,
+    /// publishing on `events`. The engine records outages through
+    /// [`AlertingHistory`], which queues each alert in the same transaction.
     async fn start(
         config: &Config,
         store: &Arc<Store>,
         events: &EventBus,
+        metrics: &AlertMetrics,
     ) -> Result<Self, Failure> {
         let plan = Plan::from_config(config).map_err(|error| {
             Failure::new(
@@ -192,9 +201,37 @@ impl Monitor {
                 format!("cannot schedule the checks: {error}"),
             )
         })?;
+        // Like the probes, alerting runs without system root certificates:
+        // each HTTPS delivery then fails and is recorded as failed.
+        let client = match tocsin_alert::http_client(HTTP_TIMEOUT) {
+            Ok(client) => client,
+            Err(error) => {
+                tracing::error!(
+                    "alerting cannot verify TLS ({error}); every HTTPS notifier will fail \
+                     until the system trusts a certificate authority"
+                );
+                tocsin_alert::http_client_without_roots(HTTP_TIMEOUT).map_err(|error| {
+                    Failure::new(Exit::Runtime, format!("cannot set up HTTP: {error}"))
+                })?
+            }
+        };
+        let notifiers = tocsin_alert::build_all(config, &client).map_err(|error| {
+            Failure::new(Exit::Runtime, format!("cannot set up alerting: {error}"))
+        })?;
+        let router = Arc::new(Router::new(config));
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let alerter = Alerter::start(
+            Arc::clone(store),
+            notifiers,
+            Arc::clone(&router),
+            Arc::clone(&clock),
+            metrics.clone(),
+            WorkerSettings::default(),
+        );
+        let history = AlertingHistory::new(Arc::clone(store), router, alerter.waker(), clock);
         let parts = Parts {
             runner: Arc::new(ProbeRunner::new(probe_context(config))),
-            history: Arc::clone(store) as _,
+            history: Arc::new(history),
             notices: Arc::clone(store) as _,
             sink: Arc::new(events.clone()),
             clock: Arc::new(SystemClock),
@@ -202,22 +239,36 @@ impl Monitor {
         // Subscribed before the engine starts, so no incident write can fall
         // between its first read and the subscription.
         let incident_changes = events.subscribe();
-        let engine = Engine::start(plan, parts).await.map_err(|error| {
-            Failure::new(Exit::Runtime, format!("cannot start the checks: {error}"))
-        })?;
+        let engine = match Engine::start(plan, parts).await {
+            Ok(engine) => engine,
+            Err(error) => {
+                alerter.stop().await;
+                return Err(Failure::new(
+                    Exit::Runtime,
+                    format!("cannot start the checks: {error}"),
+                ));
+            }
+        };
         let wake = tokio::spawn(wake_on_incident_changes(
             incident_changes,
             engine.notices_handle(),
         ));
-        Ok(Monitor { engine, wake })
+        Ok(Monitor {
+            engine,
+            wake,
+            alerter,
+        })
     }
 
-    /// Stops the checks and waits for them, so nothing still holds the
-    /// store afterwards.
+    /// Stops the checks, then the alert delivery worker, and waits for
+    /// both, so nothing still holds the store afterwards. The engine goes
+    /// first so no alert is queued after the worker has gone; a send still
+    /// in flight past the worker's grace is abandoned and stays queued.
     async fn stop(self) {
         self.wake.abort();
         let _ = self.wake.await;
         self.engine.shutdown().await;
+        self.alerter.stop().await;
     }
 }
 
@@ -425,7 +476,7 @@ mod tests {
     use tokio::sync::oneshot;
     use tower::ServiceExt;
 
-    use super::{Monitor, close, io, supervise};
+    use super::{AlertMetrics, Monitor, close, io, supervise};
     use crate::exit::Exit;
     use crate::http::events::{Event, EventBus};
     use crate::http::{self, AppState};
@@ -529,7 +580,9 @@ mod tests {
         let config = Arc::new(config);
         let events = EventBus::new();
         let mut seen = events.subscribe();
-        let monitor = Monitor::start(&config, &store, &events).await.unwrap();
+        let monitor = Monitor::start(&config, &store, &events, &AlertMetrics::default())
+            .await
+            .unwrap();
         let app = http::router(AppState {
             store: Arc::clone(&store),
             config,

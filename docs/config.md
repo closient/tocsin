@@ -169,6 +169,8 @@ How the public status page looks; what it shows is in
 | `groups` | list of group ids | definition order | The order groups are shown in. Groups not listed follow in the order they are defined. |
 | `components` | list of component ids | definition order | The order components are shown in within their group. |
 | `timezone` | IANA name | `"UTC"` | The time zone the page shows times in. The uptime bars' days are UTC days regardless. |
+| `accent` | hex colour | `"#0b5cad"` | The colour of links, buttons and maintenance in the light scheme, such as `"#7a1fa2"` or `"#06c"`. It must reach 4.5:1 against the light page background `#f6f8fa` and surface `#ffffff`. |
+| `accent_dark` | hex colour | derived | The accent in the dark scheme. It must reach 4.5:1 against the dark background `#0d1117` and surface `#161b22`. Left out, it is `accent` itself if that reads in the dark, else `accent` mixed toward white in steps of 1/32 until it does. Without `accent`, the default is `"#4493f8"`. |
 | `[page.logo]` | table | none | `url`, a path on this site, and `alt`, its text. |
 | `[[page.link]]` | tables | none | `name` and `url`: links in the page's header, such as the main site or a support address. |
 
@@ -180,6 +182,7 @@ homepage_url = "https://example.com"
 groups = ["edge", "core"]
 components = ["web", "api"]
 timezone = "Europe/Berlin"
+accent = "#7a1fa2"
 
 [page.logo]
 url = "/brand/logo.svg"
@@ -194,6 +197,17 @@ Each id in `groups` and `components` must name a `[[group]]` or
 `[[component]]`, once. The logo must be a path on this site, served by the
 proxy in front of tocsin: the page's content security policy loads images
 from its own origin only, so a URL on another host would not show.
+
+One colour cannot read on both a light and a dark background (it would
+need to be dark enough for the one and light enough for the other), so
+the accent has a value per scheme and `accent_dark` defaults to a lighter
+shade of `accent`. A colour under 4.5:1, the WCAG AA contrast for text,
+fails `tocsin config check` at its line, with the figure and the
+background it fell short against. The text on an accent-coloured button
+stays white in the light scheme and the page background in the dark, so
+it reads at the same ratio. The accent reaches the page as a small
+stylesheet at `/theme/<hash>/accent.css`, because the page's content
+security policy allows no inline style.
 
 ## `[[group]]` and `[[component]]`
 

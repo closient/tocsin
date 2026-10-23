@@ -4,10 +4,12 @@
     60 seconds besides. Served complete, so it reads without JavaScript. -#}
 {% extends "status/layout.html" %}
 {% block content %}
+<div class="intro">
 <h1>{{ chrome.site }}</h1>
 {%- if let Some(description) = chrome.description %}
-<p class="muted">{{ description }}</p>
+<p class="lede">{{ description }}</p>
 {%- endif %}
+</div>
 <div class="live" hx-ext="sse" sse-connect="{{ events }}">
 <div id="banner" role="status" hx-get="/fragments/banner" hx-trigger="sse:component_changed, sse:incident_created, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML">
 {%- include "status/fragments/banner.html" %}

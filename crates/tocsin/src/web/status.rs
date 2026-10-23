@@ -600,7 +600,7 @@ async fn recent_releases(
             .iter()
             .map(|release| ReleaseRow {
                 href: release_href(release),
-                project: project_name(state, &release.project),
+                project: project_name(&state.config, &release.project),
                 version: release.version.clone(),
                 title: release.display_title().to_owned(),
                 released_at: release.released_at.map(|at| Stamp::zoned(at, zone)),
@@ -667,7 +667,9 @@ async fn index(State(state): State<AppState>, request: HeaderMap) -> Result<Resp
             .map(|incident| event(config, incident)),
     );
     let page = IndexPage {
-        layout: Layout::public(config.page.title.clone()).with_feeds(feeds::site(config)),
+        layout: Layout::public(config.page.title.clone())
+            .with_feeds(feeds::site(config))
+            .themed(&config.page),
         chrome: Chrome::new(config, &json_ld).live(),
         events: EVENTS,
         banner: StatusLabel::overall(document.status),
@@ -753,7 +755,8 @@ async fn incident(
     updates.sort_by_key(|update| std::cmp::Reverse((update.created_at, update.id)));
     let page = IncidentPage {
         layout: Layout::public(format!("{} · {}", incident.title, config.page.title))
-            .with_feeds(feeds::site(config)),
+            .with_feeds(feeds::site(config))
+            .themed(&config.page),
         chrome: Chrome::new(config, &json_ld),
         updates: updates
             .into_iter()
@@ -802,7 +805,8 @@ async fn history(
     let json_ld = graph(web_page(config, "Incident history", &path), []);
     let page = HistoryPage {
         layout: Layout::public(format!("Incident history · {}", config.page.title))
-            .with_feeds(feeds::site(config)),
+            .with_feeds(feeds::site(config))
+            .themed(&config.page),
         chrome: Chrome::new(config, &json_ld),
         cards: incidents
             .iter()
@@ -854,10 +858,12 @@ async fn component(
     let rows = Rows {
         incidents: "/incidents",
         zone: &zone,
+        config,
     };
     let page = ComponentPage {
         layout: Layout::public(format!("{name} · {}", config.page.title))
-            .with_feeds(feeds::for_component(config, &id, &name)),
+            .with_feeds(feeds::for_component(config, &id, &name))
+            .themed(&config.page),
         chrome: Chrome::new(config, &json_ld),
         description: detail.component.description.clone(),
         group: detail.component.group.as_deref().map(|group| {

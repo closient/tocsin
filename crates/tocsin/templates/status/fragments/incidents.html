@@ -3,7 +3,7 @@
 {%- if active.is_empty() %}
 <p class="muted">No incidents or maintenance in progress.</p>
 {%- else %}
-<ul class="items">
+<ul class="items surface">
   {%- for card in active %}
   {%- include "status/card.html" %}
   {%- endfor %}

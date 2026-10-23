@@ -9,6 +9,7 @@
 
 mod assertion;
 mod check;
+mod colour;
 mod diagnostic;
 mod load;
 mod notifier;
@@ -28,6 +29,7 @@ pub use check::{
     BasicAuth, Check, CheckType, DnsSettings, HttpMethod, HttpSettings, RecordType, TcpSettings,
     TlsSettings,
 };
+pub use colour::{AA_TEXT, COLOUR_PATTERN, Colour, DARK, LIGHT, Scheme};
 pub use diagnostic::Diagnostic;
 pub use load::{Environment, Source, closest, host_and_port, load};
 pub use notifier::{
@@ -288,6 +290,32 @@ pub struct Page {
     /// `"Europe/Berlin"`. The uptime bars' days are UTC days regardless.
     #[serde(default = "default_timezone")]
     pub timezone: String,
+    /// The colour of links, buttons and the maintenance status, in hex
+    /// such as `"#0b5cad"`. It must reach WCAG AA contrast (4.5:1) on the
+    /// light scheme's page background and surfaces. Unless `accent_dark`
+    /// is set, the dark scheme uses it mixed toward white until it reaches
+    /// 4.5:1 on the dark backgrounds. Unset, the page uses its own blue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accent: Option<Colour>,
+    /// The accent in the dark colour scheme, in hex. It must reach 4.5:1
+    /// on the dark scheme's page background and surfaces. Unset, it is
+    /// derived from `accent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accent_dark: Option<Colour>,
+}
+
+impl Page {
+    /// The accent the light and the dark scheme show, when either is set:
+    /// `accent`, and `accent_dark` or the dark form of `accent`. A scheme
+    /// with neither keeps the stylesheet's own colour (`None`).
+    #[must_use]
+    pub fn accents(&self) -> (Option<Colour>, Option<Colour>) {
+        (
+            self.accent,
+            self.accent_dark
+                .or_else(|| self.accent.map(Colour::for_dark)),
+        )
+    }
 }
 
 impl Default for Page {
@@ -301,6 +329,8 @@ impl Default for Page {
             groups: Vec::new(),
             components: Vec::new(),
             timezone: default_timezone(),
+            accent: None,
+            accent_dark: None,
         }
     }
 }

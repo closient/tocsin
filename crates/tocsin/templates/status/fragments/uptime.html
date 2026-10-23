@@ -1,15 +1,16 @@
 {#- SPDX-License-Identifier: AGPL-3.0-only -#}
 <h2 id="uptime-heading">Uptime, last 90 days</h2>
-<p class="muted">One mark per UTC day, today last; hover a day for its figure. Recomputed hourly.</p>
+<p class="muted section-note">One mark per UTC day, today last; hover a day for its figure. Recomputed hourly.</p>
 {%- if uptime.is_empty() %}
 <p class="muted">No components are configured.</p>
-{%- endif %}
-<ul class="uptime">
+{%- else %}
+<ul class="surface uptime">
   {%- for row in uptime %}
   <li>
-    <a class="uptime-name" href="{{ row.href }}">{{ row.name }}</a>
+    <a class="name" href="{{ row.href }}">{{ row.name }}</a>
     {%- let bar = row.bar %}
     {%- include "status/bar.html" %}
   </li>
   {%- endfor %}
 </ul>
+{%- endif %}

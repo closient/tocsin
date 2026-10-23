@@ -1,0 +1,4 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{#- A component's status in words with its glyph; the including template
+    binds `label` (a StatusLabel, web/status.rs). -#}
+<span class="status {{ label.class }}"><span class="glyph" aria-hidden="true">{{ label.glyph }}</span> {{ label.text }}</span>

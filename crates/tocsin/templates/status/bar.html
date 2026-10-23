@@ -1,9 +1,11 @@
 {#- SPDX-License-Identifier: AGPL-3.0-only -#}
 {#- One uptime bar; the including template binds `bar`. Each day's text is
-    hidden until hover, and read by screen readers. -#}
+    hidden until hover, and read by screen readers. Today, last, is marked
+    `today`. A phone shows the newest 30 days. -#}
 <ol class="bar">
   {%- for day in bar.days %}
-  <li class="day {{ day.tone.class() }}"><span class="tip">{{ day.text }}</span></li>
+  <li class="day {{ day.tone.class() }}{% if day.today %} today{% endif %}"><span class="tip">{{ day.text }}</span></li>
   {%- endfor %}
 </ol>
+<div class="bar-axis" aria-hidden="true"><span class="long">90 days ago</span><span class="short">30 days ago</span><span>Today</span></div>
 <p class="bar-summary">{{ bar.summary }}</p>

@@ -22,7 +22,7 @@ use html5ever::tokenizer::{
 use regex::Regex;
 use serde_json::{Value, json};
 use tocsin_core::Health;
-use tocsin_core::config::{Environment, Source};
+use tocsin_core::config::{DARK, Environment, LIGHT, Source};
 use tocsin_core::incident::{
     Actor, Impact, IncidentKind, IncidentStatus, NewIncident, NewUpdate, Timestamp,
 };
@@ -137,11 +137,16 @@ pub(super) struct Site {
 
 /// A site configured with [`CONFIG`] and `more`.
 pub(super) fn site(more: &str) -> Site {
+    site_from(&format!("{CONFIG}{more}"))
+}
+
+/// A site configured by `text` in full.
+fn site_from(text: &str) -> Site {
     let variable = |name: &str| (name == "ONCALL_TOKEN").then(|| ONCALL.to_owned());
     let config = tocsin_core::config::load(
         &[Source {
             name: "tocsin.toml".into(),
-            text: Ok(format!("{CONFIG}{more}")),
+            text: Ok(text.to_owned()),
         }],
         &Environment {
             hostname: "test".into(),
@@ -823,9 +828,7 @@ fn audit_names(elements: &[Element], problems: &mut Vec<String>) {
     // A status is in words, never its colour or glyph alone.
     for element in elements {
         let words = element.words();
-        if (element.has_class("status")
-            || element.has_class("banner")
-            || element.has_class("badge"))
+        if (element.has_class("status") || element.has_class("hero") || element.has_class("badge"))
             && !words.chars().any(char::is_alphabetic)
         {
             problems.push(format!(
@@ -970,8 +973,18 @@ fn the_stylesheet_colours_meet_wcag_aa_in_both_schemes() {
         ("accent-fg", "accent"),
         ("bg", "fg"),
     ];
-    // Uptime cells and outlines against the page: non-text contrast.
-    let graphics = [("ok", "bg"), ("warn", "bg"), ("bad", "bg"), ("muted", "bg")];
+    // Uptime cells and outlines against the page and the surfaces the
+    // bars sit on: non-text contrast.
+    let graphics = [
+        ("ok", "bg"),
+        ("warn", "bg"),
+        ("bad", "bg"),
+        ("muted", "bg"),
+        ("ok", "panel"),
+        ("warn", "panel"),
+        ("bad", "panel"),
+        ("muted", "panel"),
+    ];
     for (scheme, colours) in [("light", &light), ("dark", &dark)] {
         for (pairs, minimum) in [(&text[..], 4.5), (&graphics[..], 3.0)] {
             for (foreground, background) in pairs {
@@ -983,6 +996,26 @@ fn the_stylesheet_colours_meet_wcag_aa_in_both_schemes() {
             }
         }
     }
+    // `[page] accent` is checked against these backgrounds (tocsin-core
+    // config/colour.rs), and it keeps --accent-fg: an accent that reads on
+    // the light surface reads under white text, and one that reads on the
+    // dark background reads under it, by contrast's symmetry.
+    for (scheme, colours) in [(LIGHT, &light), (DARK, &dark)] {
+        assert_eq!(
+            colours["bg"],
+            scheme.background.to_string(),
+            "{}",
+            scheme.name
+        );
+        assert_eq!(
+            colours["panel"],
+            scheme.surface.to_string(),
+            "{}",
+            scheme.name
+        );
+    }
+    assert_eq!(light["accent-fg"], LIGHT.surface.to_string());
+    assert_eq!(dark["accent-fg"], DARK.background.to_string());
     // Each day's tone has its own fill, so none rests on colour alone.
     let fills: Vec<&str> = ["up", "degraded", "down", "none"]
         .iter()
@@ -1005,6 +1038,57 @@ fn the_stylesheet_colours_meet_wcag_aa_in_both_schemes() {
     );
 }
 
+/// `[page] accent` reaches the page as a second stylesheet, served under
+/// its hash: light as given, dark derived so it still reads.
+#[tokio::test]
+async fn an_accent_is_served_as_a_stylesheet_the_pages_link() {
+    let plain = site("");
+    assert!(!plain.page("/").await.contains("/theme/"));
+    let (status, _, _) = plain
+        .get_with("/theme/0123456789abcdef/accent.css", &[])
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let site = site_from(&CONFIG.replace("timezone = ", "accent = \"#7A1FA2\"\ntimezone = "));
+    let accent =
+        Regex::new(r#"<link rel="stylesheet" href="(/theme/[0-9a-f]{16}/accent\.css)">"#).unwrap();
+    let mut linked = HashSet::new();
+    for uri in ["/", "/history", "/components/api", "/releases"] {
+        let page = site.page(uri).await;
+        let link = accent
+            .captures(&page)
+            .unwrap_or_else(|| panic!("{uri} links no accent: {page}"));
+        linked.insert(link[1].to_owned());
+    }
+    assert_eq!(linked.len(), 1, "{linked:?}");
+    let href = linked.into_iter().next().unwrap();
+    let (status, headers, css) = site.get_with(&href, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_TYPE], "text/css; charset=utf-8");
+    assert!(
+        headers[header::CACHE_CONTROL]
+            .to_str()
+            .unwrap()
+            .contains("immutable")
+    );
+    let dark = Regex::new(r"prefers-color-scheme: dark\) \{ :root \{ --accent: (#[0-9a-f]{6}); \}")
+        .unwrap()
+        .captures(&css)
+        .unwrap_or_else(|| panic!("{css}"))[1]
+        .to_owned();
+    assert!(css.contains(":root { --accent: #7a1fa2; }"), "{css}");
+    assert_ne!(dark, "#7a1fa2", "{css}");
+    for background in [DARK.background, DARK.surface] {
+        let ratio = contrast(&dark, &background.to_string());
+        assert!(ratio >= 4.5, "{dark} on {background}: {ratio:.2}");
+    }
+    // A stale hash, as after a reload changed the accent, is gone.
+    let (status, _, _) = site
+        .get_with(&href.replace("/theme/", "/theme/0"), &[])
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
 // --- Uptime ----------------------------------------------------------------
 
 #[tokio::test]
@@ -1022,11 +1106,17 @@ async fn the_uptime_bar_shows_today_from_the_rollups() {
     // Rollups are hourly; until one runs the bar has nothing.
     let before = site.page("/fragments/uptime").await;
     assert!(!before.contains("75.00%"), "{before}");
+    assert!(
+        before.contains(&format!(
+            r#"<li class="day none today"><span class="tip">{today}, today: no data yet, the first figure comes within the hour</span></li>"#
+        )),
+        "{before}"
+    );
     site.state.store.rollup_since(today).await.unwrap();
     let after = site.page("/fragments/uptime").await;
     assert!(
         after.contains(&format!(
-            r#"<li class="day down"><span class="tip">{today}: 75.00% up, worst down</span></li>"#
+            r#"<li class="day down today"><span class="tip">{today}, today so far: 75.00% up, worst down</span></li>"#
         )),
         "{after}"
     );
@@ -1036,7 +1126,7 @@ async fn the_uptime_bar_shows_today_from_the_rollups() {
     );
     let component = site.page("/components/api").await;
     assert!(
-        component.contains(&format!("{today}: 75.00% up, worst down")),
+        component.contains(&format!("{today}, today so far: 75.00% up, worst down")),
         "{component}"
     );
     // Only the API has the check.
@@ -1080,6 +1170,60 @@ async fn a_withdrawn_outage_never_reads_as_a_recovery() {
     assert!(details[0].contains(" · withdrawn "), "{}", details[0]);
     assert!(!details[0].contains(" · ended "), "{}", details[0]);
     assert!(details[1].contains(" · ended "), "{}", details[1]);
+}
+
+/// The component page's timeline names checks, components and projects as
+/// the rest of the page does, never by their configuration ids.
+#[tokio::test]
+async fn the_component_timeline_shows_names_not_ids() {
+    let site = site(&format!(
+        r#"{PUBLIC_PROJECT}
+[[check]]
+id = "web-https"
+name = "Web over HTTPS"
+component = "web"
+type = "http"
+target = "https://www.example.com/"
+interval = "30s"
+"#
+    ));
+    site.state
+        .store
+        .open_outage(NewOutage {
+            node_id: "node-a".into(),
+            subject_kind: SubjectKind::Check,
+            check_id: "web-https".into(),
+            component_id: Some("web".into()),
+            health: Health::Down,
+            started_at_ms: now().as_millis() - 3_600_000,
+            alerted: false,
+        })
+        .await
+        .unwrap();
+    site.open("Slow pages", IncidentKind::Incident, &["web"])
+        .await;
+    releases::deployed(
+        &site.state,
+        "app".into(),
+        "v2.0.0".into(),
+        tocsin_core::release::DeployStamp::default(),
+        Actor::token("deploys"),
+    )
+    .await
+    .unwrap();
+
+    let page = site.page("/components/web").await;
+    let timeline = &page[page.find("<h2>Timeline</h2>").unwrap()..];
+    for expected in [
+        r#"<span class="item-title">Web over HTTPS down</span>"#,
+        "· on node-a · Web · ongoing",
+        r#"<span class="item-title">Example app v2.0.0 to production</span>"#,
+        "· investigating · Web</span>",
+    ] {
+        assert!(timeline.contains(expected), "{expected:?} in {timeline}");
+    }
+    assert!(!timeline.contains("web-https"), "{timeline}");
+    assert!(!page.contains("web-https"), "{page}");
 }
 
 #[tokio::test]

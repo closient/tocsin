@@ -353,6 +353,8 @@ A destination for operator alerts. Every alert it sends is followed by a resolve
 
 | Key | Type | Required | Default | Description |
 |-----|------|----------|---------|-------------|
+| `accent` | [`Colour`](#type-colour) |  |  | The colour of links, buttons and the maintenance status, in hex such as `"#0b5cad"`. It must reach WCAG AA contrast (4.5:1) on the light scheme's page background and surfaces. Unless `accent_dark` is set, the dark scheme uses it mixed toward white until it reaches 4.5:1 on the dark backgrounds. Unset, the page uses its own blue. |
+| `accent_dark` | [`Colour`](#type-colour) |  |  | The accent in the dark colour scheme, in hex. It must reach 4.5:1 on the dark scheme's page background and surfaces. Unset, it is derived from `accent`. |
 | `components` | array of [`Id`](#type-id) |  |  | The order components are shown in within their group, by id. Components not listed follow in the order they are defined. |
 | `description` | string |  |  | A line shown under the title. |
 | `groups` | array of [`Id`](#type-id) |  |  | The order groups are shown in, by id. Groups not listed follow in the order they are defined. |
@@ -504,6 +506,14 @@ The probe a check runs.
 An IP network such as "10.0.0.0/8" or "fd00::/8", or a single address such as "192.0.2.7".
 
 A string.
+
+<a id="type-colour"></a>
+
+### `Colour`
+
+A colour in hex: "#0b5cad" or "#06c".
+
+A string matching `^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$`.
 
 <a id="type-componentrule"></a>
 

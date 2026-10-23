@@ -19,6 +19,7 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::get;
 use serde::Deserialize;
+use tocsin_core::config::Config;
 use tocsin_core::incident::Timestamp;
 use tocsin_core::release::Release;
 use tocsin_store::ReleaseQuery;
@@ -161,9 +162,8 @@ pub(super) async fn versions(
 }
 
 /// `[[project]]` `id`'s display name; the id if it has none configured.
-pub(super) fn project_name(state: &AppState, id: &str) -> String {
-    state
-        .config
+pub(super) fn project_name(config: &Config, id: &str) -> String {
+    config
         .projects
         .iter()
         .find(|project| project.id.as_str() == id)
@@ -185,12 +185,13 @@ async fn list(
     let page = ListPage {
         layout: Layout::public(project.as_deref().map_or_else(
             || "Releases".to_owned(),
-            |id| format!("{} releases", project_name(&state, id)),
+            |id| format!("{} releases", project_name(&state.config, id)),
         ))
         .with_feeds(project.as_deref().map_or_else(
             || feeds::site(&state.config),
             |id| feeds::for_project(&state, id),
-        )),
+        ))
+        .themed(&state.config.page),
         projects: state
             .config
             .projects
@@ -209,7 +210,7 @@ async fn list(
             .iter()
             .map(|release| Row {
                 href: href(release),
-                project: project_name(&state, &release.project),
+                project: project_name(&state.config, &release.project),
                 version: release.version.clone(),
                 title: release.display_title().to_owned(),
                 released_at: release.released_at.map(Stamp::new),
@@ -255,10 +256,11 @@ async fn detail(
         .iter()
         .filter_map(|release| release.released_at)
         .min();
-    let name = project_name(&state, &project);
+    let name = project_name(&state.config, &project);
     let page = DetailPage {
         layout: Layout::public(format!("{name} {version}"))
-            .with_feeds(feeds::for_project(&state, &project)),
+            .with_feeds(feeds::for_project(&state, &project))
+            .themed(&state.config.page),
         project_href: format!("/releases?project={project}"),
         project: name,
         version: version.clone(),

@@ -13,13 +13,15 @@ use axum::response::Response;
 use axum::routing::get;
 use jiff::tz::TimeZone;
 use serde::Deserialize;
+use tocsin_core::config::Config;
 use tocsin_core::release::{Release, TimelineEvent};
 use tocsin_core::status::OutageEnding;
 use tocsin_store::Order;
 
 use super::identity::Admin;
 use super::page::{HtmlError, Layout, render};
-use super::releases::Stamp;
+use super::releases::{Stamp, project_name};
+use super::status::component_name;
 use crate::http::AppState;
 use crate::http::auth::Viewer;
 use crate::http::timeline::{self, MAX_LIMIT, Window};
@@ -48,6 +50,8 @@ pub(super) struct Rows<'a> {
     pub incidents: &'a str,
     /// The zone instants are shown in.
     pub zone: &'a TimeZone,
+    /// Where checks, components and projects get their display names.
+    pub config: &'a Config,
 }
 
 /// One component in the filter.
@@ -113,6 +117,7 @@ async fn page(
                     &Rows {
                         incidents: "/admin/incidents",
                         zone: &TimeZone::UTC,
+                        config: &state.config,
                     },
                 )
             })
@@ -137,13 +142,15 @@ pub(super) fn row(event: &TimelineEvent, rows: &Rows<'_>) -> Row {
             at: Stamp::zoned(*at, rows.zone),
             kind: "outage",
             tone: health.to_string(),
-            text: format!("{check_id} {health}"),
+            text: format!("{} {health}", check_name(rows.config, check_id)),
             href: None,
             detail: format!(
                 "on {node_id}{}{}",
                 component_id
                     .as_deref()
-                    .map_or_else(String::new, |component| format!(" · {component}")),
+                    .map_or_else(String::new, |component| {
+                        format!(" · {}", component_name(rows.config, component))
+                    }),
                 match (ended_at, ending) {
                     (None, _) => " · ongoing".to_owned(),
                     // Removed from the configuration while out: nobody saw
@@ -171,25 +178,56 @@ pub(super) fn row(event: &TimelineEvent, rows: &Rows<'_>) -> Row {
             tone: impact.as_str().to_owned(),
             text: title.clone(),
             href: Some(format!("{}/{id}", rows.incidents)),
-            detail: format!("{status} · {}", components.join(", ")),
+            detail: format!(
+                "{status} · {}",
+                components
+                    .iter()
+                    .map(|component| component_name(rows.config, component))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         },
         TimelineEvent::Deploy { at, release, .. } => {
-            release_row(Stamp::zoned(*at, rows.zone), "deploy", release)
+            release_row(Stamp::zoned(*at, rows.zone), "deploy", release, rows.config)
         }
-        TimelineEvent::Release { at, release, .. } => {
-            release_row(Stamp::zoned(*at, rows.zone), "release", release)
-        }
+        TimelineEvent::Release { at, release, .. } => release_row(
+            Stamp::zoned(*at, rows.zone),
+            "release",
+            release,
+            rows.config,
+        ),
     }
 }
 
-fn release_row(at: Stamp, kind: &'static str, release: &Release) -> Row {
+/// `[[check]]` or `[[heartbeat]]` `id`'s display name; the id if it has
+/// none, or is no longer configured.
+fn check_name(config: &Config, id: &str) -> String {
+    config
+        .checks
+        .iter()
+        .find(|check| check.id.as_str() == id)
+        .map(|check| check.name.as_ref())
+        .or_else(|| {
+            config
+                .heartbeats
+                .iter()
+                .find(|heartbeat| heartbeat.id.as_str() == id)
+                .map(|heartbeat| heartbeat.name.as_ref())
+        })
+        .flatten()
+        .map_or_else(|| id.to_owned(), Clone::clone)
+}
+
+fn release_row(at: Stamp, kind: &'static str, release: &Release, config: &Config) -> Row {
     Row {
         at,
         kind,
         tone: String::new(),
         text: format!(
             "{} {} to {}",
-            release.project, release.version, release.environment
+            project_name(config, &release.project),
+            release.version,
+            release.environment
         ),
         href: None,
         detail: if release.released_at.is_some() {

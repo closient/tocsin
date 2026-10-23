@@ -3,7 +3,7 @@
 {%- if resolved.is_empty() %}
 <p class="muted">Nothing resolved yet.</p>
 {%- else %}
-<ul class="items">
+<ul class="items surface">
   {%- for card in resolved %}
   {%- include "status/card.html" %}
   {%- endfor %}

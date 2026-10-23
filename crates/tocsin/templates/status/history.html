@@ -1,12 +1,12 @@
 {#- SPDX-License-Identifier: AGPL-3.0-only -#}
 {% extends "status/layout.html" %}
 {% block content %}
-<p><a href="/">Current status</a></p>
+<p class="back"><a href="/">Current status</a></p>
 <h1>Incident history</h1>
 {%- if cards.is_empty() %}
 <p class="muted">No incidents.</p>
 {%- else %}
-<ul class="items">
+<ul class="items surface">
   {%- for card in cards %}
   {%- include "status/card.html" %}
   {%- endfor %}

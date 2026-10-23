@@ -379,6 +379,12 @@ fn history_needs_a_reader_and_a_known_check() {
             .contains("403 Forbidden"),
         "{error}"
     );
+    assert!(
+        error["error"]["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("`status:read` scope")),
+        "a write-only token is told which scope it lacks: {error}"
+    );
 
     let (code, error) = server.run(Some(READER), &["history", "nope"]);
     assert_eq!(code, Some(2), "{error}");

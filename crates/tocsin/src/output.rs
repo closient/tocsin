@@ -40,6 +40,10 @@ pub struct Failure {
     pub exit: Exit,
     pub message: String,
     pub errors: Vec<Diagnostic>,
+    /// The server's status when it answered with an error.
+    pub status: Option<u16>,
+    /// What to do about it, when the command knows.
+    pub hint: Option<String>,
 }
 
 impl Failure {
@@ -48,6 +52,8 @@ impl Failure {
             exit,
             message: message.into(),
             errors: Vec::new(),
+            status: None,
+            hint: None,
         }
     }
 
@@ -57,23 +63,32 @@ impl Failure {
             exit: Exit::InvalidInput,
             message: message.into(),
             errors,
+            status: None,
+            hint: None,
         }
     }
 
-    /// `{"error":{"kind","message"}}`, plus `errors` when there are any.
+    /// `{"error":{"kind","message"}}`, plus `errors` and `hint` when there
+    /// are any.
     fn json(&self) -> Value {
         let mut error = json!({ "kind": self.exit.kind(), "message": self.message });
         if !self.errors.is_empty() {
             error["errors"] = json!(self.errors);
         }
+        if let Some(hint) = &self.hint {
+            error["hint"] = json!(hint);
+        }
         json!({ "error": error })
     }
 
-    /// The message, then each problem on its own lines.
+    /// The message, then each problem on its own lines, then the hint.
     fn text(&self) -> String {
         let mut text = format!("error: {}\n", self.message);
         for diagnostic in &self.errors {
             let _ = writeln!(text, "{diagnostic}");
+        }
+        if let Some(hint) = &self.hint {
+            let _ = writeln!(text, "hint: {hint}");
         }
         text
     }

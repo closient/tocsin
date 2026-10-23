@@ -6,6 +6,8 @@ A check's probe gathers facts about its target; the check's [assertions](config.
 tocsin probe run <check-id> [--config /etc/tocsin] [--json]
 ```
 
+A heartbeat has no probe: tocsin waits for the job to ping it. See [heartbeats.md](heartbeats.md).
+
 `--config` defaults to `/etc/tocsin`. The check runs with the timeout and settings it has in the configuration, and trusts the operating system's root certificates.
 
 ## Exit codes

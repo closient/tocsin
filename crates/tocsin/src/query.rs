@@ -47,13 +47,22 @@ pub fn history(server: &ServerArgs, check: &str, page: &HistoryArgs) -> Result<R
     Id::parse(check)
         .map_err(|error| Failure::new(Exit::InvalidInput, format!("check {check:?}: {error}")))?;
     let path = with_query(&format!("api/v1/checks/{check}/results"), &page.pairs());
-    let json = Client::new(server)?.read(&path)?;
+    let json = Client::new(server)?.read(&path).map_err(|mut failure| {
+        if matches!(failure.status, Some(401 | 403)) {
+            failure.hint = Some(READER_HINT.to_owned());
+        }
+        failure
+    })?;
     Ok(Report {
         exit: Exit::Ok,
         text: describe_results(&view(&json)?),
         json,
     })
 }
+
+/// Raw results are the one read the public view leaves out.
+const READER_HINT: &str = "raw results need a token with the `status:read` scope: \
+set TOCSIN_TOKEN to one, such as a `[[token]]` with scopes = [\"status:read\"]";
 
 /// `tocsin outages`.
 pub fn outages(server: &ServerArgs, page: &HistoryArgs) -> Result<Report, Failure> {

@@ -163,7 +163,9 @@ The query commands are HTTP clients of a running server. `--url` or
 `TOCSIN_URL` names it; `--token` or `TOCSIN_TOKEN` is sent with every read
 when set. A token without `status:read` reads the public view, so a write
 token in the environment is harmless; `history` alone needs `status:read`
-and exits 2 on the 403 without it. Leave it unset to read as the public.
+and exits 2 on the 401 or 403 without it, with a `hint` (in `--json`, under
+`error`) naming the `status:read` scope it needs. Leave it unset to read as
+the public.
 
 ```sh
 export TOCSIN_URL=https://status.example.com TOCSIN_TOKEN=...

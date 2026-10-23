@@ -198,6 +198,7 @@ fn failure(method: &Method, url: &Url, status: StatusCode, bytes: &[u8]) -> Fail
         .as_str()
         .map_or_else(|| status.to_string(), ToOwned::to_owned);
     let mut failure = Failure::new(exit, format!("{method} {url}: {status}: {message}"));
+    failure.status = Some(status.as_u16());
     if let Some(fields) = body["fields"].as_array() {
         failure.errors = fields
             .iter()

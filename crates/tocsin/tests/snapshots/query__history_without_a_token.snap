@@ -4,6 +4,7 @@ expression: error
 ---
 {
   "error": {
+    "hint": "raw results need a token with the `status:read` scope: set TOCSIN_TOKEN to one, such as a `[[token]]` with scopes = [\"status:read\"]",
     "kind": "invalid_input",
     "message": "GET [url]/api/v1/checks/api-https/results: 401 Unauthorized: send a token as `Authorization: Bearer <token>`"
   }

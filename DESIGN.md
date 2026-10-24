@@ -77,6 +77,7 @@ This file is the decision record from the 2026-10-22 plan review, and it is cano
   * jsonwebtoken for the Access JWT
   * utoipa for OpenAPI
   * prometheus-client for metrics
+  * opentelemetry-proto (and, behind the `grpc` feature, tonic) for OTLP export; the export reads the same registry as `/metrics` (TOC-72)
   * tracing for logs
   * rmcp for MCP
   * cargo-dist for releases

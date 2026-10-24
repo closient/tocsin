@@ -18,7 +18,8 @@
 //! and the node the history belongs to, none of which can move under a
 //! running server. A reload keeps the running `[server]` and warns when the
 //! files say something else. `[subscribers]` is the same: its rate limits
-//! and mailer start with the server.
+//! and mailer start with the server. So is `[telemetry]`: its exporter
+//! starts with the server.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
@@ -258,6 +259,13 @@ impl Running {
             );
         }
         config.slack.clone_from(&running.slack);
+        if config.telemetry != running.telemetry {
+            tracing::warn!(
+                "`[telemetry]` changed; it is read only at startup, so the running exporter is \
+                 kept until tocsin restarts"
+            );
+        }
+        config.telemetry.clone_from(&running.telemetry);
 
         let unfinished = match self.monitor.reload(&config).await {
             Ok(()) => None,
@@ -266,6 +274,10 @@ impl Running {
         };
         let checks = config.checks.len();
         self.reloading.state.config = Arc::new(config);
+        self.reloading
+            .state
+            .metrics
+            .configured(&self.reloading.state.config);
         self.reloading
             .app
             .replace(http::router(self.reloading.state.clone()));

@@ -448,6 +448,26 @@ It requires an `https` `[server] public_url`, and either `[server.auth]`
 or `[subscribers]`, so someone can connect a channel. Like `[server]`, it
 is read at startup.
 
+## `[telemetry.otlp]`
+
+Pushes the checks' metrics to an OpenTelemetry collector over OTLP.
+Without the table nothing is exported, whatever the `OTEL_*` variables
+say; with it, even empty, each key it leaves out comes from those
+variables. How it works, and which source wins, is in
+[metrics.md](metrics.md#opentelemetry).
+
+| Key | Type | Default | |
+|-----|------|---------|-|
+| `endpoint` | URL | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, `OTEL_EXPORTER_OTLP_ENDPOINT`, then `http://localhost:4318` | The collector's base URL; over `http/protobuf` the metrics go to its `/v1/metrics`. |
+| `protocol` | `http/protobuf` or `grpc` | `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL`, `OTEL_EXPORTER_OTLP_PROTOCOL`, then `http/protobuf` | `grpc` needs a build with the `grpc` feature. |
+| `headers` | table of strings (secret) | `{}` | Sent with each export, added to `OTEL_EXPORTER_OTLP_HEADERS` and `OTEL_EXPORTER_OTLP_METRICS_HEADERS`. Never logged. |
+| `interval` | duration | `OTEL_METRIC_EXPORT_INTERVAL`, then `"60s"` | How often to send. At least `"1s"`. |
+| `timeout` | duration | the `OTEL_EXPORTER_OTLP_*TIMEOUT` variables, then `"10s"` or `interval` if shorter | How long one export may take; no longer than `interval`. |
+| `resource` | table of strings | `{}` | Resource attributes, winning over `OTEL_RESOURCE_ATTRIBUTES`. `service.version` and `service.instance.id` are tocsin's own and are an error here. |
+
+The table is read at startup; a reload that changes it keeps the running
+exporter and logs a warning.
+
 ## `[[token]]`
 
 A bearer token for the API: writing incidents, releases and heartbeats, and reading what is not public.

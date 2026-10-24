@@ -36,7 +36,8 @@ use crate::exit::Exit;
 use crate::http::events::{EventBus, wake_on_incident_changes};
 use crate::http::{self, AppState};
 use crate::lock;
-use crate::metrics::{Metered, Metrics};
+use crate::metrics::{Counted, Metered, Metrics};
+use crate::otlp;
 use crate::output::{Failure, Report};
 use crate::reload::{ConfigStatus, LiveRouter, Reloader, Reloading};
 use crate::subscribers::Subscriptions;
@@ -122,6 +123,42 @@ fn subscriptions(config: &Config) -> Result<Option<Arc<Subscriptions>>, Failure>
         })
 }
 
+/// The app connecting Slack channels, if `[slack]` turns it on.
+fn slack(config: &Config) -> Result<Option<Arc<crate::slack::SlackApp>>, Failure> {
+    crate::slack::SlackApp::from_config(config)
+        .map(|app| app.map(Arc::new))
+        .map_err(|error| Failure::new(Exit::Runtime, format!("cannot start `[slack]`: {error}")))
+}
+
+/// Starts what sends beside the running checks: the subscribers'
+/// postman with `[subscribers]`, and the OTLP export with
+/// `[telemetry.otlp]`.
+fn start_senders(
+    monitor: &mut Monitor,
+    store: &Arc<Store>,
+    metrics: &Arc<Metrics>,
+    subscriptions: Option<&Arc<Subscriptions>>,
+    telemetry: Option<otlp::Prepared>,
+) {
+    if let Some(subscriptions) = subscriptions {
+        monitor.attach_postman(Postman::start(Arc::clone(store), Arc::clone(subscriptions)));
+    }
+    if let Some(telemetry) = telemetry {
+        let live = Arc::new(monitor.status_handle());
+        monitor.attach_exporter(telemetry.start(Arc::clone(metrics), live, Arc::clone(store) as _));
+    }
+}
+
+/// The OpenTelemetry export, if `[telemetry.otlp]` turns it on.
+fn telemetry(config: &Config) -> Result<Option<otlp::Prepared>, Failure> {
+    otlp::Prepared::new(config, &|name| std::env::var(name).ok()).map_err(|error| {
+        Failure::new(
+            Exit::Runtime,
+            format!("cannot start the OpenTelemetry export: {error}"),
+        )
+    })
+}
+
 /// Serves and runs the checks until a shutdown signal, then stops the
 /// checks, drains requests and closes the store.
 /// Resolves with the signal's name, or fails if the server ends first.
@@ -145,9 +182,8 @@ async fn serve(
         })?
         .map(Arc::new);
     let subscriptions = subscriptions(config)?;
-    let slack = crate::slack::SlackApp::from_config(config)
-        .map_err(|error| Failure::new(Exit::Runtime, format!("cannot start `[slack]`: {error}")))?
-        .map(Arc::new);
+    let slack = slack(config)?;
+    let telemetry = telemetry(config)?;
     let store = open_store(data)?;
     let listen = config.server.listen;
     let listener = TcpListener::bind(listen).await.map_err(|error| {
@@ -158,6 +194,7 @@ async fn serve(
     })?;
     let events = EventBus::new();
     let metrics = Arc::new(Metrics::new());
+    metrics.configured(config);
     let (mut monitor, maintenance) = match start_checks(
         config,
         &store,
@@ -173,12 +210,13 @@ async fn serve(
             return Err(failure);
         }
     };
-    if let Some(subscriptions) = &subscriptions {
-        monitor.attach_postman(Postman::start(
-            Arc::clone(&store),
-            Arc::clone(subscriptions),
-        ));
-    }
+    start_senders(
+        &mut monitor,
+        &store,
+        &metrics,
+        subscriptions.as_ref(),
+        telemetry,
+    );
     let (status, config_status) = watch::channel(ConfigStatus::loaded(http::now()));
     let state = AppState {
         store: Arc::clone(&store),
@@ -251,6 +289,8 @@ pub(crate) struct Monitor {
     store: Arc<Store>,
     /// Sends subscriber mail, when `[subscribers]` is on.
     postman: Option<Postman>,
+    /// Sends metrics over OTLP, when `[telemetry.otlp]` is on.
+    exporter: Option<otlp::Exporter>,
 }
 
 /// Why [`Monitor::reload`] failed.
@@ -337,7 +377,10 @@ impl Monitor {
                 metrics.checks.clone(),
                 plan.node_id().to_owned(),
             )),
-            history: wrap(Arc::clone(&history) as _),
+            history: wrap(Arc::new(Counted::new(
+                Arc::clone(&history) as _,
+                metrics.checks.clone(),
+            ))),
             notices: Arc::clone(store) as _,
             sink: Arc::new(events.clone()),
             clock: Arc::new(SystemClock),
@@ -369,6 +412,7 @@ impl Monitor {
             client,
             store: Arc::clone(store),
             postman: None,
+            exporter: None,
         })
     }
 
@@ -452,12 +496,21 @@ impl Monitor {
         if let Some(postman) = self.postman {
             postman.stop().await;
         }
+        if let Some(exporter) = self.exporter {
+            exporter.stop().await;
+        }
     }
 
     /// Stops `postman` with the checks. Subscriber mail is not part of a
     /// reload: `[subscribers]` is read only at startup.
     pub(crate) fn attach_postman(&mut self, postman: Postman) {
         self.postman = Some(postman);
+    }
+
+    /// Stops `exporter` with the checks. Like `[subscribers]`,
+    /// `[telemetry]` is read only at startup.
+    pub(crate) fn attach_exporter(&mut self, exporter: otlp::Exporter) {
+        self.exporter = Some(exporter);
     }
 }
 

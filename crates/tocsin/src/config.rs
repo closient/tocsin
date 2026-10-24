@@ -84,10 +84,27 @@ pub fn load_with(
         hostname: gethostname::gethostname().to_string_lossy().into_owned(),
         variable,
     };
-    match config::load(&sources, &environment) {
-        Ok(config) => Ok(Loaded { config, files }),
-        Err(errors) => Err(invalid(folder, errors)),
-    }
+    let config = config::load(&sources, &environment).map_err(|errors| invalid(folder, errors))?;
+    // `[telemetry.otlp]` is only whole with the `OTEL_*` variables it
+    // leaves to the environment.
+    crate::otlp::check(&config, variable).map_err(|message| {
+        invalid(
+            folder,
+            vec![Diagnostic {
+                file: None,
+                line: None,
+                column: None,
+                path: Some("telemetry.otlp".to_owned()),
+                message,
+                hint: Some(
+                    "the export's settings come from `[telemetry.otlp]` and the OTEL_EXPORTER_OTLP_* \
+                     variables; docs/metrics.md says which wins"
+                        .to_owned(),
+                ),
+            }],
+        )
+    })?;
+    Ok(Loaded { config, files })
 }
 
 fn invalid(folder: &Path, errors: Vec<Diagnostic>) -> Failure {

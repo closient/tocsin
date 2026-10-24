@@ -15,6 +15,7 @@ mod load;
 mod notifier;
 mod slack;
 mod subscribers;
+mod telemetry;
 mod values;
 
 use std::net::SocketAddr;
@@ -40,6 +41,7 @@ pub use notifier::{
 };
 pub use slack::{MAX_APP_NAME, Slack};
 pub use subscribers::{Subscribers, Turnstile};
+pub use telemetry::{OWN_RESOURCE_ATTRIBUTES, Otlp, OtlpProtocol, Telemetry};
 pub use values::{
     Cidr, DURATION_PATTERN, Duration, ID_PATTERN, Id, SECRET_PATTERN, Secret, Text, email_address,
     is_unanswerable,
@@ -93,6 +95,10 @@ pub struct ConfigFile {
     /// connected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slack: Option<Slack>,
+    /// Sending the checks' metrics to an OpenTelemetry collector. At most
+    /// one file may hold `[telemetry]`; without it, nothing is sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<Telemetry>,
 }
 
 /// The merged, validated configuration of a whole folder.
@@ -133,6 +139,8 @@ pub struct Config {
     pub subscribers: Option<Subscribers>,
     /// `[slack]`, if channels can be connected by signing in to Slack.
     pub slack: Option<Slack>,
+    /// `[telemetry]`, if any telemetry is sent.
+    pub telemetry: Option<Telemetry>,
 }
 
 /// `[server]`.

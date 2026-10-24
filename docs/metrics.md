@@ -5,7 +5,8 @@
 probes take, each component's status, notifier failures, how the
 configuration last reloaded, and the database's size. Point Prometheus at
 it to graph tocsin and to alert through Alertmanager on what tocsin sees,
-or on tocsin itself.
+or on tocsin itself. The same metrics can also be pushed to an
+OpenTelemetry collector over OTLP; see [OpenTelemetry](#opentelemetry).
 
 ## Scraping
 
@@ -73,6 +74,7 @@ on a removed check resolves rather than firing on forever.
 | `tocsin_slack_connections` | gauge | `purpose`, `state` | Slack channels connected by signing in: `purpose` is `operator` (alert channels on `/admin/slack`) or `subscriber` (added from the subscribe page), `state` is `live` or `dead` (Slack revoked it). |
 | `tocsin_slack_connection_up` | gauge | `notifier`, `connection` | 1 when the Slack `connection` a notifier names is connected and live; 0 when it is missing or dead, so its alerts fail. |
 | `tocsin_build_info` | gauge | `version` | Always 1; `version` is the running tocsin's. |
+| `tocsin_otlp_export_failures_total` | counter | | OTLP metric exports that failed: refused, partly rejected, unanswered within the timeout, or never sent. |
 
 Some series are absent until there is something to say:
 
@@ -97,6 +99,10 @@ Some series are absent until there is something to say:
 - The notifier counters appear after a notifier's first failure. Wrap
   them in `increase()` or `rate()`, which treat a series that appears as
   starting from zero.
+- `tocsin_otlp_export_failures_total` appears only when
+  [`[telemetry.otlp]`](#opentelemetry) is configured, from 0 when the
+  export starts. Without the table the page is exactly what it was
+  before tocsin could export.
 
 The duration buckets run from 5 ms to 60 s: `0.005, 0.01, 0.025, 0.05,
 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60`.
@@ -171,3 +177,202 @@ Other queries worth having:
   before any message is abandoned.
 - `predict_linear(tocsin_db_size_bytes[1d], 30 * 86400) > 10e9`: a
   database on course for 10 GB within a month.
+- `increase(tocsin_otlp_export_failures_total[15m]) > 0`: the OTLP export
+  failing, so the collector's copy of these metrics has gaps.
+
+## OpenTelemetry
+
+tocsin can push the same metrics to an OpenTelemetry collector over OTLP,
+for a setup that collects through the OpenTelemetry Collector rather than
+by scraping. It is off unless `tocsin.toml` has a `[telemetry.otlp]`
+table; setting only the `OTEL_*` variables turns nothing on, and with no
+table tocsin opens no connection to any collector.
+
+```toml
+[telemetry.otlp]
+endpoint = "http://otel-collector:4318"
+protocol = "http/protobuf"            # or "grpc"
+headers = { authorization = "Bearer ${ENV:OTLP_TOKEN}" }
+interval = "60s"
+resource = { "deployment.environment.name" = "production" }
+```
+
+Every key is optional; an empty `[telemetry.otlp]` exports to
+`http://localhost:4318` every minute, or wherever the standard variables
+say. The table is read at startup, like `[server]`: a reload that changes
+it logs a warning and keeps the running exporter until tocsin restarts. `tocsin config check` validates
+it, the variables included, and names a bad variable without printing its
+value. The keys are described in the
+[configuration reference](config-reference.md).
+
+### Which source wins
+
+For each setting tocsin takes the first of these that is set, so the file
+always wins over the environment and a metrics-only variable over a
+general one:
+
+| Setting | 1. `[telemetry.otlp]` | 2. Metrics variable | 3. General variable | 4. Default |
+|---|---|---|---|---|
+| Endpoint | `endpoint` + `/v1/metrics` | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, used as is | `OTEL_EXPORTER_OTLP_ENDPOINT` + `/v1/metrics` | `http://localhost:4318/v1/metrics` |
+| Protocol | `protocol` | `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL` | `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` |
+| Interval | `interval` | | `OTEL_METRIC_EXPORT_INTERVAL` (ms, at least 1000) | 60 s |
+| Timeout | `timeout` | `OTEL_EXPORTER_OTLP_METRICS_TIMEOUT` (ms) | `OTEL_EXPORTER_OTLP_TIMEOUT` (ms) | 10 s, or the interval if shorter |
+
+Over `grpc` the endpoint is not given a path, and the default port is
+4317. The timeout may not be longer than the interval, so exports never
+queue up behind each other.
+
+Headers are merged, not chosen: those in `OTEL_EXPORTER_OTLP_HEADERS`,
+then `OTEL_EXPORTER_OTLP_METRICS_HEADERS`, then `headers`, a later source
+replacing a header an earlier one named. The resource is merged the same
+way: `OTEL_RESOURCE_ATTRIBUTES`, then `OTEL_SERVICE_NAME` for
+`service.name`, then `resource`. tocsin always sets three attributes
+itself:
+
+- `service.name`: `tocsin`, unless one of the sources above names it.
+- `service.version`: the running tocsin's version. It cannot be set.
+- `service.instance.id`: the `node_id`, as on the `node` label. It cannot
+  be set.
+
+Header values are secrets: tocsin never logs them, nor a password in the
+endpoint. Its startup line and failure warnings name the endpoint without
+credentials and the headers by name only.
+
+`OTEL_SDK_DISABLED` and `OTEL_METRICS_EXPORTER` are not read; the table is
+the switch.
+
+### Metrics
+
+Each Prometheus family has an OTLP counterpart read from the same
+counters at the same moment, so the two never disagree:
+
+| OTLP metric | Type | Unit | Prometheus family |
+|---|---|---|---|
+| `tocsin.check.up` | gauge | `1` | `tocsin_check_up` |
+| `tocsin.check.duration` | histogram, cumulative | `s` | `tocsin_check_duration_seconds` |
+| `tocsin.check.last_run` | gauge | `s` | `tocsin_check_last_run_timestamp` |
+| `tocsin.heartbeat.last_ping` | gauge | `s` | `tocsin_heartbeat_last_ping_timestamp` |
+| `tocsin.check.results` | sum, cumulative, monotonic | `{result}` | none |
+| `tocsin.component.status` | gauge | `1` | `tocsin_component_status` |
+| `tocsin.slack.connections` | gauge | `{connection}` | `tocsin_slack_connections` |
+| `tocsin.slack.connection.up` | gauge | `1` | `tocsin_slack_connection_up` |
+
+`tocsin.check.results` counts the results each check and heartbeat has
+recorded since tocsin started, one series per `tocsin.check.health`:
+`up`, `degraded` or `down`. Unlike `tocsin.check.up` it counts raw
+results, before confirmation. The notifier, reload, database and build
+families are about tocsin itself and stay on `/metrics` only.
+
+A metric is left out of an export while it has no points, which follows
+the same rules as the absent series above. The two Slack metrics are read
+from the database at each export, as `/metrics` reads them at each scrape,
+and only when the Slack families would appear there.
+
+The attributes carry the Prometheus labels under namespaced names:
+
+| Attribute | Prometheus label | On |
+|---|---|---|
+| `tocsin.check.id` | `check` | every check metric |
+| `tocsin.check.kind` | `kind` | every check metric |
+| `tocsin.check.type` | none | checks: `http`, `tcp`, `dns`, `icmp` or `tls`; absent on heartbeats |
+| `tocsin.component.id` | `component` | when the check has a component, and on `tocsin.component.status` |
+| `tocsin.node.id` | `node` | every check and component metric |
+| `tocsin.check.health` | none | `tocsin.check.results` |
+| `tocsin.component.status` | `status` | `tocsin.component.status` |
+| `tocsin.slack.purpose` | `purpose` | `tocsin.slack.connections` |
+| `tocsin.slack.state` | `state` | `tocsin.slack.connections` |
+| `tocsin.notifier.id` | `notifier` | `tocsin.slack.connection.up` |
+| `tocsin.slack.connection` | `connection` | `tocsin.slack.connection.up` |
+
+The OpenTelemetry semantic conventions have no names for any of these. A
+check id is not `service.name` (it names a probe, not the service it
+probes), a component is not a `service.namespace`, and the probed URL or
+host is deliberately not sent, as it is not on `/metrics`. So every
+attribute is in the `tocsin.` namespace, which the conventions reserve
+for the application. `tocsin.node.id` repeats the resource's
+`service.instance.id` on each point so that a backend which drops
+resource attributes can still tell nodes apart.
+
+### A Collector to receive it
+
+An OpenTelemetry Collector that takes tocsin's metrics over either
+protocol, writes them to Prometheus through remote write, and prints a
+summary of each batch:
+
+```yaml
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch: {}
+
+exporters:
+  prometheusremotewrite:
+    endpoint: http://prometheus:9090/api/v1/write
+    resource_to_telemetry_conversion:
+      enabled: true
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheusremotewrite, debug]
+```
+
+`prometheusremotewrite` and `debug` are in the Collector's `contrib`
+distribution. Through remote write the names arrive translated, such as
+`tocsin_check_duration_seconds` and `tocsin_check_results_total`.
+
+### gRPC
+
+`protocol = "grpc"` needs a tocsin built with the `grpc` feature:
+
+```sh
+cargo install --locked --git https://github.com/closient/tocsin tocsin --features grpc
+```
+
+The release binaries are built without it, as it pulls in tonic and its
+HTTP/2 stack. A tocsin without the feature refuses a `grpc` protocol at
+startup and in `tocsin config check`, naming the feature, rather than
+starting without the export. `http/protobuf` is always available and is
+what most collectors and vendors accept.
+
+### When an export fails
+
+Each failure is logged as a warning, naming the endpoint (without
+credentials) and why, and counted in
+`tocsin_otlp_export_failures_total` on `/metrics`. An export fails when
+the collector cannot be reached, answers with an error status, rejects
+some of the points, or does not answer within the timeout. It also fails,
+sending nothing, when the Slack connections cannot be read from the
+database, as a scrape of `/metrics` then answers 500. The failed
+export is not retried; the next one, an interval later, carries the
+cumulative counts again, so a collector that recovers loses only the
+points in between.
+
+The export runs on its own task. It reads the counters the probes write,
+and never waits on a probe, a database write or the page; the Slack
+connections come from the database's readers, inside the timeout. A
+collector that hangs costs at most one timeout per interval and slows
+nothing else.
+On shutdown an export under way is abandoned, so the last interval's
+points are not sent.
+
+Alert on the counter alongside the rest:
+
+```yaml
+- alert: TocsinOtlpExportFailing
+  expr: increase(tocsin_otlp_export_failures_total[15m]) > 0
+  labels:
+    severity: ticket
+```
+
+Only metrics are exported; traces are not.

@@ -80,7 +80,7 @@ const READER: &str = "reader-secret-0123456789";
 const NODE: &str = "node-a";
 
 /// Every family `/metrics` serves.
-const FAMILIES: [&str; 11] = [
+const FAMILIES: [&str; 12] = [
     "tocsin_build_info",
     "tocsin_check_up",
     "tocsin_check_duration_seconds",
@@ -92,6 +92,7 @@ const FAMILIES: [&str; 11] = [
     "tocsin_notification_failures_total",
     "tocsin_notifications_abandoned_total",
     "tocsin_db_size_bytes",
+    "tocsin_otlp_export_failures_total",
 ];
 
 /// The API down on its HTTPS check, `db` degraded but not yet confirmed,
@@ -244,6 +245,8 @@ impl Api {
         metrics.checks.pinged("backup", 1_760_000_030_250);
         metrics.alerting.attempt_failed("pager");
         metrics.alerting.abandoned("pager");
+        metrics.export.started();
+        metrics.export.failed();
     }
 }
 
@@ -387,6 +390,29 @@ async fn the_whole_text_is_unchanged() {
     metrics.alerting.attempt_failed("pager");
     metrics.alerting.abandoned("pager");
     insta::assert_snapshot!(normalized(&api.metrics().await));
+}
+
+/// Without an exporter the failure count is not written at all, so
+/// `/metrics` stays as it was; once one starts it is written from 0.
+#[tokio::test]
+async fn export_failures_are_written_once_an_exporter_starts() {
+    let api = api();
+    let export = &api.state.metrics.export;
+    assert!(!api.metrics().await.contains("tocsin_otlp_export_failures"));
+    export.started();
+    assert!(
+        api.metrics()
+            .await
+            .contains("\ntocsin_otlp_export_failures_total 0\n")
+    );
+    export.failed();
+    export.failed();
+    assert!(
+        api.metrics()
+            .await
+            .contains("\ntocsin_otlp_export_failures_total 2\n")
+    );
+    assert_eq!(export.failures(), 2);
 }
 
 #[tokio::test]

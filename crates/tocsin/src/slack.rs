@@ -208,7 +208,7 @@ impl SlackApp {
             let mut pending = self
                 .pending
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             pending.retain(|_, record| record.expires > now);
             if pending.len() >= MAX_PENDING {
                 return Err(
@@ -255,7 +255,7 @@ impl SlackApp {
         let record = self
             .pending
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&token::digest(state))
             .ok_or(Refused::Unknown)?;
         if record.expires <= Instant::now() {
@@ -313,7 +313,10 @@ impl SlackApp {
         let hook = answer.incoming_webhook.ok_or(
             "Slack's answer has no incoming webhook; does the app ask for `incoming-webhook`?",
         )?;
-        if !hook.url.starts_with("https://") && !hook.url.starts_with("http://") {
+        // Slack's webhooks are https. Plain http is taken only from a
+        // plain-http `access_url`: the fake Slack in tests.
+        let plain = self.access_url.starts_with("http://") && hook.url.starts_with("http://");
+        if !hook.url.starts_with("https://") && !plain {
             return Err("Slack's answer has no usable webhook URL".to_owned());
         }
         let team = answer.team.unwrap_or_default();

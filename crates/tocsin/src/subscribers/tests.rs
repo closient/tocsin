@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Sign-up, confirmation, fan-out and unsubscribe, end to end through the
-//! router and the postman, with a capture in place of SMTP.
+//! router and the postman, with a capture in place of SMTP. [`slack`] does
+//! the same for Slack channels, with a fake Slack.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -63,6 +64,8 @@ fn config(subscribers: &str) -> Config {
         "OPERATOR_TOKEN" => Some(OPERATOR.to_owned()),
         "READER_TOKEN" => Some(READER.to_owned()),
         "TURNSTILE_SECRET" => Some("turnstile-secret".to_owned()),
+        "SLACK_CLIENT_ID" => Some(slack::CLIENT_ID.to_owned()),
+        "SLACK_CLIENT_SECRET" => Some(slack::CLIENT_SECRET.to_owned()),
         _ => None,
     };
     tocsin_core::config::load(
@@ -92,7 +95,16 @@ fn site() -> Site {
 }
 
 fn site_with(subscribers: &str, turnstile_url: &str) -> Site {
-    let config = config(subscribers);
+    site_from(config(subscribers), turnstile_url, None)
+}
+
+/// The site `config` describes, asking `turnstile_url`, with `slack` as its
+/// `[slack]` app.
+fn site_from(
+    config: Config,
+    turnstile_url: &str,
+    slack: Option<Arc<crate::slack::SlackApp>>,
+) -> Site {
     let sent = Capture::new();
     let subscriptions = config.subscribers.is_some().then(|| {
         Arc::new(
@@ -112,7 +124,7 @@ fn site_with(subscribers: &str, turnstile_url: &str) -> Site {
         config_status: crate::reload::steady_status(),
         metrics: Arc::new(crate::metrics::Metrics::new()),
         subscribers: subscriptions,
-        slack: None,
+        slack,
     };
     Site {
         _dir: dir,
@@ -334,6 +346,8 @@ impl Site {
                     Ok(conn.query_row(
                         "SELECT (SELECT count(*) FROM subscriber_event WHERE expanded_at IS NULL)
                               + (SELECT count(*) FROM subscriber_delivery
+                                 WHERE status IN ('pending', 'sending'))
+                              + (SELECT count(*) FROM slack_delivery
                                  WHERE status IN ('pending', 'sending'))",
                         [],
                         |row| row.get(0),
@@ -1180,3 +1194,5 @@ async fn every_subscription_page_passes_the_structural_audit() {
         );
     }
 }
+
+mod slack;

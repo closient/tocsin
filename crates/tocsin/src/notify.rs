@@ -53,13 +53,7 @@ pub fn test(notifier_id: &str, folder: &Path) -> Result<Report, Failure> {
     let client = crate::net::http_client(HTTP_TIMEOUT)
         .build()
         .map_err(|error| Failure::new(Exit::Runtime, format!("cannot set up HTTP: {error}")))?;
-    let hooks: Arc<dyn SlackHooks> = Arc::new(ReadOnlyHooks {
-        database: configuration
-            .server
-            .data_dir
-            .as_ref()
-            .map(|data_dir| folder.join(data_dir).join(DB_FILE)),
-    });
+    let hooks = ReadOnlyHooks::of(&configuration, folder);
     let built = tocsin_alert::build(
         notifier,
         configuration.server.email.as_ref(),
@@ -135,6 +129,19 @@ pub fn test(notifier_id: &str, folder: &Path) -> Result<Report, Failure> {
 struct ReadOnlyHooks {
     /// The database file, when `[server] data_dir` names its folder.
     database: Option<PathBuf>,
+}
+
+impl ReadOnlyHooks {
+    /// The connections of the server `configuration` in `folder` sets up.
+    fn of(configuration: &tocsin_core::config::Config, folder: &Path) -> Arc<dyn SlackHooks> {
+        Arc::new(ReadOnlyHooks {
+            database: configuration
+                .server
+                .data_dir
+                .as_ref()
+                .map(|data_dir| folder.join(data_dir).join(DB_FILE)),
+        })
+    }
 }
 
 impl SlackHooks for ReadOnlyHooks {

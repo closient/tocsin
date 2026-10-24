@@ -19,6 +19,7 @@
 //! it goes straight to the store, and only the postman and notifiers read
 //! it back.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use askama::Template;
@@ -397,9 +398,10 @@ fn manage_response(
     let (components, projects) = choices(state, preferences);
     let mut lede = format!("Slack messages from {site} to {}.", place(connection));
     if let Some(reason) = &connection.dead_reason {
-        lede.push_str(&format!(
+        let _ = write!(
+            lede,
             " Slack no longer accepts them ({reason}), so nothing is posted; add the channel again from the subscribe page."
-        ));
+        );
     }
     let status = if errors.is_empty() {
         StatusCode::OK
@@ -654,15 +656,15 @@ async fn admin_response(
     let operator = operator
         .into_iter()
         .map(|connection| {
-            let users = named
+            let notifiers = named
                 .iter()
                 .filter(|(_, name)| connection.name.as_deref() == Some(name))
                 .map(|(notifier, _)| notifier.as_str())
                 .collect::<Vec<_>>();
-            let uses = if users.is_empty() {
+            let uses = if notifiers.is_empty() {
                 "no notifier yet".to_owned()
             } else {
-                format!("used by {}", users.join(", "))
+                format!("used by {}", notifiers.join(", "))
             };
             row(connection, uses)
         })

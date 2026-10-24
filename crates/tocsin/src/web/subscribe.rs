@@ -574,12 +574,11 @@ async fn manage_page(
         Some("saved") => Some("Saved."),
         _ => None,
     };
-    let preferences = subscriber.preferences.clone();
     Ok(manage_response(
         &state,
         &token,
-        subscriber,
-        &preferences,
+        &subscriber,
+        &subscriber.preferences,
         done,
         Vec::new(),
     ))
@@ -588,7 +587,7 @@ async fn manage_page(
 fn manage_response(
     state: &AppState,
     token: &str,
-    subscriber: Subscriber,
+    subscriber: &Subscriber,
     preferences: &Preferences,
     done: Option<&'static str>,
     errors: Vec<String>,
@@ -662,7 +661,7 @@ async fn save(
             Ok(manage_response(
                 &state,
                 &token,
-                subscriber,
+                &subscriber,
                 &asked,
                 None,
                 explain(error.fields()),

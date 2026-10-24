@@ -965,3 +965,128 @@ fn serve_without_root_certificates_records_http_checks_down() {
         "{open:?}"
     );
 }
+
+/// A server Slack can send people back to, with the admin page on.
+const SLACK_SERVER: &str = "[server]\nlisten = \"127.0.0.1:0\"\n\
+                            public_url = \"https://status.acme.example/\"\n\n\
+                            [server.auth]\nmode = \"trusted_header\"\n\
+                            trusted_proxies = [\"10.0.0.0/8\"]\n\n";
+const SLACK_APP: &str = "[slack]\nclient_id = \"${ENV:TOCSIN_TEST_SLACK_ID}\"\n\
+                         client_secret = \"${ENV:TOCSIN_TEST_SLACK_SECRET}\"\n\n";
+const SLACK_NOTIFIER: &str = "[[notifier]]\nid = \"ops-slack\"\ntype = \"slack\"\n\n\
+                              [notifier.slack]\nconnection = \"ops-alerts\"\n";
+
+fn folder_with(toml: &str) -> tempfile::TempDir {
+    let config = tempfile::tempdir().unwrap();
+    std::fs::write(config.path().join("server.toml"), toml).unwrap();
+    config
+}
+
+#[test]
+fn slack_setup_prints_a_create_link_holding_the_manifest() {
+    // The client ID and secret need not be set yet: the manifest uses
+    // neither.
+    let config = folder_with(&format!("{SLACK_SERVER}{SLACK_APP}"));
+    let output = tocsin(&[
+        "--json",
+        "slack",
+        "setup",
+        "--config",
+        config.path().to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let report = json_stdout(&output);
+    let manifest = &report["manifest"];
+    assert_eq!(
+        manifest["oauth_config"]["redirect_urls"],
+        serde_json::json!(["https://status.acme.example/slack/callback"])
+    );
+    assert_eq!(
+        manifest["oauth_config"]["scopes"],
+        serde_json::json!({"bot": ["incoming-webhook"]})
+    );
+    assert_eq!(
+        manifest["settings"]["incoming_webhooks"]["incoming_webhooks_enabled"],
+        true
+    );
+    let link = report["create_link"].as_str().unwrap();
+    let encoded = link
+        .strip_prefix("https://api.slack.com/apps?new_app=1&manifest_json=")
+        .unwrap_or_else(|| panic!("{link}"));
+    let decoded: String = url::form_urlencoded::parse(format!("m={encoded}").as_bytes())
+        .next()
+        .unwrap()
+        .1
+        .into_owned();
+    assert_eq!(&serde_json::from_str::<Value>(&decoded).unwrap(), manifest);
+    let text = tocsin(&[
+        "slack",
+        "setup",
+        "--config",
+        config.path().to_str().unwrap(),
+    ]);
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(text.contains(link), "{text}");
+    assert!(text.contains("Never in a file"), "{text}");
+}
+
+#[test]
+fn slack_setup_needs_an_https_public_url() {
+    let config = folder_with(
+        "[server]\nlisten = \"127.0.0.1:0\"\npublic_url = \"http://status.acme.example\"\n",
+    );
+    let output = tocsin(&[
+        "--json",
+        "slack",
+        "setup",
+        "--config",
+        config.path().to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let error = json_stdout(&output)["error"].to_string();
+    assert!(error.contains("only to https addresses"), "{error}");
+}
+
+#[test]
+fn config_check_warns_of_a_slack_connection_not_connected() {
+    let data = tempfile::tempdir().unwrap();
+    for (toml, wanted) in [
+        (
+            format!("{SLACK_SERVER}{SLACK_APP}{SLACK_NOTIFIER}"),
+            vec![
+                "notifier `ops-slack` names Slack connection `ops-alerts`, which is not connected; its alerts fail until it is connected on /admin/slack",
+            ],
+        ),
+        (
+            format!("{SLACK_SERVER}{SLACK_NOTIFIER}"),
+            vec![
+                "notifiers name Slack connections, but without `[slack]` none can be connected",
+                "notifier `ops-slack` names Slack connection `ops-alerts`, which is not connected; its alerts fail until it is connected on /admin/slack",
+            ],
+        ),
+        (format!("{SLACK_SERVER}{SLACK_APP}"), vec![]),
+    ] {
+        let config = folder_with(&toml);
+        let output = Command::new(env!("CARGO_BIN_EXE_tocsin"))
+            .args([
+                "--json",
+                "config",
+                "check",
+                "--config",
+                config.path().to_str().unwrap(),
+                "--data",
+                data.path().to_str().unwrap(),
+            ])
+            .env("TOCSIN_TEST_SLACK_ID", "1111.2222")
+            .env("TOCSIN_TEST_SLACK_SECRET", "acme-client-secret")
+            .output()
+            .unwrap();
+        // A warning, not an error: the channel is connected after the
+        // configuration is valid.
+        assert_eq!(output.status.code(), Some(0), "{toml}\n{output:?}");
+        let report = json_stdout(&output);
+        assert_eq!(report["warnings"], serde_json::json!(wanted), "{toml}");
+    }
+    // Nothing written to the data folder.
+    assert_eq!(std::fs::read_dir(data.path()).unwrap().count(), 0);
+}

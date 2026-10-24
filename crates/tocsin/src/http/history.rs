@@ -2,7 +2,9 @@
 
 //! `/api/v1/checks/{id}/results` and `/api/v1/outages`: what happened.
 //!
-//! Outages are public, as on the timeline. Raw results carry errors and
+//! Outages of public checks and heartbeats ([`super::public`]) are public,
+//! as on the timeline; a `status:read` token sees every check's. Raw
+//! results carry errors and
 //! response details that can name internal hosts, so they need a
 //! `status:read` token. Both page newest first with `before`, inside the
 //! same window bound as the timeline.
@@ -20,6 +22,7 @@ use utoipa_axum::routes;
 
 use super::auth::{Authorized, Viewer, scope};
 use super::error::{ApiError, ErrorBody};
+use super::public;
 use super::status::knows_check;
 use super::timeline::{DAY_MS, DEFAULT_LIMIT, DEFAULT_WINDOW_MS, check_window};
 use super::{AppState, now};
@@ -125,7 +128,9 @@ pub async fn results(
     })
 }
 
-/// Outages open at any moment in the window, newest start first.
+/// Outages open at any moment in the window, newest start first: of
+/// checks and heartbeats on a public component, and with a `status:read`
+/// token of every check.
 #[utoipa::path(
     get,
     path = "/api/v1/outages",
@@ -140,21 +145,27 @@ pub async fn results(
 )]
 pub async fn list_outages(
     State(state): State<AppState>,
-    _viewer: Viewer,
+    viewer: Viewer,
     query: Result<Query<OutageParams>, QueryRejection>,
 ) -> Result<Json<OutageList>, ApiError> {
     let Query(query) = query.map_err(|rejection| rejected(&rejection))?;
-    outages(&state, query).await.map(Json)
+    outages(&state, viewer, query).await.map(Json)
 }
 
-/// One page of outages: the read behind `GET /api/v1/outages`.
+/// One page of the outages `viewer` may see: the read behind
+/// `GET /api/v1/outages`.
 ///
 /// # Errors
 ///
-/// 422 for a bad window.
-pub async fn outages(state: &AppState, query: OutageParams) -> Result<OutageList, ApiError> {
+/// 422 for a bad window, or a `before` naming no outage `viewer` sees.
+pub async fn outages(
+    state: &AppState,
+    viewer: Viewer,
+    query: OutageParams,
+) -> Result<OutageList, ApiError> {
     let page = page(query.since, DEFAULT_WINDOW_MS, query.before, query.limit)?;
-    let mut outages = state.store.outages(more(page)).await?;
+    let shown = public::shown(&state.config, viewer);
+    let mut outages = state.store.outages(more(page), shown).await?;
     let next_before = trim(&mut outages, page.limit, |outage| outage.id);
     Ok(OutageList {
         since: page.since,

@@ -45,7 +45,7 @@ pub use crate::alert::{
 use crate::checkpoint::Checkpointer;
 pub use crate::day::Day;
 pub use crate::error::{Error, Result};
-pub use crate::history::{HistoryPage, Newest, ResultFilter, ResultSlice};
+pub use crate::history::{Checks, HistoryPage, Newest, ResultFilter, ResultSlice};
 pub use crate::incident::OpenIncident;
 pub use crate::outage::{LastUp, LatestResult, Outage};
 use crate::readers::Readers;
@@ -863,10 +863,11 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] when `page.before` names no outage, or the read
-    /// fails.
-    pub async fn outages(&self, page: HistoryPage) -> Result<Vec<OutageRecord>> {
-        self.read(move |conn| history::outages(conn, page)).await
+    /// [`Error::Invalid`] when `page.before` names no outage of `shown`,
+    /// or the read fails.
+    pub async fn outages(&self, page: HistoryPage, shown: Checks) -> Result<Vec<OutageRecord>> {
+        self.read(move |conn| history::outages(conn, page, &shown))
+            .await
     }
 
     /// For each of `check_ids` that `node_id` has an `up` result for, when

@@ -536,11 +536,10 @@ pub enum TokenScope {
     Incident,
     /// Releases and deploys.
     Release,
-    /// Reading what is not public in the read API: non-public projects'
-    /// releases and deploys, check targets, raw check results, and how the
-    /// configuration last reloaded.
-    // TODO(TOC-56): the internal check board behind proxy auth reads with
-    // this scope too.
+    /// Reading what is not public in the read API: checks and heartbeats
+    /// on no component, non-public projects' releases and deploys, check
+    /// targets, raw check results, and how the configuration last
+    /// reloaded. The internal board behind proxy auth reads the same.
     #[serde(rename = "status:read")]
     StatusRead,
 }

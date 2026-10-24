@@ -31,6 +31,7 @@ use utoipa_axum::routes;
 use super::AppState;
 use super::auth::Viewer;
 use super::error::ErrorBody;
+use super::public;
 
 /// The OpenAPI tag for the event stream.
 pub const TAG: &str = "events";
@@ -106,16 +107,19 @@ impl Event {
     }
 
     /// Whether `viewer` may see this event: everything but a release of a
-    /// project that is not public, which only a trusted viewer sees.
+    /// project that is not public, and a change of a check or heartbeat on
+    /// no component, which only a trusted viewer sees. The change carries
+    /// the component the engine's configuration gave the check when it
+    /// changed, so a stream opened before a reload follows the new one.
     fn visible_to(&self, viewer: Viewer) -> bool {
         match self {
             Event::ReleasePublished { public, .. } | Event::ReleaseDeployed { public, .. } => {
                 *public || viewer == Viewer::Trusted
             }
+            Event::CheckChanged(change) => public::may_see(viewer, change.component_id.as_deref()),
             Event::IncidentCreated { .. }
             | Event::IncidentUpdated { .. }
             | Event::IncidentEdited { .. }
-            | Event::CheckChanged(_)
             | Event::ComponentChanged(_) => true,
         }
     }
@@ -180,8 +184,9 @@ pub fn router() -> OpenApiRouter<AppState> {
 /// event's `type` and the data its JSON. The first event is `resync`, and
 /// so is the one after the stream fell behind and missed some; on either,
 /// re-read what you show. A comment line every 15 seconds keeps a quiet
-/// connection open. Anyone sees incident, check and component events, and
-/// releases of public projects; a `status:read` token sees every release.
+/// connection open. Anyone sees incident and component events, changes of
+/// checks and heartbeats on a public component, and releases of public
+/// projects; a `status:read` token sees every check and release.
 #[utoipa::path(
     get,
     path = "/api/v1/events",
@@ -193,6 +198,12 @@ pub fn router() -> OpenApiRouter<AppState> {
     ),
 )]
 pub async fn stream_events(State(state): State<AppState>, viewer: Viewer) -> Response {
+    stream(&state, viewer)
+}
+
+/// The event stream as `viewer` may see it: `/api/v1/events`, and the
+/// internal board's own stream, which is [`Viewer::Trusted`].
+pub fn stream(state: &AppState, viewer: Viewer) -> Response {
     // Only the receivers: an open stream must not keep the store alive
     // past shutdown.
     let subscription = Subscription {
@@ -407,5 +418,17 @@ pub(crate) mod tests {
                 .iter()
                 .all(|event| event.visible_to(Viewer::Public))
         );
+    }
+
+    #[test]
+    fn a_change_of_a_check_on_no_component_reaches_only_a_trusted_viewer() {
+        for mut event in every_event(true) {
+            let Event::CheckChanged(change) = &mut event else {
+                continue;
+            };
+            change.component_id = None;
+            assert!(!event.visible_to(Viewer::Public));
+            assert!(event.visible_to(Viewer::Trusted));
+        }
     }
 }

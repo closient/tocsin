@@ -19,12 +19,13 @@ the `status:read` scope to read the rest:
 | Data | Without a token | With `status:read` |
 |---|---|---|
 | Overall status, components, their health, open incidents | yes | yes |
-| Checks and heartbeats: id, kind, name, interval, health | yes | yes |
+| Checks and heartbeats on a component: id, kind, name, interval, health, outages | yes | yes |
+| Checks and heartbeats on no component, their changes and their outages | no | yes |
 | A check's `target` (its URL or host, which can name an internal host) | no | yes |
 | A check's raw results (`/checks/{id}/results`) | no, 401 | yes |
 | How the configuration last reloaded (`/config/status`), whose errors name files and environment variables | no, 401 | yes |
 | Prometheus metrics (`/metrics`, see [metrics.md](metrics.md)) | no, 401 | yes |
-| Outages and incidents | yes | yes |
+| Incidents | yes | yes |
 | Releases and deploys of a project with `public = true` | yes | yes |
 | Releases and deploys of a project with `public = false` | no | yes |
 
@@ -42,11 +43,24 @@ Raw check results, the configuration status and `/metrics` are the reads
 with nothing public to show: no token is 401 and a token without
 `status:read` is 403.
 
-Only a `[[project]]` can be non-public; components, checks and their
-outages have no visibility setting and are on the public page. A
-non-public project is left out wholesale, not redacted: it is not in the
-release list, its deploys are not on the timeline, and `/llms.txt` does
-not mention it.
+### Public and internal checks
+
+A check or heartbeat is public when it is on a component, since every
+component is on the status page. One on no component is internal: the
+[internal board](admin.md#the-internal-board) and a `status:read` token
+see it, and without that scope no read names it, its health or its
+outages. `checks`, `events`, `outages`, `timeline` and the MCP tools
+leave it out wholesale; `status.json`, `components/{id}`, `/llms.txt`,
+the feeds and the status page never listed it, and a component's health
+comes from its own checks only. A configured check's outages follow
+where it is now, so moving it off its component hides its old outages
+too. A removed check has only its outages to go by: those recorded on a
+component stay public, ending `withdrawn`, and those recorded on none
+stay hidden.
+
+Likewise a `[[project]]` can be non-public. A non-public project is left
+out wholesale, not redacted: it is not in the release list, its deploys
+are not on the timeline, and `/llms.txt` does not mention it.
 
 ```toml
 [[token]]
@@ -66,7 +80,7 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
 | `GET /api/v1/components/{id}` | none, or `status:read` | 200, `{component, checks, incidents}` |
 | `GET /api/v1/checks` | none, or `status:read` | 200, `{checks}` |
 | `GET /api/v1/checks/{id}/results?since=&before=&limit=` | `status:read` | 200, `{check_id, since, results, next_before}`, newest first |
-| `GET /api/v1/outages?since=&before=&limit=` | none | 200, `{since, outages, next_before}`, newest start first |
+| `GET /api/v1/outages?since=&before=&limit=` | none, or `status:read` | 200, `{since, outages, next_before}`, newest start first |
 | `GET /api/v1/incidents?limit=&before=` | none | 200, `{incidents, next_before}`, newest first |
 | `GET /api/v1/incidents/{id}` | none | 200, the incident |
 | `GET /api/v1/releases?project=&since=&before=&limit=` | none, or `status:read` | 200, `{releases, truncated, next_before}`, newest first |
@@ -88,7 +102,8 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
 - **`components/{id}`** is one component with every check and heartbeat
   that sets its health and the open incidents naming it. An unknown id is
   404.
-- **`checks`** lists every check and heartbeat. `kind` is `check` or
+- **`checks`** lists every check and heartbeat on a component, and with
+  a `status:read` token those on none too. `kind` is `check` or
   `heartbeat`, so heartbeats sit beside checks rather than in a second
   list; `type` is the probe (`http`, `tcp`, `dns`, `icmp`, `tls`) and
   `null` for a heartbeat. `health`, `since`, `last_health` and
@@ -109,7 +124,9 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
 - **`outages`** lists every outage open at any moment in the window: one
   that started before `since` but ended after it is included, as is one
   still open (`ended_at: null`). `subject_kind` says whether `check_id`
-  is a check or a heartbeat, as on the timeline's outage events.
+  is a check or a heartbeat, as on the timeline's outage events. Without
+  `status:read` only outages of checks on a component are listed, and a
+  `before` naming any other outage is 422, as an unknown one is.
   `ending` says how an outage ended, and is `null` while it is open:
   - `recovered`: tocsin saw the check leave this outage's health. That is
     a return to up, or a move between degraded and down, which ends one
@@ -125,7 +142,8 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
   in config if the host name is sensitive.
 - **`timeline`** merges outages, incidents, deploys and releases; see
   [releases.md](releases.md#http-api). `component=` narrows it to one
-  component's checks, incidents and projects.
+  component's checks, incidents and projects. Without `status:read` its
+  outages are only those of checks on a component.
 
 ### Windows and paging
 
@@ -181,9 +199,11 @@ seconds keeps a quiet connection open through proxies, and the response
 carries `X-Accel-Buffering: no` so nginx passes events through at once.
 The stream ends when the server shuts down; reconnect.
 
-Anyone sees incident, check and component events and the releases of
-public projects; a `status:read` token also sees releases of private
-ones. The status page's live updates are this stream.
+Anyone sees incident and component events, changes of checks on a
+component, and the releases of public projects; a `status:read` token
+also sees changes of checks on no component and releases of private
+ones. The status page's live updates are this stream; the internal board
+has its own, `/internal/events`.
 
 ## `/llms.txt`
 

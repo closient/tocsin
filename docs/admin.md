@@ -56,8 +56,8 @@ releases of the projects that list its component (every project's, for a
 check on none).
 
 Both pages read in full without JavaScript. With it, they refresh when
-the status page's event stream reports a check change, and every minute
-besides.
+the board's own event stream, `/internal/events`, reports a check change,
+and every minute besides.
 
 The board answers **403** to every request that is not from a signed-in
 person on the allow-lists, and also while `[server.auth]` is off: unlike
@@ -69,10 +69,11 @@ pages carry no structured data. Nothing public links to the board: not
 `/`, `/llms.txt`, the OpenAPI document or the feeds. tocsin serves no
 sitemap.
 
-The event stream the board listens on, `/api/v1/events`, is the status
-page's and is public: it names a check and its new health when one
-changes, as the anonymous `GET /api/v1/checks` does. Neither carries a
-target, an error, an assertion or a link.
+`/internal/events` is the board's own stream, behind the same guard: it
+carries every check change, including those of checks on no component.
+The public stream, `/api/v1/events`, carries only changes of checks and
+heartbeats on a component, as the anonymous `GET /api/v1/checks` lists
+only those; see [api.md](api.md#public-and-internal-checks).
 
 ## Setting it up
 

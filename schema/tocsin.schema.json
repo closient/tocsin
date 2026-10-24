@@ -1729,7 +1729,7 @@
         },
         {
           "const": "status:read",
-          "description": "Reading what is not public in the read API: non-public projects'\nreleases and deploys, check targets, raw check results, and how the\nconfiguration last reloaded.",
+          "description": "Reading what is not public in the read API: checks and heartbeats\non no component, non-public projects' releases and deploys, check\ntargets, raw check results, and how the configuration last\nreloaded. The internal board behind proxy auth reads the same.",
           "type": "string"
         }
       ]

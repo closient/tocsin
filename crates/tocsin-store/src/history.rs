@@ -12,6 +12,47 @@ use crate::error::{Error, Result};
 use crate::incident::text;
 use crate::rollup::parse_column;
 
+/// Which checks' and heartbeats' outages a read returns. The caller
+/// resolves it from the configuration: the store holds history, not
+/// which checks are public.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Checks {
+    /// Every check's and heartbeat's, including ones no longer configured.
+    All,
+    /// What the public sees. A configured check's outages follow where it
+    /// is now: shown if it is in `public`, hidden if it is in `internal`,
+    /// whatever component they recorded. One no longer configured has
+    /// only its outages to go by, so each is shown if it recorded a
+    /// component: a check removed from the status page keeps its public
+    /// history, and one removed while on no component stays hidden.
+    Public {
+        /// The configured checks and heartbeats on a component.
+        public: Vec<String>,
+        /// The configured checks and heartbeats on none.
+        internal: Vec<String>,
+    },
+}
+
+impl Checks {
+    /// The `:shown` parameter of [`SHOWN`].
+    pub(crate) fn bind(&self) -> Option<String> {
+        match self {
+            Checks::All => None,
+            Checks::Public { public, internal } => {
+                Some(serde_json::json!({ "public": public, "internal": internal }).to_string())
+            }
+        }
+    }
+}
+
+/// The clause that narrows outages to the checks a reader may see, bound
+/// by [`Checks::bind`]. [`OUTAGES`] spells it out in each arm, and the
+/// timeline's outage read uses it too.
+pub(crate) const SHOWN: &str = "(:shown IS NULL \
+     OR (check_id NOT IN (SELECT value FROM json_each(:shown, '$.internal')) \
+         AND (component_id IS NOT NULL \
+              OR check_id IN (SELECT value FROM json_each(:shown, '$.public')))))";
+
 /// Which page of a history read: newest first from `before`, back to
 /// `since`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,25 +340,38 @@ pub(crate) fn ending(
 /// last two are what a window catches mid-way, few enough to sort. One
 /// arm with `ended_at IS NULL OR ended_at >= :since` would walk every
 /// older outage through `outage_by_start` instead, hence `INDEXED BY`.
-/// The cursor bound is the same as [`RESULTS`]'s, in every arm.
+/// The cursor bound is the same as [`RESULTS`]'s, and [`SHOWN`] narrows
+/// every arm to the checks the reader may see.
 const OUTAGES: &str =
     "SELECT id, node_id, check_id, component_id, health, started_at, ended_at, subject_kind,
          ending
      FROM outage INDEXED BY outage_by_start
      WHERE started_at >= :since
        AND started_at <= :at AND (started_at < :at OR id < :before)
+       AND (:shown IS NULL
+            OR (check_id NOT IN (SELECT value FROM json_each(:shown, '$.internal'))
+                AND (component_id IS NOT NULL
+                     OR check_id IN (SELECT value FROM json_each(:shown, '$.public')))))
      UNION ALL
      SELECT id, node_id, check_id, component_id, health, started_at, ended_at, subject_kind,
          ending
      FROM outage INDEXED BY outage_open
      WHERE ended_at IS NULL AND started_at < :since
        AND started_at <= :at AND (started_at < :at OR id < :before)
+       AND (:shown IS NULL
+            OR (check_id NOT IN (SELECT value FROM json_each(:shown, '$.internal'))
+                AND (component_id IS NOT NULL
+                     OR check_id IN (SELECT value FROM json_each(:shown, '$.public')))))
      UNION ALL
      SELECT id, node_id, check_id, component_id, health, started_at, ended_at, subject_kind,
          ending
      FROM outage INDEXED BY outage_ended
      WHERE ended_at >= :since AND started_at < :since
        AND started_at <= :at AND (started_at < :at OR id < :before)
+       AND (:shown IS NULL
+            OR (check_id NOT IN (SELECT value FROM json_each(:shown, '$.internal'))
+                AND (component_id IS NOT NULL
+                     OR check_id IN (SELECT value FROM json_each(:shown, '$.public')))))
      ORDER BY started_at DESC, id DESC LIMIT :limit";
 
 /// Outages open at any moment at or after `page.since`: started since,
@@ -326,14 +380,25 @@ const OUTAGES: &str =
 ///
 /// # Errors
 ///
-/// [`Error::Invalid`] when `page.before` names no outage.
-pub(crate) fn outages(conn: &Connection, page: HistoryPage) -> Result<Vec<OutageRecord>> {
+/// [`Error::Invalid`] when `page.before` names no outage `shown` holds,
+/// so a cursor cannot tell a reader whether a hidden outage exists.
+pub(crate) fn outages(
+    conn: &Connection,
+    page: HistoryPage,
+    shown: &Checks,
+) -> Result<Vec<OutageRecord>> {
+    let shown = shown.bind();
     let (at, before) = match page.before {
         None => (i64::MAX, i64::MAX),
         Some(before) => {
             let at = conn
-                .prepare_cached("SELECT started_at FROM outage WHERE id = ?1")?
-                .query_row([before], |row| row.get(0))
+                .prepare_cached(&format!(
+                    "SELECT started_at FROM outage WHERE id = :before AND {SHOWN}"
+                ))?
+                .query_row(
+                    named_params! { ":before": before, ":shown": shown },
+                    |row| row.get(0),
+                )
                 .optional()?
                 .ok_or_else(|| lost_cursor(before, "outage"))?;
             (at, before)
@@ -346,6 +411,7 @@ pub(crate) fn outages(conn: &Connection, page: HistoryPage) -> Result<Vec<Outage
             ":at": at,
             ":before": before,
             ":limit": page.limit,
+            ":shown": shown,
         },
         |row| {
             Ok(OutageRecord {
@@ -368,7 +434,7 @@ pub(crate) fn outages(conn: &Connection, page: HistoryPage) -> Result<Vec<Outage
 mod tests {
     use rusqlite::{Connection, named_params};
 
-    use super::{OUTAGES, RESULTS};
+    use super::{OUTAGES, RESULTS, SHOWN};
 
     /// A migrated, empty database.
     async fn migrated() -> (tempfile::TempDir, Connection) {
@@ -388,6 +454,14 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         plan.join("\n")
+    }
+
+    /// `OUTAGES` is a const, so it spells [`SHOWN`] out in each arm; an
+    /// arm that drifted would show the public what the others hide.
+    #[test]
+    fn every_outage_arm_narrows_to_what_is_shown() {
+        let words = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(words(OUTAGES).matches(&words(SHOWN)).count(), 3);
     }
 
     #[tokio::test]

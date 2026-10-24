@@ -630,5 +630,5 @@ What a token may do.
 | `"heartbeat"` | Heartbeat pings. |
 | `"incident"` | Incidents and maintenance. |
 | `"release"` | Releases and deploys. |
-| `"status:read"` | Reading what is not public in the read API: non-public projects' releases and deploys, check targets, raw check results, and how the configuration last reloaded. |
+| `"status:read"` | Reading what is not public in the read API: checks and heartbeats on no component, non-public projects' releases and deploys, check targets, raw check results, and how the configuration last reloaded. The internal board behind proxy auth reads the same. |
 

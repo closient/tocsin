@@ -14,7 +14,7 @@ use tocsin_core::incident::{Actor, Impact, IncidentKind, NewIncident, Timestamp}
 use tocsin_core::release::{DeployStamp, NewRelease, ReleaseCursor, TimelineCursor, TimelineEvent};
 use tocsin_core::status::CheckKind;
 use tocsin_store::{
-    ComponentScope, Error, NewOutage, Order, Projects, ReleaseQuery, Store, SubjectKind,
+    Checks, ComponentScope, Error, NewOutage, Order, Projects, ReleaseQuery, Store, SubjectKind,
     TimelineQuery, Written,
 };
 
@@ -434,6 +434,7 @@ async fn reads_see_only_the_projects_they_are_given() {
         .store
         .timeline(TimelineQuery {
             visible: only(),
+            shown: Checks::All,
             since: at(0),
             after: None,
             order: Order::OldestFirst,
@@ -691,6 +692,7 @@ async fn history(fixture: &Fixture) {
 fn window(since: i64, limit: u32) -> TimelineQuery {
     TimelineQuery {
         visible: Projects::All,
+        shown: Checks::All,
         since: at(since),
         after: None,
         order: Order::OldestFirst,

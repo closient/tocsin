@@ -112,10 +112,10 @@ before it sends anything.
 | Tool | Route | Scope | What it answers |
 |---|---|---|---|
 | `get_status` | `GET /api/v1/status.json` | any token | The page now: overall status, components and their health, open incidents. |
-| `list_outages` | `GET /api/v1/outages` | any token | Outages of checks and heartbeats, newest start first. |
+| `list_outages` | `GET /api/v1/outages` | any token; `status:read` adds checks on no component | Outages of checks and heartbeats, newest start first. |
 | `get_check_history` | `GET /api/v1/checks/{id}/results` | `status:read` | One check's or heartbeat's raw results, newest first, with errors and assertion detail. |
 | `explain_check` | `GET /api/v1/checks/{id}/results?limit=1` | `status:read` | `{check_id, latest}`: the latest result in the past 365 days, or `null`. |
-| `get_timeline` | `GET /api/v1/timeline` | any token; `status:read` adds non-public projects | Outages, incidents and deploys, oldest first. |
+| `get_timeline` | `GET /api/v1/timeline` | any token; `status:read` adds non-public projects and checks on no component | Outages, incidents and deploys, oldest first. |
 | `list_incidents` | `GET /api/v1/incidents` | any token | Incidents and maintenance, newest first. |
 | `list_releases` | `GET /api/v1/releases` | any token; `status:read` adds non-public projects | Releases, newest first. |
 | `create_incident` | `POST /api/v1/incidents` | `incident` | The new incident or maintenance. |

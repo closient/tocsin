@@ -15,7 +15,7 @@
         "tags": [
           "status"
         ],
-        "summary": "Every check and heartbeat with its current state.",
+        "summary": "Every check and heartbeat on a public component with its current\nstate; with a `status:read` token, those on no component too.",
         "operationId": "list_checks",
         "responses": {
           "200": {
@@ -263,7 +263,7 @@
         "tags": [
           "events"
         ],
-        "summary": "Every event from now on, as server-sent events: the event name is the\nevent's `type` and the data its JSON. The first event is `resync`, and\nso is the one after the stream fell behind and missed some; on either,\nre-read what you show. A comment line every 15 seconds keeps a quiet\nconnection open. Anyone sees incident, check and component events, and\nreleases of public projects; a `status:read` token sees every release.",
+        "summary": "Every event from now on, as server-sent events: the event name is the\nevent's `type` and the data its JSON. The first event is `resync`, and\nso is the one after the stream fell behind and missed some; on either,\nre-read what you show. A comment line every 15 seconds keeps a quiet\nconnection open. Anyone sees incident and component events, changes of\nchecks and heartbeats on a public component, and releases of public\nprojects; a `status:read` token sees every check and release.",
         "operationId": "stream_events",
         "responses": {
           "200": {
@@ -903,7 +903,7 @@
         "tags": [
           "history"
         ],
-        "summary": "Outages open at any moment in the window, newest start first.",
+        "summary": "Outages open at any moment in the window, newest start first: of\nchecks and heartbeats on a public component, and with a `status:read`\ntoken of every check.",
         "operationId": "list_outages",
         "parameters": [
           {
@@ -1293,7 +1293,7 @@
         "tags": [
           "timeline"
         ],
-        "summary": "Outages, incidents and deploys, oldest first, read in one snapshot.\nTies on time order by kind (outage, incident, deploy, release), then id.\nWithout a `status:read` token only public projects' deploys appear.",
+        "summary": "Outages, incidents and deploys, oldest first, read in one snapshot.\nTies on time order by kind (outage, incident, deploy, release), then id.\nWithout a `status:read` token only public projects' deploys appear,\nand only outages of checks and heartbeats on a public component.",
         "operationId": "get_timeline",
         "parameters": [
           {

@@ -231,7 +231,8 @@ impl Redactor {
 /// A `Retry-After` value, delay-seconds or an HTTP-date, as a wait from
 /// `now`, at most [`MAX_RETRY_AFTER`]. A date already past waits nothing;
 /// a value that is neither is ignored.
-fn retry_after(value: &str, now: jiff::Timestamp) -> Option<Duration> {
+#[must_use]
+pub fn retry_after(value: &str, now: jiff::Timestamp) -> Option<Duration> {
     let value = value.trim();
     let wait = if let Ok(seconds) = value.parse::<u64>() {
         Duration::from_secs(seconds)

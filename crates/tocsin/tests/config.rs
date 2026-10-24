@@ -337,3 +337,45 @@ fn the_committed_schema_is_current() {
     assert_eq!(schema["$schema"], "http://json-schema.org/draft-07/schema#");
     assert_eq!(schema["title"], "tocsin configuration file");
 }
+
+/// `OTEL_SDK_DISABLED=true` turns `[telemetry.otlp]` off, and the check
+/// says so; the other `OTEL_*` variables are not read, so a bad one does
+/// not fail it, as it does without the switch.
+#[test]
+fn check_warns_when_otel_sdk_disabled_turns_the_export_off() {
+    let folder = tempfile::tempdir().unwrap();
+    write(
+        folder.path(),
+        "tocsin.toml",
+        "[[component]]\nid = \"a\"\nname = \"A\"\n\n[telemetry.otlp]\n",
+    );
+    let check = |environment: &[(&str, &str)]| {
+        tocsin(
+            &[
+                "--json",
+                "config",
+                "check",
+                "--config",
+                folder.path().to_str().unwrap(),
+            ],
+            environment,
+        )
+    };
+    let bad = ("OTEL_EXPORTER_OTLP_PROTOCOL", "carrier-pigeon");
+
+    let output = check(&[("OTEL_SDK_DISABLED", "true"), bad]);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stdout));
+    assert_eq!(
+        json_stdout(&output)["warnings"],
+        serde_json::json!([
+            "`[telemetry.otlp]` is set, but OTEL_SDK_DISABLED=true turns the OpenTelemetry \
+             export off: no metrics are sent"
+        ])
+    );
+
+    let output = check(&[("OTEL_SDK_DISABLED", "false"), bad]);
+    assert_eq!(output.status.code(), Some(2), "{}", text(&output.stdout));
+    let output = check(&[("OTEL_SDK_DISABLED", "false")]);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stdout));
+    assert_eq!(json_stdout(&output)["warnings"], serde_json::json!([]));
+}

@@ -320,7 +320,8 @@ A destination for operator alerts. Every alert it sends is followed by a resolve
 
 | Key | Type | Required | Default | Description |
 |-----|------|----------|---------|-------------|
-| `webhook_url` | [`Secret`](#type-secret) | yes |  | The incoming webhook URL. Secret. |
+| `connection` | [`Id`](#type-id) |  |  | The name of a channel connected on the admin page's Slack tab, with `[slack]`. A name not connected yet is a warning from `tocsin config check`; an alert sent to it fails loudly. |
+| `webhook_url` | [`Secret`](#type-secret) |  |  | An incoming webhook URL you made yourself. Secret. Give this or `connection`, not both. |
 
 <a id="table-telegramsettings"></a>
 
@@ -455,6 +456,20 @@ Every email tocsin sends can be answered: neither address may be a `noreply`, `n
 | `from` | string |  |  | The From address, as `address` or `Name <address>`. |
 | `reply_to` | string |  |  | The Reply-To address: a mailbox a person reads. |
 | `smtp_url` | [`Secret`](#type-secret) |  |  | The SMTP server, as `smtp://user:password@host:587` or `smtps://...`. Secret. |
+
+<a id="table-slack"></a>
+
+### `[slack]`
+
+`[slack]`: your own Slack app, which people approve on Slack's consent screen to connect a channel. Each connection is an incoming webhook, kept in the database rather than in configuration.
+
+With it, the admin page can connect channels for `[[notifier]]`s to name with `connection`, and, with `[subscribers]`, visitors can add status updates to their own Slack. `tocsin slack setup` prints the link that creates the app. It needs an `https` `[server] public_url`, which Slack sends people back to. Like `[server]`, it is read only at startup.
+
+| Key | Type | Required | Default | Description |
+|-----|------|----------|---------|-------------|
+| `app_name` | string |  |  | The app's name, as Slack shows it on the consent screen and beside each message, at most 35 characters. Used only by `tocsin slack setup`; defaults to the page's title. |
+| `client_id` | [`Secret`](#type-secret) | yes |  | The app's Client ID, from its Basic Information page. Secret. |
+| `client_secret` | [`Secret`](#type-secret) | yes |  | The app's Client Secret, from the same page. Secret. |
 
 <a id="table-subscribers"></a>
 

@@ -127,8 +127,15 @@ fn find_toml_files(root: &Path, relative: &Path, found: &mut Vec<PathBuf>) -> st
 }
 
 /// `tocsin config check`.
-pub fn check(folder: &Path) -> Result<Report, Failure> {
+///
+/// A notifier naming a Slack `connection` that is not connected, or that
+/// Slack revoked, is a warning, not an error: the channel is connected on
+/// the admin page of a running server, after the configuration is valid.
+/// The connections are read from the database in `data`, or in `[server]
+/// data_dir`, without writing to it.
+pub fn check(folder: &Path, data: Option<&Path>) -> Result<Report, Failure> {
     let Loaded { config, files } = load(folder)?;
+    let warnings = slack_warnings(&config, folder, data);
     let counts = counts(&config)?;
     let summary = counts
         .iter()
@@ -139,19 +146,90 @@ pub fn check(folder: &Path) -> Result<Report, Failure> {
         .collect::<Vec<_>>()
         .join(", ");
     let file_noun = if files.len() == 1 { "file" } else { "files" };
+    let mut text = format!(
+        "configuration in {} is valid: {} {file_noun}; {summary}",
+        folder.display(),
+        files.len()
+    );
+    for warning in &warnings {
+        let _ = write!(text, "\nwarning: {warning}");
+    }
     Ok(Report {
-        text: format!(
-            "configuration in {} is valid: {} {file_noun}; {summary}",
-            folder.display(),
-            files.len()
-        ),
+        text,
         exit: Exit::Ok,
         json: json!({
             "ok": true,
             "files": files,
             "counts": counts.into_iter().collect::<serde_json::Map<String, Value>>(),
+            "warnings": warnings,
         }),
     })
+}
+
+/// What is wrong with the Slack connections the notifiers name: each one
+/// not connected, or dead, in the database. Nothing when no notifier names
+/// one.
+fn slack_warnings(config: &Config, folder: &Path, data: Option<&Path>) -> Vec<String> {
+    let named: Vec<(&str, &str)> = config
+        .notifiers
+        .iter()
+        .filter_map(|notifier| {
+            let connection = notifier.slack.as_ref()?.connection.as_ref()?;
+            Some((notifier.id.as_str(), connection.as_str()))
+        })
+        .collect();
+    if named.is_empty() {
+        return Vec::new();
+    }
+    let mut warnings = Vec::new();
+    if config.slack.is_none() {
+        warnings.push(
+            "notifiers name Slack connections, but without `[slack]` none can be connected"
+                .to_owned(),
+        );
+    }
+    let database = data
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            config
+                .server
+                .data_dir
+                .as_ref()
+                .map(|data_dir| folder.join(data_dir))
+        })
+        .map(|folder| folder.join(tocsin_store::DB_FILE));
+    let connections = match database {
+        None => {
+            warnings.push(
+                "cannot check the Slack connections notifiers name: no data folder; pass --data or set `data_dir` in `[server]`"
+                    .to_owned(),
+            );
+            return warnings;
+        }
+        Some(path) if !path.is_file() => Vec::new(),
+        Some(path) => match tocsin_store::inspect_slack(&path) {
+            Ok(connections) => connections.unwrap_or_default(),
+            Err(error) => {
+                warnings.push(format!(
+                    "cannot check the Slack connections notifiers name: cannot read {}: {error}",
+                    path.display()
+                ));
+                return warnings;
+            }
+        },
+    };
+    for (notifier, name) in named {
+        match connections.iter().find(|(known, _)| known == name) {
+            None => warnings.push(format!(
+                "notifier `{notifier}` names Slack connection `{name}`, which is not connected; its alerts fail until it is connected on /admin/slack"
+            )),
+            Some((_, false)) => warnings.push(format!(
+                "notifier `{notifier}` names Slack connection `{name}`, which Slack revoked; its alerts fail until it is connected again on /admin/slack"
+            )),
+            Some((_, true)) => {}
+        }
+    }
+    warnings
 }
 
 /// How many items of each `[[kind]]` there are, read from the serialized

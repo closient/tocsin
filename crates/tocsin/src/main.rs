@@ -29,6 +29,7 @@ mod query;
 mod release;
 mod reload;
 mod serve;
+mod slack;
 mod subscribers;
 #[cfg(test)]
 mod testing;
@@ -39,7 +40,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use crate::cli::{Cli, Command, ConfigCommand, NotifyCommand, ProbeCommand};
+use crate::cli::{Cli, Command, ConfigCommand, NotifyCommand, ProbeCommand, SlackCommand};
 use crate::exit::Exit;
 use crate::output::{Failure, Report};
 
@@ -75,7 +76,7 @@ fn run(cli: Cli) -> Result<Report, Failure> {
     match cli.command {
         Some(Command::Serve { config, data }) => serve::run(&config, data.as_deref()),
         Some(Command::Config { command }) => match command {
-            ConfigCommand::Check { config } => config::check(&config),
+            ConfigCommand::Check { config, data } => config::check(&config, data.as_deref()),
             ConfigCommand::Show { config } => config::show(&config),
             ConfigCommand::Schema => Ok(config::schema()),
             ConfigCommand::Status { server } => config::status(&server),
@@ -89,6 +90,9 @@ fn run(cli: Cli) -> Result<Report, Failure> {
         Some(Command::Release { command }) => release::run(command),
         Some(Command::Notify { command }) => match command {
             NotifyCommand::Test { notifier, config } => notify::test(&notifier, &config),
+        },
+        Some(Command::Slack { command }) => match command {
+            SlackCommand::Setup { config } => slack::setup(&config),
         },
         Some(Command::Heartbeat { command }) => heartbeat::run(command),
         Some(Command::Openapi) => Ok(Report {

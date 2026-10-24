@@ -13,6 +13,7 @@ mod colour;
 mod diagnostic;
 mod load;
 mod notifier;
+mod slack;
 mod subscribers;
 mod values;
 
@@ -37,6 +38,7 @@ pub use notifier::{
     AlertmanagerSettings, DiscordSettings, EmailSettings, Notifier, NotifierSettings, NotifierType,
     NtfySettings, PushoverSettings, SlackSettings, TelegramSettings, WebhookSettings,
 };
+pub use slack::{MAX_APP_NAME, Slack};
 pub use subscribers::{Subscribers, Turnstile};
 pub use values::{
     Cidr, DURATION_PATTERN, Duration, ID_PATTERN, Id, SECRET_PATTERN, Secret, Text, email_address,
@@ -86,6 +88,11 @@ pub struct ConfigFile {
     /// `[subscribers]`; without it, there are none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscribers: Option<Subscribers>,
+    /// Your Slack app, for connecting channels by signing in to Slack. At
+    /// most one file may hold `[slack]`; without it, channels cannot be
+    /// connected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slack: Option<Slack>,
 }
 
 /// The merged, validated configuration of a whole folder.
@@ -124,6 +131,8 @@ pub struct Config {
     pub page: Page,
     /// `[subscribers]`, if email subscriptions are on.
     pub subscribers: Option<Subscribers>,
+    /// `[slack]`, if channels can be connected by signing in to Slack.
+    pub slack: Option<Slack>,
 }
 
 /// `[server]`.

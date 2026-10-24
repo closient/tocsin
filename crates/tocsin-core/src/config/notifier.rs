@@ -172,8 +172,10 @@ impl Notifier {
     /// Every secret the notifier holds, with its path below the notifier.
     pub(crate) fn secrets_mut(&mut self) -> Vec<(Vec<&'static str>, &mut Secret)> {
         let mut secrets = Vec::new();
-        if let Some(slack) = &mut self.slack {
-            secrets.push((vec!["slack", "webhook_url"], &mut slack.webhook_url));
+        if let Some(slack) = &mut self.slack
+            && let Some(url) = &mut slack.webhook_url
+        {
+            secrets.push((vec!["slack", "webhook_url"], url));
         }
         if let Some(pushover) = &mut self.pushover {
             secrets.push((vec!["pushover", "user_key"], &mut pushover.user_key));
@@ -212,8 +214,15 @@ impl Notifier {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SlackSettings {
-    /// The incoming webhook URL. Secret.
-    pub webhook_url: Secret,
+    /// An incoming webhook URL you made yourself. Secret. Give this or
+    /// `connection`, not both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook_url: Option<Secret>,
+    /// The name of a channel connected on the admin page's Slack tab,
+    /// with `[slack]`. A name not connected yet is a warning from `tocsin
+    /// config check`; an alert sent to it fails loudly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<Id>,
 }
 
 /// `[notifier.pushover]`.

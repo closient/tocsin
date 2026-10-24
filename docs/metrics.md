@@ -70,6 +70,8 @@ on a removed check resolves rather than firing on forever.
 | `tocsin_config_reload_success` | gauge | | 1 if the last reload succeeded, 0 if it failed and the last good configuration is still running. |
 | `tocsin_config_last_error_timestamp` | gauge | | When a reload last failed, unix seconds; 0 if none has. |
 | `tocsin_db_size_bytes` | gauge | | The SQLite database's size on disk, its write-ahead log included. |
+| `tocsin_slack_connections` | gauge | `purpose`, `state` | Slack channels connected by signing in: `purpose` is `operator` (alert channels on `/admin/slack`) or `subscriber` (added from the subscribe page), `state` is `live` or `dead` (Slack revoked it). |
+| `tocsin_slack_connection_up` | gauge | `notifier`, `connection` | 1 when the Slack `connection` a notifier names is connected and live; 0 when it is missing or dead, so its alerts fail. |
 | `tocsin_build_info` | gauge | `version` | Always 1; `version` is the running tocsin's. |
 
 Some series are absent until there is something to say:
@@ -84,6 +86,14 @@ Some series are absent until there is something to say:
 - `tocsin_heartbeat_last_ping_timestamp` appears after the first ping
   since tocsin started. Until then use `tocsin_check_up{kind="heartbeat"}`,
   which goes to 0 when a deadline passes.
+- The two Slack families appear only with `[slack]` or a notifier naming
+  a Slack `connection`. All four
+  `tocsin_slack_connections` series are always there then, at 0 when
+  empty; `tocsin_slack_connection_up` has one series per notifier naming a
+  `connection`. `TocsinSlackConnectionDown`, below, pages on it at 0:
+  every alert sent to a channel nobody connected, or one Slack revoked,
+  fails until someone connects it (see
+  [alerting.md](alerting.md#when-a-channel-stops-working)).
 - The notifier counters appear after a notifier's first failure. Wrap
   them in `increase()` or `rate()`, which treat a series that appears as
   starting from zero.
@@ -125,6 +135,11 @@ groups:
 
       - alert: TocsinNotificationsAbandoned
         expr: increase(tocsin_notifications_abandoned_total[15m]) > 0
+        labels:
+          severity: page
+
+      - alert: TocsinSlackConnectionDown
+        expr: tocsin_slack_connection_up == 0
         labels:
           severity: page
 

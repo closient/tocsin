@@ -166,6 +166,7 @@ fn site_from(text: &str) -> Site {
         config_status: crate::reload::steady_status(),
         metrics: Arc::new(crate::metrics::Metrics::new()),
         subscribers: None,
+        slack: None,
     };
     Site {
         _dir: dir,

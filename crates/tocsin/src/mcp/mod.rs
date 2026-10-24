@@ -544,7 +544,8 @@ impl Server {
         Parameters(input): Parameters<ValidateInput>,
     ) -> CallToolResult {
         let folder = PathBuf::from(input.folder);
-        let checked = tokio::task::spawn_blocking(move || crate::config::check(&folder)).await;
+        let checked =
+            tokio::task::spawn_blocking(move || crate::config::check(&folder, None)).await;
         match checked {
             Ok(Ok(report)) => CallToolResult::structured(report.json),
             Ok(Err(failure)) => CallToolResult::structured(json!({

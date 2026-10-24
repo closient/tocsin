@@ -23,6 +23,7 @@ mod readers;
 mod release;
 mod rollup;
 mod schema;
+mod slack;
 mod stats;
 mod subscriber;
 #[cfg(test)]
@@ -52,7 +53,12 @@ pub use crate::outage::{LastUp, LatestResult, Outage};
 use crate::readers::Readers;
 pub use crate::release::{ComponentScope, Order, Projects, ReleaseQuery, TimelineQuery, Written};
 pub use crate::rollup::DailyRollup;
+pub use crate::slack::{
+    ClaimedSlack, NewSlackConnection, SlackConnection, SlackCounts, SlackHook, SlackPurpose,
+    WebhookUrl,
+};
 pub use crate::stats::{CheckpointEvent, CheckpointStats};
+use crate::subscriber::Lane;
 pub use crate::subscriber::{
     ClaimedMail, EVERY, MailOutcome, Mailbag, NewAnnouncement, NewSignup, Preferences, Scope,
     Signup, Subscriber, SubscriberCounts, SubscriberPrune,
@@ -70,7 +76,7 @@ const READERS: usize = 4;
 pub const FUTURE_TOLERANCE: Duration = Duration::from_hours(1);
 
 /// The tables `tocsin db info` counts, in schema order.
-pub const TABLES: [&str; 16] = [
+pub const TABLES: [&str; 19] = [
     "check_result",
     "outage",
     "daily_rollup",
@@ -87,6 +93,9 @@ pub const TABLES: [&str; 16] = [
     "subscriber_event",
     "subscriber_event_target",
     "subscriber_delivery",
+    "slack_connection",
+    "slack_subscription",
+    "slack_delivery",
 ];
 
 /// One probe run, as handed to [`Store::append`].
@@ -1049,7 +1058,7 @@ impl Store {
     ///
     /// The read fails.
     pub async fn mailbag(&self, now_ms: i64, limit: u32) -> Result<Mailbag> {
-        self.read(move |conn| subscriber::mailbag(conn, now_ms, limit))
+        self.read(move |conn| subscriber::mailbag(conn, Lane::Mail, now_ms, limit))
             .await
     }
 
@@ -1073,12 +1082,12 @@ impl Store {
     /// The write fails.
     pub async fn finish_mail(&self, id: i64, outcome: MailOutcome, now_ms: i64) -> Result<()> {
         self.writer
-            .run(move |conn| subscriber::finish(conn, id, &outcome, now_ms))
+            .run(move |conn| subscriber::finish(conn, Lane::Mail, id, &outcome, now_ms))
             .await
     }
 
-    /// Fails every delivery a stopped process left `sending`, so none is
-    /// sent twice. Resolves with how many.
+    /// Fails every delivery, email or Slack, a stopped process left
+    /// `sending`, so none is sent twice. Resolves with how many.
     ///
     /// # Errors
     ///
@@ -1102,6 +1111,123 @@ impl Store {
     ) -> Result<SubscriberPrune> {
         self.writer
             .run(move |conn| subscriber::prune(conn, now_ms, finished_before_ms))
+            .await
+    }
+
+    /// Stores a connection Slack approved; see [`NewSlackConnection`]. An
+    /// operator connection replaces the one of the same name, and a
+    /// subscriber connection any other to the same channel.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn connect_slack(&self, connection: NewSlackConnection) -> Result<SlackConnection> {
+        self.writer
+            .run(move |conn| slack::connect(conn, &connection))
+            .await
+    }
+
+    /// The Slack connection with this id.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn slack_connection(&self, id: i64) -> Result<Option<SlackConnection>> {
+        self.read(move |conn| slack::by_id(conn, id)).await
+    }
+
+    /// Every Slack connection for `purpose`, without webhook URLs.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn slack_connections(&self, purpose: SlackPurpose) -> Result<Vec<SlackConnection>> {
+        self.read(move |conn| slack::list(conn, purpose)).await
+    }
+
+    /// The operator connection a notifier names.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn slack_hook(&self, name: String) -> Result<SlackHook> {
+        self.read(move |conn| slack::hook(conn, &name)).await
+    }
+
+    /// How many Slack connections there are, live and dead, and each
+    /// operator connection's name and whether it is live.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn slack_census(&self) -> Result<(SlackCounts, Vec<(String, bool)>)> {
+        self.read(|conn| Ok((slack::counts(conn)?, slack::operator_states(conn)?)))
+            .await
+    }
+
+    /// Marks a Slack connection dead with Slack's reason, and fails its
+    /// waiting deliveries. Resolves with whether it was live.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn kill_slack(&self, id: i64, reason: String, now_ms: i64) -> Result<bool> {
+        self.writer
+            .run(move |conn| slack::kill(conn, id, &reason, now_ms))
+            .await
+    }
+
+    /// Deletes a Slack connection, with its subscriptions and deliveries.
+    /// Resolves with whether it existed.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn remove_slack(&self, id: i64) -> Result<bool> {
+        self.writer.run(move |conn| slack::remove(conn, id)).await
+    }
+
+    /// Replaces what a subscriber Slack connection hears about. Resolves
+    /// with whether it exists.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn set_slack_preferences(&self, id: i64, preferences: Preferences) -> Result<bool> {
+        self.writer
+            .run(move |conn| slack::set_preferences(conn, id, &preferences))
+            .await
+    }
+
+    /// Up to `limit` Slack deliveries due at `now_ms`, and when the next is.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn slack_mailbag(&self, now_ms: i64, limit: u32) -> Result<Mailbag> {
+        self.read(move |conn| subscriber::mailbag(conn, Lane::Slack, now_ms, limit))
+            .await
+    }
+
+    /// Marks a due Slack delivery `sending`, committed before it returns,
+    /// and resolves with what to post. `None` when it is no longer pending
+    /// or its connection is gone or dead.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn claim_slack(&self, id: i64) -> Result<Option<ClaimedSlack>> {
+        self.writer.run(move |conn| slack::claim(conn, id)).await
+    }
+
+    /// Records how posting a claimed Slack delivery ended.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn finish_slack(&self, id: i64, outcome: MailOutcome, now_ms: i64) -> Result<()> {
+        self.writer
+            .run(move |conn| subscriber::finish(conn, Lane::Slack, id, &outcome, now_ms))
             .await
     }
 
@@ -1353,6 +1479,42 @@ pub fn latest_schema_version() -> usize {
 pub fn inspect(path: &Path) -> Result<DbInfo> {
     let conn = schema::open_inspector(path)?;
     describe(&conn, path.to_path_buf())
+}
+
+/// Every operator Slack connection's name and whether it is live, read
+/// from the database at `path` without writing or migrating it, for
+/// `tocsin config check`. `None` when the database predates Slack
+/// connections.
+///
+/// # Errors
+///
+/// The file is not a SQLite database, or cannot be read.
+pub fn inspect_slack(path: &Path) -> Result<Option<Vec<(String, bool)>>> {
+    let conn = schema::open_inspector(path)?;
+    if !has_slack(&conn)? {
+        return Ok(None);
+    }
+    slack::operator_states(&conn).map(Some)
+}
+
+/// The operator Slack connection `name`, read from the database at `path`
+/// without writing or migrating it, for `tocsin notify test`.
+///
+/// # Errors
+///
+/// The file is not a SQLite database, or cannot be read.
+pub fn inspect_slack_hook(path: &Path, name: &str) -> Result<SlackHook> {
+    let conn = schema::open_inspector(path)?;
+    if !has_slack(&conn)? {
+        return Ok(SlackHook::Missing);
+    }
+    slack::hook(&conn, name)
+}
+
+fn has_slack(conn: &Connection) -> Result<bool> {
+    Ok(conn
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'slack_connection'")?
+        .exists([])?)
 }
 
 /// The shared body of [`Store::info`] and [`inspect`]. Only tables present

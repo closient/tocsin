@@ -23,8 +23,8 @@ use super::diagnostic::{Diagnostic, LineIndex};
 use super::notifier::NotifierType;
 use super::values::{Id, Secret, Text, email_address, is_unanswerable};
 use super::{
-    Auth, AuthMode, Check, Component, Config, Group, Heartbeat, Link, Notifier, Page, Project,
-    Route, Server, Subscribers, Token,
+    Auth, AuthMode, Check, Component, Config, Group, Heartbeat, Link, MAX_APP_NAME, Notifier, Page,
+    Project, Route, Server, Slack, Subscribers, Token,
 };
 use crate::link::{http_url, site_path};
 
@@ -60,6 +60,7 @@ pub(crate) const TOP_LEVEL_KEYS: &[&str] = &[
     "route",
     "token",
     "subscribers",
+    "slack",
 ];
 
 /// Parses, merges and validates configuration files, given in merge order.
@@ -170,6 +171,7 @@ struct Items {
     routes: Vec<Item<Route>>,
     tokens: Vec<Item<Token>>,
     subscribers: Option<Item<Subscribers>>,
+    slack: Option<Item<Slack>>,
 }
 
 struct ParsedFile<'a> {
@@ -347,6 +349,7 @@ impl<'a> Loader<'a> {
                         items.subscribers =
                             self.singleton(&origin, "subscribers", items.subscribers.take());
                     }
+                    "slack" => items.slack = self.singleton(&origin, "slack", items.slack.take()),
                     _ => {
                         let hint = closest(&key, TOP_LEVEL_KEYS.iter().copied()).map_or_else(
                             || format!("top-level tables are {}", list(TOP_LEVEL_KEYS)),
@@ -593,6 +596,9 @@ impl<'a> Loader<'a> {
         self.validate_email_senders(items);
         if let Some(subscribers) = &items.subscribers {
             self.validate_subscribers(subscribers, items.server.as_ref());
+        }
+        if let Some(slack) = &items.slack {
+            self.validate_slack(slack, items);
         }
         if let Some(page) = &items.page {
             self.validate_page(page);
@@ -956,6 +962,55 @@ impl<'a> Loader<'a> {
                 self.report(
                     &server.origin.key("email"),
                     format!("`[server.email]` needs `{key}` because {sender} sends email"),
+                    None,
+                );
+            }
+        }
+    }
+
+    /// `[slack]`: Slack sends people back to an `https` public URL, and
+    /// someone must be able to connect a channel: admins, behind
+    /// `[server.auth]`, or visitors, with `[subscribers]`.
+    fn validate_slack(&mut self, slack: &Item<Slack>, items: &Items) {
+        let origin = &slack.origin;
+        let server = items.server.as_ref();
+        let server_unknown =
+            server.is_none() && (self.singletons.contains_key("server") || self.incomplete);
+        let public_url = server.and_then(|server| server.value.public_url.as_ref());
+        match public_url {
+            None if !server_unknown => self.report(
+                origin,
+                "`[slack]` needs `[server] public_url`: Slack sends people back to it after they approve",
+                Some("add `public_url = \"https://status.example.com\"` under `[server]`, the address people open".to_owned()),
+            ),
+            Some(url) if !url.starts_with("https://") => {
+                let server = server.expect("public_url came from [server]");
+                self.report(
+                    &server.origin.key("public_url"),
+                    "`[slack]` needs an `https` `public_url`: Slack sends people back only to https addresses",
+                    None,
+                );
+            }
+            _ => {}
+        }
+        let admin = server
+            .and_then(|server| server.value.auth.as_ref())
+            .is_some_and(|auth| auth.mode != AuthMode::None);
+        let subscribers =
+            items.subscribers.is_some() || self.singletons.contains_key("subscribers");
+        if !admin && !subscribers && !server_unknown && !self.incomplete {
+            self.report(
+                origin,
+                "`[slack]` has no one to connect a channel: it needs the admin page or `[subscribers]`",
+                Some("set `[server.auth]` so admins can connect channels for notifiers, or add `[subscribers]` so visitors can add Slack".to_owned()),
+            );
+        }
+        if let Some(name) = &slack.value.app_name {
+            let length = name.chars().count();
+            if name.trim().is_empty() || length > MAX_APP_NAME {
+                self.report(
+                    &origin.key("app_name"),
+                    format!("`app_name` must be 1 to {MAX_APP_NAME} characters, as Slack requires; this one is {length}"),
                     None,
                 );
             }
@@ -1361,6 +1416,15 @@ impl<'a> Loader<'a> {
                 }
             }
         }
+        if let Some(slack) = &value.slack
+            && slack.webhook_url.is_some() == slack.connection.is_some()
+        {
+            self.report(
+                &origin.key("slack"),
+                "`[notifier.slack]` needs `webhook_url` or `connection`, not both",
+                Some("`connection` names a channel connected on the admin page; `webhook_url` is one you made yourself".to_owned()),
+            );
+        }
         if let Some(telegram) = &value.telegram
             && telegram.chat_id.is_empty()
         {
@@ -1533,6 +1597,13 @@ impl<'a> Loader<'a> {
             secrets.push((
                 subscribers.origin.keys(&["turnstile", "secret_key"]),
                 &mut turnstile.secret_key,
+            ));
+        }
+        if let Some(slack) = &mut items.slack {
+            secrets.push((slack.origin.key("client_id"), &mut slack.value.client_id));
+            secrets.push((
+                slack.origin.key("client_secret"),
+                &mut slack.value.client_secret,
             ));
         }
         for notifier in &mut items.notifiers {
@@ -1711,6 +1782,7 @@ impl<'a> Loader<'a> {
             tokens: values(items.tokens),
             page: items.page.map(|item| item.value).unwrap_or_default(),
             subscribers: items.subscribers.map(|item| item.value),
+            slack: items.slack.map(|item| item.value),
         })
     }
 }
@@ -2007,6 +2079,10 @@ mod tests {
                 "[[token]]\nid = \"sample\"\nsecret = \"${ENV:SAMPLE}\"\nscopes = [\"release\"]\n",
             ),
             ("subscribers", "[subscribers]\n"),
+            (
+                "slack",
+                "[slack]\nclient_id = \"${ENV:ID}\"\nclient_secret = \"${ENV:SECRET}\"\n",
+            ),
         ];
         let kinds: BTreeSet<&str> = TOP_LEVEL_KEYS.iter().copied().collect();
         let covered: BTreeSet<&str> = samples.iter().map(|(kind, _)| *kind).collect();
@@ -2054,6 +2130,7 @@ mod tests {
             let texts: &[&str] = match kind {
                 "route" => &[text, notifier],
                 "subscribers" => &[text, sender],
+                "slack" => &[text, sender, samples[10].1],
                 _ => &[text],
             };
             assert_ne!(render(texts)[kind], empty[kind], "{kind} was not collected");

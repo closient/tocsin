@@ -2,7 +2,7 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Incidents</h1>
-<p><a href="/admin/timeline">Timeline</a> · <a href="/releases">Releases</a>{% if subscribers %} · <a href="/admin/subscribers">Subscribers</a>{% endif %}</p>
+<p><a href="/admin/timeline">Timeline</a> · <a href="/releases">Releases</a>{% if subscribers %} · <a href="/admin/subscribers">Subscribers</a>{% endif %}{% if slack %} · <a href="/admin/slack">Slack</a>{% endif %}</p>
 
 {%- if incidents.is_empty() %}
 <p class="muted">Nothing yet.</p>

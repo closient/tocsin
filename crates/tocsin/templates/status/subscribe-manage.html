@@ -1,11 +1,12 @@
 {#- SPDX-License-Identifier: AGPL-3.0-only -#}
-{#- /subscribe/manage/<token>: what a subscriber hears about, and
-    unsubscribing (web/subscribe.rs `ManagePage`). -#}
+{#- /subscribe/manage/<token> and /subscribe/slack/manage/<token>: what
+    an address or a Slack channel hears about, and stopping it
+    (web/subscribe.rs `ManagePage`). -#}
 {% extends "status/layout.html" %}
 {% block content %}
 <div class="intro">
 <h1>Your subscription</h1>
-<p class="lede">Email from {{ chrome.site }} to {{ email }}.</p>
+<p class="lede">{{ lede }}</p>
 </div>
 {%- if let Some(done) = done %}
 <div class="notice done" role="status"><p>{{ done }}</p></div>
@@ -37,9 +38,9 @@
   {%- endif %}
   <div class="actions"><button type="submit">Save</button></div>
 </form>
-<h2 id="unsubscribe-heading">Unsubscribe</h2>
-<p>Stop all email from {{ chrome.site }} to this address. You can sign up again at any time.</p>
-<form class="actions" method="post" action="{{ unsubscribe }}" aria-labelledby="unsubscribe-heading">
-  <button type="submit" class="secondary">Unsubscribe</button>
+<h2 id="unsubscribe-heading">{{ stop.heading }}</h2>
+<p>{{ stop.line }}</p>
+<form class="actions" method="post" action="{{ stop.path }}" aria-labelledby="unsubscribe-heading">
+  <button type="submit" class="secondary">{{ stop.label }}</button>
 </form>
 {% endblock %}

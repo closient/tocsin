@@ -18,27 +18,42 @@ use std::sync::Arc;
 use tocsin_core::config::{self, NotifierSettings};
 
 use crate::notifier::Notifier;
+use crate::notifiers::slack::SlackHooks;
 
 /// Every notifier, by id.
 pub type Notifiers = HashMap<String, Arc<dyn Notifier>>;
 
-/// The notifier a `[[notifier]]` from a loaded configuration describes.
+/// The notifier a `[[notifier]]` from a loaded configuration describes. A
+/// Slack notifier naming a `connection` looks it up in `slack_hooks`.
 ///
 /// # Errors
 ///
 /// The settings cannot be used, such as an email notifier whose server
-/// email settings are missing or name a `noreply` address.
+/// email settings are missing or name a `noreply` address, or a Slack
+/// `connection` without `slack_hooks`.
 pub fn build(
     notifier: &config::Notifier,
     server_email: Option<&config::ServerEmail>,
     client: &reqwest::Client,
+    slack_hooks: Option<&Arc<dyn SlackHooks>>,
 ) -> Result<Arc<dyn Notifier>, String> {
     let client = client.clone();
     let built: Arc<dyn Notifier> = match notifier.settings() {
-        NotifierSettings::Slack(settings) => Arc::new(slack::Slack::new(
-            client,
-            settings.webhook_url.expose().to_owned(),
-        )),
+        NotifierSettings::Slack(settings) => match (&settings.webhook_url, &settings.connection) {
+            (Some(url), _) => Arc::new(slack::Slack::new(client, url.expose().to_owned())),
+            (None, Some(name)) => {
+                let hooks = slack_hooks
+                    .ok_or("a Slack `connection` needs the database, which is not open")?;
+                Arc::new(slack::SlackConnection::new(
+                    client,
+                    name.as_str().to_owned(),
+                    Arc::clone(hooks),
+                ))
+            }
+            (None, None) => {
+                return Err("`[notifier.slack]` needs `webhook_url` or `connection`".to_owned());
+            }
+        },
         NotifierSettings::Discord(settings) => Arc::new(discord::Discord::new(
             client,
             settings.webhook_url.expose().to_owned(),
@@ -108,13 +123,17 @@ pub fn build(
 /// # Errors
 ///
 /// A notifier cannot be built; the message names it.
-pub fn build_all(config: &config::Config, client: &reqwest::Client) -> Result<Notifiers, String> {
+pub fn build_all(
+    config: &config::Config,
+    client: &reqwest::Client,
+    slack_hooks: Option<&Arc<dyn SlackHooks>>,
+) -> Result<Notifiers, String> {
     config
         .notifiers
         .iter()
         .map(|notifier| {
             let id = notifier.id.as_str().to_owned();
-            build(notifier, config.server.email.as_ref(), client)
+            build(notifier, config.server.email.as_ref(), client, slack_hooks)
                 .map(|built| (id.clone(), built))
                 .map_err(|error| format!("notifier `{id}`: {error}"))
         })

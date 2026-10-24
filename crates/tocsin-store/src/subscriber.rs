@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Email subscribers, what they subscribe to, and the delivery log that
-//! sends each of them each announcement at most once.
+//! sends each of them each announcement at most once. Slack subscriber
+//! connections (`crate::slack`) share the announcements, through tables
+//! of the same shape.
 //!
 //! The store holds no cryptography: callers hand it the SHA-256 of each
 //! confirmation token and the random secret of each manage link, and
@@ -183,8 +185,42 @@ pub enum MailOutcome {
 pub struct SubscriberPrune {
     /// Unconfirmed subscribers whose link expired.
     pub expired: usize,
-    /// Finished deliveries past retention.
+    /// Finished deliveries, email and Slack, past retention.
     pub deliveries: usize,
+}
+
+/// Which kind of subscriber a query is about: an email address or a Slack
+/// channel. Both hear about the same announcements, through tables of the
+/// same shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Lane {
+    /// `subscriber`, `subscription`, `subscriber_delivery`.
+    Mail,
+    /// `slack_connection`, `slack_subscription`, `slack_delivery`.
+    Slack,
+}
+
+impl Lane {
+    fn subscriptions(self) -> &'static str {
+        match self {
+            Lane::Mail => "subscription",
+            Lane::Slack => "slack_subscription",
+        }
+    }
+
+    fn owner(self) -> &'static str {
+        match self {
+            Lane::Mail => "subscriber_id",
+            Lane::Slack => "connection_id",
+        }
+    }
+
+    fn deliveries(self) -> &'static str {
+        match self {
+            Lane::Mail => "subscriber_delivery",
+            Lane::Slack => "slack_delivery",
+        }
+    }
 }
 
 const SUBSCRIBER_COLUMNS: &str =
@@ -202,10 +238,12 @@ fn subscriber_row(row: &Row<'_>) -> rusqlite::Result<Subscriber> {
     })
 }
 
-fn preferences(conn: &Connection, id: i64) -> Result<Preferences> {
-    let mut statement = conn.prepare_cached(
-        "SELECT kind, target FROM subscription WHERE subscriber_id = ?1 ORDER BY kind, target",
-    )?;
+pub(crate) fn preferences(conn: &Connection, lane: Lane, id: i64) -> Result<Preferences> {
+    let mut statement = conn.prepare_cached(&format!(
+        "SELECT kind, target FROM {} WHERE {} = ?1 ORDER BY kind, target",
+        lane.subscriptions(),
+        lane.owner()
+    ))?;
     let mut preferences = Preferences::default();
     let rows = statement.query_map([id], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -228,7 +266,7 @@ fn with_preferences(
     let Some(mut subscriber) = subscriber else {
         return Ok(None);
     };
-    subscriber.preferences = preferences(conn, subscriber.id)?;
+    subscriber.preferences = preferences(conn, Lane::Mail, subscriber.id)?;
     Ok(Some(subscriber))
 }
 
@@ -264,15 +302,17 @@ pub(crate) fn by_confirmation(
     with_preferences(conn, found)
 }
 
-fn replace_preferences(
+pub(crate) fn replace_preferences(
     transaction: &Transaction<'_>,
+    lane: Lane,
     id: i64,
     preferences: &Preferences,
 ) -> Result<()> {
-    transaction.execute("DELETE FROM subscription WHERE subscriber_id = ?1", [id])?;
-    let mut insert = transaction.prepare_cached(
-        "INSERT OR IGNORE INTO subscription (subscriber_id, kind, target) VALUES (?1, ?2, ?3)",
-    )?;
+    let (table, owner) = (lane.subscriptions(), lane.owner());
+    transaction.execute(&format!("DELETE FROM {table} WHERE {owner} = ?1"), [id])?;
+    let mut insert = transaction.prepare_cached(&format!(
+        "INSERT OR IGNORE INTO {table} ({owner}, kind, target) VALUES (?1, ?2, ?3)"
+    ))?;
     for (scope, targets) in [
         (Scope::Component, &preferences.components),
         (Scope::Project, &preferences.projects),
@@ -304,7 +344,7 @@ pub(crate) fn sign_up(conn: &mut Connection, signup: &NewSignup) -> Result<Signu
                 "UPDATE subscriber SET confirm_hash = ?2, confirm_expires_at = ?3 WHERE id = ?1",
                 params![id, signup.confirm_hash, signup.confirm_expires_at_ms],
             )?;
-            replace_preferences(&transaction, id, &signup.preferences)?;
+            replace_preferences(&transaction, Lane::Mail, id, &signup.preferences)?;
             (id, Signup::Unconfirmed)
         }
         None => {
@@ -321,7 +361,7 @@ pub(crate) fn sign_up(conn: &mut Connection, signup: &NewSignup) -> Result<Signu
                 ],
             )?;
             let id = transaction.last_insert_rowid();
-            replace_preferences(&transaction, id, &signup.preferences)?;
+            replace_preferences(&transaction, Lane::Mail, id, &signup.preferences)?;
             (id, Signup::New)
         }
     };
@@ -371,7 +411,7 @@ pub(crate) fn set_preferences(
         .optional()?
         .is_some();
     if exists {
-        replace_preferences(&transaction, id, preferences)?;
+        replace_preferences(&transaction, Lane::Mail, id, preferences)?;
     }
     transaction.commit()?;
     Ok(exists)
@@ -392,7 +432,7 @@ pub(crate) fn list(conn: &Connection, after: Option<i64>, limit: u32) -> Result<
         .collect::<rusqlite::Result<Vec<_>>>()?;
     rows.into_iter()
         .map(|mut subscriber| {
-            subscriber.preferences = preferences(conn, subscriber.id)?;
+            subscriber.preferences = preferences(conn, Lane::Mail, subscriber.id)?;
             Ok(subscriber)
         })
         .collect()
@@ -440,9 +480,10 @@ pub(crate) fn queue_announcement(
     Ok(inserted > 0)
 }
 
-/// Queues a delivery to every confirmed subscriber each unexpanded
-/// announcement matches, and marks it expanded, one announcement per
-/// transaction. Resolves with how many deliveries it queued.
+/// Queues a delivery to every confirmed subscriber and every live Slack
+/// subscriber connection each unexpanded announcement matches, and marks
+/// it expanded, one announcement per transaction, so neither lane can be
+/// queued without the other. Resolves with how many deliveries it queued.
 pub(crate) fn expand(conn: &mut Connection, now_ms: i64) -> Result<usize> {
     let pending: Vec<i64> = {
         let mut statement = conn.prepare_cached(
@@ -473,6 +514,22 @@ pub(crate) fn expand(conn: &mut Connection, now_ms: i64) -> Result<usize> {
              ORDER BY s.id",
             params![event, now_ms],
         )?;
+        queued += transaction.execute(
+            "INSERT OR IGNORE INTO slack_delivery (connection_id, event_id, next_attempt_at)
+             SELECT c.id, e.id, ?2
+             FROM subscriber_event e
+             JOIN slack_connection c ON c.purpose = 'subscriber' AND c.dead_at IS NULL
+             WHERE e.id = ?1 AND e.expanded_at IS NULL AND EXISTS (
+                 SELECT 1 FROM slack_subscription p
+                 WHERE p.connection_id = c.id AND p.kind = e.scope AND (
+                     p.target = '*'
+                     OR NOT EXISTS (SELECT 1 FROM subscriber_event_target t WHERE t.event_id = e.id)
+                     OR p.target IN (SELECT t.target FROM subscriber_event_target t WHERE t.event_id = e.id)
+                 )
+             )
+             ORDER BY c.id",
+            params![event, now_ms],
+        )?;
         transaction.execute(
             "UPDATE subscriber_event SET expanded_at = max(?2, created_at)
              WHERE id = ?1 AND expanded_at IS NULL",
@@ -483,18 +540,21 @@ pub(crate) fn expand(conn: &mut Connection, now_ms: i64) -> Result<usize> {
     Ok(queued)
 }
 
-pub(crate) fn mailbag(conn: &Connection, now_ms: i64, limit: u32) -> Result<Mailbag> {
-    let mut statement = conn.prepare_cached(
-        "SELECT id FROM subscriber_delivery
+pub(crate) fn mailbag(conn: &Connection, lane: Lane, now_ms: i64, limit: u32) -> Result<Mailbag> {
+    let table = lane.deliveries();
+    let mut statement = conn.prepare_cached(&format!(
+        "SELECT id FROM {table}
          WHERE status = 'pending' AND next_attempt_at <= ?1
-         ORDER BY next_attempt_at, id LIMIT ?2",
-    )?;
+         ORDER BY next_attempt_at, id LIMIT ?2"
+    ))?;
     let due = statement
         .query_map(params![now_ms, limit], |row| row.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     let next_at_ms = conn.query_row(
-        "SELECT min(next_attempt_at) FROM subscriber_delivery
-         WHERE status = 'pending' AND next_attempt_at > ?1",
+        &format!(
+            "SELECT min(next_attempt_at) FROM {table}
+             WHERE status = 'pending' AND next_attempt_at > ?1"
+        ),
         [now_ms],
         |row| row.get(0),
     )?;
@@ -544,40 +604,58 @@ pub(crate) fn claim(conn: &mut Connection, id: i64) -> Result<Option<ClaimedMail
 
 pub(crate) fn finish(
     conn: &mut Connection,
+    lane: Lane,
     id: i64,
     outcome: &MailOutcome,
     now_ms: i64,
 ) -> Result<()> {
+    let table = lane.deliveries();
     match outcome {
         MailOutcome::Sent => conn.execute(
-            "UPDATE subscriber_delivery SET status = 'sent', last_error = NULL, finished_at = ?2
-             WHERE id = ?1 AND status = 'sending'",
+            &format!(
+                "UPDATE {table} SET status = 'sent', last_error = NULL, finished_at = ?2
+                 WHERE id = ?1 AND status = 'sending'"
+            ),
             params![id, now_ms],
         )?,
         MailOutcome::Retry { at_ms, error } => conn.execute(
-            "UPDATE subscriber_delivery SET status = 'pending', last_error = ?2, next_attempt_at = ?3
-             WHERE id = ?1 AND status = 'sending'",
+            &format!(
+                "UPDATE {table} SET status = 'pending', last_error = ?2, next_attempt_at = ?3
+                 WHERE id = ?1 AND status = 'sending'"
+            ),
             params![id, error, at_ms],
         )?,
         MailOutcome::Failed { error } => conn.execute(
-            "UPDATE subscriber_delivery SET status = 'failed', last_error = ?2, finished_at = ?3
-             WHERE id = ?1 AND status = 'sending'",
+            &format!(
+                "UPDATE {table} SET status = 'failed', last_error = ?2, finished_at = ?3
+                 WHERE id = ?1 AND status = 'sending'"
+            ),
             params![id, error, now_ms],
         )?,
     };
     Ok(())
 }
 
-/// Fails every delivery left `sending`: the SMTP server may have taken it
-/// before the process stopped, so it is never sent again.
+/// Fails every delivery, email or Slack, left `sending`: the SMTP server
+/// or Slack may have taken it before the process stopped, so it is never
+/// sent again.
 pub(crate) fn interrupt(conn: &mut Connection, now_ms: i64) -> Result<usize> {
-    Ok(conn.execute(
-        "UPDATE subscriber_delivery
-         SET status = 'failed', finished_at = ?1,
-             last_error = 'interrupted while sending; not sent again, to avoid a duplicate'
-         WHERE status = 'sending'",
-        [now_ms],
-    )?)
+    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut interrupted = 0;
+    for lane in [Lane::Mail, Lane::Slack] {
+        interrupted += transaction.execute(
+            &format!(
+                "UPDATE {}
+                 SET status = 'failed', finished_at = ?1,
+                     last_error = 'interrupted while sending; not sent again, to avoid a duplicate'
+                 WHERE status = 'sending'",
+                lane.deliveries()
+            ),
+            [now_ms],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(interrupted)
 }
 
 pub(crate) fn prune(
@@ -592,10 +670,16 @@ pub(crate) fn prune(
     )?;
     // An announcement keeps its row, and so its key, after its deliveries
     // go: it is expanded once, so a pruned delivery is never queued again.
-    let deliveries = transaction.execute(
-        "DELETE FROM subscriber_delivery WHERE finished_at IS NOT NULL AND finished_at < ?1",
-        [finished_before_ms],
-    )?;
+    let mut deliveries = 0;
+    for lane in [Lane::Mail, Lane::Slack] {
+        deliveries += transaction.execute(
+            &format!(
+                "DELETE FROM {} WHERE finished_at IS NOT NULL AND finished_at < ?1",
+                lane.deliveries()
+            ),
+            [finished_before_ms],
+        )?;
+    }
     transaction.commit()?;
     Ok(SubscriberPrune {
         expired,

@@ -68,6 +68,19 @@ pub mod paths {
     pub fn unsubscribe(manage: &str) -> String {
         format!("{SUBSCRIBE}/unsubscribe/{manage}")
     }
+
+    /// Where the form's "Add to Slack" posts.
+    pub const SLACK: &str = "/subscribe/slack";
+
+    /// The preferences page for a Slack channel's manage token.
+    pub fn slack_manage(manage: &str) -> String {
+        format!("{SLACK}/manage/{manage}")
+    }
+
+    /// The page that removes a Slack channel, for its manage token.
+    pub fn slack_unsubscribe(manage: &str) -> String {
+        format!("{SLACK}/unsubscribe/{manage}")
+    }
 }
 
 /// Hands a finished message to the mail server. The [`Mailer`] in
@@ -112,6 +125,10 @@ pub struct Subscriptions {
     per_address: limit::Window<[u8; 32]>,
     wake: Notify,
     turnstile: Option<turnstile::Verifier>,
+    /// `[server.email] reply_to`: who Slack messages say to write to.
+    contact: String,
+    /// Posts to subscribers' Slack channels.
+    http: reqwest::Client,
 }
 
 impl std::fmt::Debug for Subscriptions {
@@ -183,6 +200,15 @@ impl Subscriptions {
             .map_err(|error| format!("public_url: {error}"))?
             .origin()
             .ascii_serialization();
+        let contact = config
+            .server
+            .email
+            .as_ref()
+            .and_then(|email| email.reply_to.clone())
+            .ok_or("[subscribers] needs reply_to in [server.email]")?;
+        let http = crate::net::http_client(tocsin_alert::HTTP_TIMEOUT)
+            .build()
+            .map_err(|error| format!("the Slack client: {error}"))?;
         let turnstile = match &settings.turnstile {
             Some(widget) => Some(turnstile::Verifier::new(
                 widget.site_key.clone(),
@@ -204,6 +230,8 @@ impl Subscriptions {
             outbox,
             wake: Notify::new(),
             turnstile,
+            contact,
+            http,
         })
     }
 
@@ -465,6 +493,69 @@ impl Subscriptions {
 
     pub(crate) fn outbox(&self) -> &dyn Outbox {
         self.outbox.as_ref()
+    }
+
+    /// Posts `text` to subscriber channel `connection_id` at its secret
+    /// `webhook_url`, with the links that manage it. A webhook Slack says
+    /// is revoked marks the connection dead, so nothing is posted to it
+    /// again.
+    ///
+    /// # Errors
+    ///
+    /// The post failed, and whether it was for good.
+    pub(crate) async fn post_slack(
+        &self,
+        store: &Store,
+        connection_id: i64,
+        webhook_url: &str,
+        manage: &str,
+        text: &message::Text,
+    ) -> Result<(), SendError> {
+        let payload = message::slack(&self.base, manage, &self.contact, text);
+        match tocsin_alert::notifiers::slack::post(&self.http, webhook_url, &payload).await {
+            Ok(()) => Ok(()),
+            Err(Err(error)) => Err(error),
+            Err(Ok(reason)) => {
+                tracing::warn!(
+                    connection = connection_id,
+                    %reason,
+                    "Slack revoked a subscriber's channel; marking it dead"
+                );
+                if let Err(error) = store
+                    .kill_slack(connection_id, reason.clone(), tocsin_store::now_ms())
+                    .await
+                {
+                    tracing::error!(connection = connection_id, %error, "cannot mark the Slack channel dead");
+                }
+                Err(SendError::permanent(format!(
+                    "Slack revoked the channel ({reason})"
+                )))
+            }
+        }
+    }
+
+    /// Welcomes a channel just added: what it will hear about, and how to
+    /// change that or remove it. Sent in the background; a failure is
+    /// logged, and a revoked webhook marks the channel dead at once.
+    pub fn welcome_slack(
+        self: &Arc<Self>,
+        state: &AppState,
+        connection_id: i64,
+        webhook_url: String,
+        manage: String,
+        preferences: &Preferences,
+    ) {
+        let text = message::slack_welcome(&state.config, &self.base, preferences);
+        let store = Arc::clone(&state.store);
+        let subscriptions = Arc::clone(self);
+        tokio::spawn(async move {
+            if let Err(error) = subscriptions
+                .post_slack(&store, connection_id, &webhook_url, &manage, &text)
+                .await
+            {
+                tracing::warn!(connection = connection_id, %error, "Slack welcome not posted");
+            }
+        });
     }
 }
 

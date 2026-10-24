@@ -94,6 +94,7 @@ fn api() -> Api {
         config_status: crate::reload::steady_status(),
         metrics: Arc::new(crate::metrics::Metrics::new()),
         subscribers: None,
+        slack: None,
     };
     Api {
         _dir: dir,

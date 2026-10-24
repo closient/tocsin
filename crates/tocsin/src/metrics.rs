@@ -31,9 +31,14 @@ use tocsin_core::probe::{CompiledCheck, ProbeOutcome};
 use tocsin_core::state::ComponentStatus;
 use tocsin_engine::ports::{BoxFuture, Runner};
 use tocsin_engine::{MemberKind, Snapshot};
+use tocsin_store::SlackCounts;
 
 /// A series' labels, in the order they are written.
 type Labels = Vec<(&'static str, String)>;
+
+/// The Slack connections now: how many of each kind are live and dead,
+/// and each operator connection's name and whether it is live.
+pub type SlackCensus = (SlackCounts, Vec<(String, bool)>);
 
 /// A gauge holding a fraction.
 type FloatGauge = Gauge<f64, AtomicU64>;
@@ -82,9 +87,16 @@ impl Metrics {
 
     /// Every metric now, in the Prometheus text format: the registry's,
     /// less the series of whatever `config` no longer has, then the state
-    /// in `snapshot`, which must be the engine's for `config`, and the
-    /// database's size.
-    pub fn render(&self, snapshot: &Snapshot, config: &Config, db_size_bytes: u64) -> String {
+    /// in `snapshot`, which must be the engine's for `config`, the
+    /// database's size, and the Slack connections when there are any to
+    /// describe.
+    pub fn render(
+        &self,
+        snapshot: &Snapshot,
+        config: &Config,
+        db_size_bytes: u64,
+        slack: Option<&SlackCensus>,
+    ) -> String {
         let node = config.server.node_id.as_deref().unwrap_or_default();
         // Held until the registry is written, so a probe of a check the
         // configuration dropped cannot bring its series back in between.
@@ -96,7 +108,10 @@ impl Metrics {
                 .iter()
                 .any(|configured| configured.id.as_str() == notifier)
         });
-        let now = state_now(snapshot, node, &pings, db_size_bytes);
+        let mut now = state_now(snapshot, node, &pings, db_size_bytes);
+        if let Some(census) = slack {
+            slack_now(&mut now, census, config);
+        }
         let mut text = String::new();
         prometheus_client::encoding::text::encode_registry(&mut text, &self.registry)
             .expect("writing to a String cannot fail");
@@ -195,6 +210,55 @@ fn state_now(
         db_size,
     );
     registry
+}
+
+/// Adds the Slack connections' gauges to `registry`: how many there are
+/// of each purpose and state, and whether the connection each notifier
+/// names is live. A name not connected is 0, as a dead one is: its
+/// alerts fail either way.
+fn slack_now(registry: &mut Registry, (counts, operator): &SlackCensus, config: &Config) {
+    let connections = Family::<Labels, Gauge>::default();
+    for (purpose, state, count) in [
+        ("operator", "live", counts.operator_live),
+        ("operator", "dead", counts.operator_dead),
+        ("subscriber", "live", counts.subscriber_live),
+        ("subscriber", "dead", counts.subscriber_dead),
+    ] {
+        connections
+            .get_or_create(&vec![
+                ("purpose", purpose.to_owned()),
+                ("state", state.to_owned()),
+            ])
+            .set(count);
+    }
+    let up = Family::<Labels, Gauge>::default();
+    for notifier in &config.notifiers {
+        let Some(name) = notifier
+            .slack
+            .as_ref()
+            .and_then(|slack| slack.connection.as_ref())
+        else {
+            continue;
+        };
+        let live = operator
+            .iter()
+            .any(|(known, live)| known == name.as_str() && *live);
+        up.get_or_create(&vec![
+            ("notifier", notifier.id.as_str().to_owned()),
+            ("connection", name.as_str().to_owned()),
+        ])
+        .set(i64::from(live));
+    }
+    registry.register(
+        "tocsin_slack_connections",
+        "Slack channels connected by signing in, by purpose (operator or subscriber) and state (live, or dead because Slack revoked it)",
+        connections,
+    );
+    registry.register(
+        "tocsin_slack_connection_up",
+        "1 when the Slack connection a notifier names is connected and live, 0 when it is missing or Slack revoked it",
+        up,
+    );
 }
 
 fn check_labels(check: &str, component: &str, node: &str) -> Labels {

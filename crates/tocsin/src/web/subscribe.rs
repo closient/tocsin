@@ -92,6 +92,8 @@ pub struct SignupForm {
     /// The Turnstile site key. On `/` the form is then a link to
     /// `/subscribe`, which loads the widget.
     pub(super) turnstile: Option<String>,
+    /// Whether `[slack]` is on, adding "Add to Slack" beside the address.
+    pub(super) slack: bool,
     /// The no-email alternative.
     pub(super) incident_feed: &'static str,
     pub(super) release_feed: Option<&'static str>,
@@ -109,7 +111,7 @@ impl SignupForm {
     }
 
     /// The form on `/subscribe`, with `components` and `projects` checked.
-    fn full(
+    pub(super) fn full(
         state: &AppState,
         subscriptions: &Subscriptions,
         components: &[String],
@@ -127,6 +129,7 @@ impl SignupForm {
             projects,
             errors: Vec::new(),
             turnstile: subscriptions.turnstile_site_key().map(str::to_owned),
+            slack: state.slack.is_some(),
             incident_feed: feeds::INCIDENTS,
             release_feed: state
                 .config
@@ -138,14 +141,14 @@ impl SignupForm {
     }
 }
 
-fn every() -> Vec<String> {
+pub(super) fn every() -> Vec<String> {
     vec![EVERY.to_owned()]
 }
 
 /// The checkboxes for `preferences`: "every component" then each one,
 /// and "every public project" then each one, or none without a public
 /// project.
-fn choices(state: &AppState, preferences: &Preferences) -> (Vec<Choice>, Vec<Choice>) {
+pub(super) fn choices(state: &AppState, preferences: &Preferences) -> (Vec<Choice>, Vec<Choice>) {
     let checked = |chosen: &[String], id: &str| chosen.iter().any(|known| known == id);
     let all_components = checked(&preferences.components, EVERY);
     let components = std::iter::once(Choice {
@@ -193,7 +196,7 @@ struct SignupPage {
 }
 
 /// `errors` as sentences, each naming its field as the form does.
-fn explain(errors: &[FieldError]) -> Vec<String> {
+pub(super) fn explain(errors: &[FieldError]) -> Vec<String> {
     errors
         .iter()
         .map(|error| {
@@ -216,9 +219,9 @@ struct Onward {
 }
 
 /// A button that posts, on a [`NoticePage`].
-struct Action {
-    path: String,
-    label: &'static str,
+pub(super) struct Action {
+    pub(super) path: String,
+    pub(super) label: &'static str,
 }
 
 /// A short page: a heading, a few sentences, perhaps one button.
@@ -233,23 +236,34 @@ struct NoticePage {
     onward: Option<Onward>,
 }
 
+/// What a subscription's page shows: an address's, or a Slack channel's.
 #[derive(Template)]
 #[template(path = "status/subscribe-manage.html")]
-struct ManagePage {
-    layout: Layout,
-    chrome: Chrome,
-    email: String,
+pub(super) struct ManagePage {
+    pub(super) layout: Layout,
+    pub(super) chrome: Chrome,
+    /// What is subscribed, under the heading.
+    pub(super) lede: String,
     /// What the page says it just did, if anything.
-    done: Option<&'static str>,
-    path: String,
-    unsubscribe: String,
-    components: Vec<Choice>,
-    projects: Vec<Choice>,
-    errors: Vec<String>,
+    pub(super) done: Option<&'static str>,
+    pub(super) path: String,
+    /// The last section: its heading, sentence, and button.
+    pub(super) stop: Stop,
+    pub(super) components: Vec<Choice>,
+    pub(super) projects: Vec<Choice>,
+    pub(super) errors: Vec<String>,
+}
+
+/// How a [`ManagePage`] ends the subscription.
+pub(super) struct Stop {
+    pub(super) heading: &'static str,
+    pub(super) line: String,
+    pub(super) path: String,
+    pub(super) label: &'static str,
 }
 
 /// The layout and chrome every page here shares.
-fn frame(state: &AppState, title: &str, path: &str) -> (Layout, Chrome) {
+pub(super) fn frame(state: &AppState, title: &str, path: &str) -> (Layout, Chrome) {
     let config = &state.config;
     let title = format!("{title} · {}", config.page.title);
     let json_ld = serde_json::json!({
@@ -265,7 +279,7 @@ fn frame(state: &AppState, title: &str, path: &str) -> (Layout, Chrome) {
 }
 
 /// `page` with no indexing: these pages are personal or transient.
-fn private(status: StatusCode, page: &impl Template) -> Response {
+pub(super) fn private(status: StatusCode, page: &impl Template) -> Response {
     let mut response = render(status, page);
     response.headers_mut().insert(
         HeaderName::from_static("x-robots-tag"),
@@ -274,7 +288,7 @@ fn private(status: StatusCode, page: &impl Template) -> Response {
     response
 }
 
-fn notice(
+pub(super) fn notice(
     state: &AppState,
     status: StatusCode,
     heading: &str,
@@ -298,12 +312,15 @@ fn notice(
 
 /// The running feature. The routes are merged only when it is on, so this
 /// fails only if it was turned off by a reload, which keeps it as it was.
-fn enabled(state: &AppState) -> Result<Arc<Subscriptions>, HtmlError> {
+pub(super) fn enabled(state: &AppState) -> Result<Arc<Subscriptions>, HtmlError> {
     state.subscribers.clone().ok_or_else(HtmlError::not_found)
 }
 
 /// Refuses a post that did not come from a page on this site.
-fn same_site(headers: &HeaderMap, subscriptions: &Subscriptions) -> Result<(), HtmlError> {
+pub(super) fn same_site(
+    headers: &HeaderMap,
+    subscriptions: &Subscriptions,
+) -> Result<(), HtmlError> {
     csrf::same_origin(headers, subscriptions.origin()).map_err(|reason| {
         tracing::warn!(reason, "subscriber form refused as cross-site");
         HtmlError::new(
@@ -314,7 +331,7 @@ fn same_site(headers: &HeaderMap, subscriptions: &Subscriptions) -> Result<(), H
 }
 
 /// The sign-up page, with Turnstile's script and CSP when it is on.
-fn signup_response(state: &AppState, form: SignupForm, status: StatusCode) -> Response {
+pub(super) fn signup_response(state: &AppState, form: SignupForm, status: StatusCode) -> Response {
     let (layout, mut chrome) = frame(state, "Subscribe", paths::SUBSCRIBE);
     let turnstile = form.turnstile.is_some();
     if turnstile {
@@ -406,7 +423,7 @@ async fn sign_up(
 }
 
 /// An API error as a page, keeping `Retry-After`.
-fn refusal(error: ApiError) -> Response {
+pub(super) fn refusal(error: ApiError) -> Response {
     let wait = error.retry_after();
     let mut response = HtmlError::from(error).into_response();
     if let Some(wait) = wait {
@@ -418,7 +435,7 @@ fn refusal(error: ApiError) -> Response {
 }
 
 /// A token from a path, if it is shaped like one.
-fn path_token(token: Result<Path<String>, PathRejection>) -> Result<String, HtmlError> {
+pub(super) fn path_token(token: Result<Path<String>, PathRejection>) -> Result<String, HtmlError> {
     let Ok(Path(token)) = token else {
         return Err(HtmlError::not_found());
     };
@@ -502,7 +519,7 @@ async fn confirm(
 }
 
 /// What `preferences` covers, in words.
-fn what(preferences: &Preferences) -> &'static str {
+pub(super) fn what(preferences: &Preferences) -> &'static str {
     match (
         preferences.components.is_empty(),
         preferences.projects.is_empty(),
@@ -557,12 +574,11 @@ async fn manage_page(
         Some("saved") => Some("Saved."),
         _ => None,
     };
-    let preferences = subscriber.preferences.clone();
     Ok(manage_response(
         &state,
         &token,
-        subscriber,
-        &preferences,
+        &subscriber,
+        &subscriber.preferences,
         done,
         Vec::new(),
     ))
@@ -571,7 +587,7 @@ async fn manage_page(
 fn manage_response(
     state: &AppState,
     token: &str,
-    subscriber: Subscriber,
+    subscriber: &Subscriber,
     preferences: &Preferences,
     done: Option<&'static str>,
     errors: Vec<String>,
@@ -588,10 +604,21 @@ fn manage_response(
         &ManagePage {
             layout,
             chrome,
-            email: subscriber.email,
+            lede: format!(
+                "Email from {} to {}.",
+                state.config.page.title, subscriber.email
+            ),
             done,
             path: paths::manage(token),
-            unsubscribe: paths::unsubscribe(token),
+            stop: Stop {
+                heading: "Unsubscribe",
+                line: format!(
+                    "Stop all email from {} to this address. You can sign up again at any time.",
+                    state.config.page.title
+                ),
+                path: paths::unsubscribe(token),
+                label: "Unsubscribe",
+            },
             components,
             projects,
             errors,
@@ -634,7 +661,7 @@ async fn save(
             Ok(manage_response(
                 &state,
                 &token,
-                subscriber,
+                &subscriber,
                 &asked,
                 None,
                 explain(error.fields()),

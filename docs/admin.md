@@ -145,6 +145,30 @@ unconfirmed totals, and a button that removes one. Removing deletes the
 address, its choices and any email still queued for it. The button is a
 form like the others here, under the same origin and token checks.
 
+## Slack
+
+With [`[slack]`](alerting.md#connecting-a-channel-by-signing-in) set,
+`/admin/slack`, linked from `/admin/`, connects Slack channels by signing
+in to Slack. **Alert channels** lists every channel connected for
+notifiers, by name, with its channel and workspace, who connected it and
+when, which notifiers use it, and whether it is live or dead; a dead one
+shows Slack's reason. Above the list, any name a notifier uses that is
+not connected is shown as an error, because its alerts fail. **Connect a
+channel** takes a name and sends you to Slack to pick the channel;
+connecting a name again replaces its channel. With `[subscribers]`,
+**Subscriber channels** lists the channels visitors added, live or dead.
+
+Every connection has a Remove button, a form under the same origin and
+token checks as the others here. Removing an alert channel makes the
+notifiers naming it fail until it is connected again; removing a
+subscriber's deletes it and every post still queued for it. No page ever
+shows a webhook URL: Slack's answer is kept in the database and used only
+to post.
+
+The sign-in leaves for `https://slack.com`, so while `[slack]` is set the
+`Content-Security-Policy` of every page allows `form-action` to it as
+well as to the page's own origin; without `[slack]` it stays `'self'`.
+
 ## What it protects against
 
 | Threat | Defence |

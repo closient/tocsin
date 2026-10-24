@@ -35,7 +35,7 @@ error: configuration in /etc/tocsin has 2 errors
   hint: did you mean `api`?
 ```
 
-With `--json`, success is `{"ok": true, "files": [...], "counts": {...}}`, and failure (exit 2) is:
+With `--json`, success is `{"ok": true, "files": [...], "counts": {...}, "warnings": [...]}`, and failure (exit 2) is:
 
 ```json
 {"error": {"kind": "invalid_input", "message": "configuration in /etc/tocsin has 2 errors",
@@ -48,6 +48,10 @@ Every error has all six keys; `line`, `column`, `path` and `hint` are `null` whe
 Each `[[check]]`, `[[component]]` and other item is read on its own, so one broken item does not hide problems in the others. Within one item, a value that cannot be read at all (an unknown field, a wrong type, a bad duration) is reported, and that item's other rules are not checked until it is fixed.
 
 A file with a TOML syntax error, or one that cannot be read or is not UTF-8, is reported and otherwise skipped. The ids it defines are then unknown, so unknown references are not reported until it is fixed, rather than reporting every reference to an id in it.
+
+### Warnings
+
+A warning is printed after a valid configuration and does not change the exit code. Today the only warnings are about Slack connections: a notifier naming a [`connection`](alerting.md#slack) that is not connected, or that Slack revoked, and a notifier naming one without `[slack]`. To find them, `config check` reads the database in `[server] data_dir`, or in `--data <dir>`, opening it read-only; a database that does not exist yet means nothing is connected. A connection is made on the admin page of a running server, so its absence cannot be an error.
 
 ## Reloading
 
@@ -372,7 +376,7 @@ Every notifier has an `id`, an optional display `name`, and a `type`.
 
 | `type` | Settings |
 |--------|----------|
-| `slack` | `webhook_url` (secret) |
+| `slack` | `connection`, a channel connected on `/admin/slack` (needs [`[slack]`](#slack)), or `webhook_url` (secret), one you made yourself; exactly one of the two |
 | `pushover` | `user_key` (secret), `api_token` (secret), and the priorities `down_priority` (default 1), `degraded_priority` (0) and `resolved_priority` (0), each -2 to 2. 2 is an emergency, repeated until acknowledged, and cancelled when the alert resolves or drops to a priority below 2. |
 | `email` | `to`: a list of addresses. Sender settings come from `[server.email]`; `smtp_url` is `smtps://` for TLS, or `smtp://`, which requires STARTTLS unless it ends `?tls=none`. |
 | `ntfy` | `url` (the topic URL), `token` (secret, optional) |
@@ -425,6 +429,24 @@ on sign-up: `site_key` and `secret_key` (secret), both required. See
 
 The table is read at startup; a reload that changes it keeps the running
 one and logs a warning.
+
+## `[slack]`
+
+Your own Slack app, which lets admins connect alert channels on
+`/admin/slack` and, with `[subscribers]`, visitors add Slack beside email.
+`tocsin slack setup` prints the link that creates the app with its
+manifest filled in; [alerting.md](alerting.md#connecting-a-channel-by-signing-in)
+walks through it.
+
+| Key | Type | Default | |
+|-----|------|---------|-|
+| `client_id` | secret | | Required. The app's Client ID. |
+| `client_secret` | secret | | Required. The app's Client Secret. |
+| `app_name` | string | the page title | The app's name in the manifest `tocsin slack setup` prints, 1 to 35 characters. |
+
+It requires an `https` `[server] public_url`, and either `[server.auth]`
+or `[subscribers]`, so someone can connect a channel. Like `[server]`, it
+is read at startup.
 
 ## `[[token]]`
 

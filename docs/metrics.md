@@ -360,28 +360,33 @@ sending nothing, when the Slack connections cannot be read from the
 database, as a scrape of `/metrics` then answers 500.
 
 An attempt the collector refuses for now is retried, as the OTLP
-specification has it: over `http/protobuf` an answer of 429, 502, 503
-or 504; over `grpc` `UNAVAILABLE`, or `RESOURCE_EXHAUSTED` when the
-collector sends a `RetryInfo`. The retry waits as long as the
-collector's `Retry-After` header or `RetryInfo` asks, or else 1 s,
-doubling with each retry of the same export, jittered and never more
-than the interval. The same export is sent again. A retry is made only
-if it would end, even waiting out the timeout, before the next export is
-due, so retries never run into the next interval: with the timeout equal
-to the interval (the default for intervals of 10 s or less) there are
-none. Any other failure, an unanswered attempt among them, is not
-retried. Every failed attempt, retried or not, is counted and logged,
-the warning saying whether it is retried and when, so an export that
-succeeds on its second attempt still counts one failure. An export that
-is given up on is not lost: the next one, an interval later, carries the
-cumulative counts again, so a collector that recovers loses only the
-points in between.
+specification has it: over `http/protobuf` an answer of 429, 502, 503 or
+504; over `grpc` `UNAVAILABLE`, or `RESOURCE_EXHAUSTED` when the
+collector sends a `RetryInfo`. So is an attempt that cannot reach the
+collector: the connection refused, its name not resolved, the connection
+not made within half the timeout, or the connection closed before the
+collector answered (over `grpc`, tonic answers these `UNAVAILABLE`). The
+retry waits as long as the collector's `Retry-After` header or
+`RetryInfo` asks, or else 1 s, doubling with each retry of the same
+export, jittered and never more than the interval. The same export is
+sent again. A retry is made only if it would end, even waiting out the
+timeout, before the next export is due, so retries never run into the
+next interval: with the timeout equal to the interval (the default for
+intervals of 10 s or less) there are none. Any other failure, an attempt
+left unanswered for the whole timeout among them, is not retried. Every
+failed attempt, retried or not, is counted and logged, the warning
+saying whether it is retried and when, so an export that succeeds on its
+second attempt still counts one failure. An export that is given up on
+is not lost: the next one, an interval later, carries the cumulative
+counts again, so a collector that recovers loses only the points in
+between.
 
 The export runs on its own task. It reads the counters the probes write,
 and never waits on a probe, a database write or the page; the Slack
-connections come from the database's readers, inside the timeout. A
-collector that hangs costs at most one timeout per interval and slows
-nothing else.
+connections come from the database's readers. Reading them and the
+first attempt share one timeout, so an export that is not retried ends
+within it. A collector that hangs costs at most one timeout per interval
+and slows nothing else.
 On shutdown, on SIGTERM or SIGINT, tocsin sends one last export once
 the checks have stopped, so the points since the last export are not
 lost. An export under way or waiting to retry is abandoned for it; the

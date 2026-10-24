@@ -1177,7 +1177,7 @@ async fn delivered(
     let mut counted = Vec::new();
     super::deliver(
         settings,
-        start + settings.interval,
+        start,
         || {
             made.push(start.elapsed());
             let outcome = if Some(made.len()) == succeeds {
@@ -1254,7 +1254,7 @@ async fn a_timed_out_attempt_is_not_retried() {
     let mut counted = Vec::new();
     super::deliver(
         &settings,
-        start + settings.interval,
+        start,
         || {
             attempts += 1;
             std::future::pending::<Result<(), Failed>>()
@@ -1265,6 +1265,172 @@ async fn a_timed_out_attempt_is_not_retried() {
     assert_eq!(attempts, 1);
     assert_eq!(counted, ["no answer within 10s"]);
     assert_eq!(start.elapsed(), Duration::from_secs(10));
+}
+
+/// Reading the state and the first attempt share one timeout, so an
+/// export whose reading was slow still ends within it; a retry gets a
+/// timeout of its own.
+#[tokio::test(start_paused = true)]
+async fn reading_and_sending_share_one_timeout() {
+    let settings = retrying();
+    let start = tokio::time::Instant::now();
+    // The reading took 7s of the 10s.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    let mut counted = Vec::new();
+    super::deliver(
+        &settings,
+        start,
+        std::future::pending::<Result<(), Failed>>,
+        |message| counted.push(message.to_owned()),
+    )
+    .await;
+    assert_eq!(start.elapsed(), Duration::from_secs(10));
+    assert_eq!(counted, ["no answer within 10s"]);
+
+    let start = tokio::time::Instant::now();
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    let mut attempts = 0;
+    super::deliver(
+        &settings,
+        start,
+        || {
+            attempts += 1;
+            let refused = attempts == 1;
+            async move {
+                if refused {
+                    Err(unavailable(Retry::Backoff))
+                } else {
+                    std::future::pending().await
+                }
+            }
+        },
+        |_| {},
+    )
+    .await;
+    // Refused at 7s, retried at 8s, which waits out its own 10s.
+    assert_eq!(attempts, 2);
+    assert_eq!(start.elapsed(), Duration::from_secs(18));
+}
+
+/// Exports `[telemetry.otlp]` with `extra` to `endpoint`, which takes no
+/// export, an attempt timing out after 200ms and retries 20ms, 40ms,
+/// 80ms... apart: the attempts counted and the log once the first export
+/// is given up on, an interval of 1s from its start.
+async fn given_up(endpoint: &str, extra: &str) -> (u64, String) {
+    let config = load(
+        &format!(
+            "{}interval = \"1s\"\ntimeout = \"200ms\"\n{extra}",
+            exporting(endpoint)
+        ),
+        &token,
+    );
+    let metrics = metrics(&config);
+    let log = Captured::default();
+    let _capturing = log.capture();
+    let mut prepared = Prepared::new(&config, &|_| None).unwrap().unwrap();
+    prepared.settings.backoff = Backoff {
+        base: Duration::from_millis(20),
+        cap: Duration::from_secs(1),
+        jitter: Jitter::None,
+    };
+    let exporter = prepared.start(Arc::clone(&metrics), Arc::new(snapshot()), no_slack());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !log.text().contains("could not end before the next export") {
+        assert!(
+            Instant::now() < deadline,
+            "no export given up on within 5s: {}",
+            log.text()
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let failures = metrics.export.failures();
+    let text = log.text();
+    exporter.stop().await;
+    (failures, text)
+}
+
+/// The attempts `given_up` logged: each failed one, retried and then not.
+fn assert_retried(failures: u64, log: &str) {
+    let retried = log.matches("; retrying in ").count() as u64;
+    // Attempts at 0, 20, 60, 140, 300 and 620ms; the next, 640ms after,
+    // could time out past 1s. Slow runners may fit fewer.
+    assert!(retried >= 2, "{retried} retries: {log}");
+    assert_eq!(failures, retried + 1, "{log}");
+}
+
+/// A collector nothing listens for: the connection is refused, and each
+/// attempt is retried with backoff and counted, within the interval.
+#[tokio::test]
+async fn a_refused_connection_is_retried_and_counted() {
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+    socket
+        .bind(&std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)).into())
+        .unwrap();
+    let closed = socket.local_addr().unwrap().as_socket().unwrap();
+    let (failures, log) = given_up(&format!("http://{closed}"), "").await;
+    assert!(log.contains("Connection refused"), "{log}");
+    assert_retried(failures, &log);
+}
+
+/// A collector that takes the connection and closes it unanswered: the
+/// export is retried like a refused one.
+#[tokio::test]
+async fn a_dropped_connection_is_retried_and_counted() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            drop(stream);
+        }
+    });
+    let (failures, log) = given_up(&format!("http://{address}"), "").await;
+    assert_retried(failures, &log);
+}
+
+/// A collector whose connection is never made, its listen queue full:
+/// each attempt gives up connecting after half the timeout and is
+/// retried like a refused one.
+#[tokio::test]
+async fn a_connection_not_made_in_time_is_retried_and_counted() {
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+    socket
+        .bind(&std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)).into())
+        .unwrap();
+    socket.listen(0).unwrap();
+    let full = socket.local_addr().unwrap().as_socket().unwrap();
+    // Connect until one hangs: the queue is full, and the kernel drops
+    // the next connection's SYN rather than refusing it.
+    let mut queued = Vec::new();
+    loop {
+        match tokio::time::timeout(
+            Duration::from_millis(100),
+            tokio::net::TcpStream::connect(full),
+        )
+        .await
+        {
+            Ok(stream) => queued.push(stream.unwrap()),
+            Err(_) => break,
+        }
+        assert!(queued.len() < 64, "the listen queue never filled");
+    }
+    let (failures, log) = given_up(&format!("http://{full}"), "").await;
+    assert!(log.contains("(Connect)"), "{log}");
+    assert_retried(failures, &log);
+}
+
+/// Over gRPC, tonic answers a refused connection `UNAVAILABLE`, which is
+/// retried and counted the same way.
+#[cfg(feature = "grpc")]
+#[tokio::test]
+async fn grpc_refused_connection_is_retried_and_counted() {
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+    socket
+        .bind(&std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)).into())
+        .unwrap();
+    let closed = socket.local_addr().unwrap().as_socket().unwrap();
+    let (failures, log) = given_up(&format!("http://{closed}"), "protocol = \"grpc\"\n").await;
+    assert!(log.contains("the collector answered Unavailable"), "{log}");
+    assert_retried(failures, &log);
 }
 
 /// 429, 502, 503 and 504 are retried, after the collector's wait if it

@@ -2,13 +2,15 @@
 
 //! `tocsin notify test`: send one notifier a test alert, then its resolve.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::json;
-use tocsin_alert::{Alert, AlertEvent, HTTP_TIMEOUT, SendError};
+use tocsin_alert::{Alert, AlertEvent, HTTP_TIMEOUT, SendError, SlackHooks};
 use tocsin_core::Health;
 use tocsin_core::config::closest;
-use tocsin_store::SubjectKind;
+use tocsin_engine::ports::BoxFuture;
+use tocsin_store::{DB_FILE, SlackHook, SubjectKind};
 
 use crate::config::{self, Loaded};
 use crate::exit::Exit;
@@ -51,10 +53,20 @@ pub fn test(notifier_id: &str, folder: &Path) -> Result<Report, Failure> {
     let client = crate::net::http_client(HTTP_TIMEOUT)
         .build()
         .map_err(|error| Failure::new(Exit::Runtime, format!("cannot set up HTTP: {error}")))?;
-    let built = tocsin_alert::build(notifier, configuration.server.email.as_ref(), &client)
-        .map_err(|error| {
-            Failure::new(Exit::Runtime, format!("notifier `{notifier_id}`: {error}"))
-        })?;
+    let hooks: Arc<dyn SlackHooks> = Arc::new(ReadOnlyHooks {
+        database: configuration
+            .server
+            .data_dir
+            .as_ref()
+            .map(|data_dir| folder.join(data_dir).join(DB_FILE)),
+    });
+    let built = tocsin_alert::build(
+        notifier,
+        configuration.server.email.as_ref(),
+        &client,
+        Some(&hooks),
+    )
+    .map_err(|error| Failure::new(Exit::Runtime, format!("notifier `{notifier_id}`: {error}")))?;
     let node_id = configuration.server.node_id.clone().unwrap_or_default();
     let (fire, resolve) = runtime.block_on(async {
         let started = tocsin_store::now_ms();
@@ -114,5 +126,35 @@ pub fn test(notifier_id: &str, folder: &Path) -> Result<Report, Failure> {
             Exit::Runtime,
             text.trim_end().replace('\n', "; "),
         ))
+    }
+}
+
+/// The Slack connections in the database `tocsin serve` keeps, read without
+/// writing: a test never changes what the server runs on, so a connection
+/// Slack revoked is reported, and marked dead by the server's next post.
+struct ReadOnlyHooks {
+    /// The database file, when `[server] data_dir` names its folder.
+    database: Option<PathBuf>,
+}
+
+impl SlackHooks for ReadOnlyHooks {
+    fn hook<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<SlackHook, String>> {
+        Box::pin(async move {
+            let Some(path) = &self.database else {
+                return Err("no data folder: set `data_dir` in `[server]`".to_owned());
+            };
+            if !path.exists() {
+                return Ok(SlackHook::Missing);
+            }
+            tocsin_store::inspect_slack_hook(path, name).map_err(|error| error.to_string())
+        })
+    }
+
+    fn kill<'a>(&'a self, _id: i64, _reason: &'a str) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async {
+            Err("`tocsin notify test` does not change the database; \
+                 `tocsin serve` marks the connection dead on its next post"
+                .to_owned())
+        })
     }
 }

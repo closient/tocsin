@@ -17,7 +17,9 @@ use hyper_util::rt::TokioIo;
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 use serde_json::json;
-use tocsin_alert::{Alerter, AlertingHistory, HTTP_TIMEOUT, Notifiers, Router, WorkerSettings};
+use tocsin_alert::{
+    Alerter, AlertingHistory, HTTP_TIMEOUT, Notifiers, Router, SlackHooks, WorkerSettings,
+};
 use tocsin_core::config::Config;
 use tocsin_engine::ports::{Clock, History, ProbeRunner, SystemClock};
 use tocsin_engine::{Engine, HeartbeatHandle, Parts, Plan, StatusHandle};
@@ -301,7 +303,8 @@ impl Monitor {
                     })?
             }
         };
-        let notifiers = tocsin_alert::build_all(config, &client).map_err(|error| {
+        let hooks: Arc<dyn SlackHooks> = Arc::clone(store) as Arc<dyn SlackHooks>;
+        let notifiers = tocsin_alert::build_all(config, &client, Some(&hooks)).map_err(|error| {
             Failure::new(Exit::Runtime, format!("cannot set up alerting: {error}"))
         })?;
         // Alerts left open on a notifier removed while tocsin was stopped
@@ -387,7 +390,8 @@ impl Monitor {
                 format!("cannot schedule the checks: {error}"),
             ))
         })?;
-        let notifiers = tocsin_alert::build_all(config, &self.client).map_err(|error| {
+        let hooks: Arc<dyn SlackHooks> = Arc::clone(&self.store) as Arc<dyn SlackHooks>;
+        let notifiers = tocsin_alert::build_all(config, &self.client, Some(&hooks)).map_err(|error| {
             ReloadError::Rejected(Failure::new(
                 Exit::InvalidInput,
                 format!("cannot set up alerting: {error}"),

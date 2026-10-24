@@ -29,8 +29,8 @@ pub use assertion::{
     RecordsAssertion, TextAssertion,
 };
 pub use check::{
-    BasicAuth, Check, CheckType, DnsSettings, HttpMethod, HttpSettings, RecordType, TcpSettings,
-    TlsSettings,
+    BasicAuth, Check, CheckType, DEFAULT_MAX_BODY, DnsSettings, HttpMethod, HttpSettings,
+    MAX_BODY_CEILING, RecordType, TcpSettings, TlsSettings,
 };
 pub use colour::{AA_TEXT, COLOUR_PATTERN, Colour, DARK, LIGHT, Scheme};
 pub use diagnostic::Diagnostic;
@@ -43,8 +43,8 @@ pub use slack::{MAX_APP_NAME, Slack};
 pub use subscribers::{Subscribers, Turnstile};
 pub use telemetry::{OWN_RESOURCE_ATTRIBUTES, Otlp, OtlpProtocol, Telemetry};
 pub use values::{
-    Cidr, DURATION_PATTERN, Duration, ID_PATTERN, Id, SECRET_PATTERN, Secret, Text, email_address,
-    is_unanswerable,
+    BYTE_SIZE_PATTERN, ByteSize, Cidr, DURATION_PATTERN, Duration, ID_PATTERN, Id, SECRET_PATTERN,
+    Secret, Text, email_address, is_unanswerable,
 };
 
 /// One configuration file. Every key is optional in a single file; rules

@@ -229,6 +229,69 @@ interval =   "5 minutes"
 }
 
 #[test]
+fn max_body_defaults_to_64_kib_and_takes_a_size() {
+    let checks = r#"
+[[check]]
+id = "default"
+type = "http"
+target = "https://example.com"
+
+[[check]]
+id = "status-page"
+type = "http"
+target = "https://www.cloudflarestatus.com/api/v2/components.json"
+[check.http]
+max_body = "512KiB"
+
+[[check]]
+id = "ceiling"
+type = "http"
+target = "https://example.com"
+[check.http]
+max_body = "8MiB"
+"#;
+    let config = run(&[("checks.toml", checks)]).expect("valid");
+    let max_body: Vec<u64> = config
+        .checks
+        .iter()
+        .map(|check| check.http.as_ref().expect("http settings").max_body.bytes())
+        .collect();
+    assert_eq!(max_body, [64 * 1024, 512 * 1024, 8 * 1024 * 1024]);
+}
+
+#[test]
+fn max_body_over_the_ceiling_or_not_a_size_is_rejected_where_written() {
+    let check = |id: &str, max_body: &str| {
+        format!(
+            "[[check]]\nid = \"{id}\"\ntype = \"http\"\ntarget = \"https://example.com\"\n[check.http]\nmax_body = {max_body}\n\n"
+        )
+    };
+    let checks = [
+        check("over", "\"9MiB\""),
+        check("just-over", "\"8193KiB\""),
+        check("zero", "\"0B\""),
+        check("words", "\"lots\""),
+        check("no-unit", "\"65536\""),
+        check("decimal-unit", "\"64KB\""),
+        check("integer", "65536"),
+    ]
+    .concat();
+    let size = "write a whole number followed by B, KiB or MiB, such as \"512KiB\" or \"1MiB\"";
+    assert_eq!(
+        errors(&[("checks.toml", &checks)]),
+        [
+            "checks.toml:6:12: `max_body` (9MiB) must be at most 8MiB".to_owned(),
+            "checks.toml:13:12: `max_body` (8193KiB) must be at most 8MiB".to_owned(),
+            "checks.toml:20:12: `max_body` must be more than 0B".to_owned(),
+            format!("checks.toml:27:12: invalid size `lots`: {size}"),
+            format!("checks.toml:34:12: invalid size `65536`: {size}"),
+            format!("checks.toml:41:12: invalid size `64KB`: {size}"),
+            "checks.toml:48:12: invalid type: integer `65536`, expected a string".to_owned(),
+        ]
+    );
+}
+
+#[test]
 fn an_unknown_component_is_located_with_a_suggestion() {
     let diagnostic = only_error(&[
         (

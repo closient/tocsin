@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::Link;
 use super::assertion::Assertion;
-use super::values::{Duration, Id, Secret, Text};
+use super::values::{ByteSize, Duration, Id, Secret, Text};
 
 /// A probe run on an interval, whose result sets a component's health.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -140,7 +140,20 @@ pub struct HttpSettings {
     /// Sent as HTTP basic authentication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub basic_auth: Option<BasicAuth>,
+    /// The most of the response body read, such as `"512KiB"`; the rest
+    /// is not read, and assertions see only what was. At most 8MiB.
+    /// Defaults to 64KiB.
+    #[serde(default = "default_max_body")]
+    pub max_body: ByteSize,
 }
+
+/// How much of a response body an `http` probe reads unless `max_body`
+/// says otherwise.
+pub const DEFAULT_MAX_BODY: ByteSize = ByteSize::from_kib(64);
+
+/// The largest `max_body` a check may set: a probe holds the body in
+/// memory while it evaluates, so a cap bounds what one target can cost.
+pub const MAX_BODY_CEILING: ByteSize = ByteSize::from_mib(8);
 
 /// `[check.http.basic_auth]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -163,12 +176,17 @@ impl Default for HttpSettings {
             server_name: None,
             bearer_token: None,
             basic_auth: None,
+            max_body: DEFAULT_MAX_BODY,
         }
     }
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_max_body() -> ByteSize {
+    DEFAULT_MAX_BODY
 }
 
 /// An HTTP request method.

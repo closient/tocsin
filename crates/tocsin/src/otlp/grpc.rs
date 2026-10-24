@@ -27,7 +27,8 @@ impl GrpcSender {
     pub(super) fn new(settings: &Settings) -> Result<Self, String> {
         let mut endpoint = Endpoint::from_shared(settings.endpoint.to_string())
             .map_err(|error| format!("the OTLP endpoint is not a gRPC endpoint: {error}"))?
-            .connect_timeout(settings.timeout)
+            // A connection not made in time is `UNAVAILABLE`, retried.
+            .connect_timeout(super::connect_timeout(settings))
             .timeout(settings.timeout);
         if settings.endpoint.scheme() == "https" {
             endpoint = endpoint

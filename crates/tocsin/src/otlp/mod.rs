@@ -10,8 +10,9 @@
 //! own task and never holds a lock while it waits on the network: probes
 //! and database writes do not wait on the collector. An attempt the
 //! collector refuses for now (HTTP 429, 502, 503 or 504; gRPC
-//! `UNAVAILABLE`, or `RESOURCE_EXHAUSTED` with a `RetryInfo`) is retried
-//! with backoff while the retry can end before the next export is due.
+//! `UNAVAILABLE`, or `RESOURCE_EXHAUSTED` with a `RetryInfo`), or that
+//! cannot reach it, is retried with backoff while the retry can end
+//! before the next export is due.
 //! Every failed attempt, retried or not, is logged and counted in
 //! `tocsin_otlp_export_failures_total`; the header values, which may be
 //! secrets, are never logged.
@@ -783,6 +784,9 @@ struct HttpSender {
 impl HttpSender {
     fn new(settings: &Settings) -> Result<Self, String> {
         let client = crate::net::http_client(settings.timeout)
+            // A connection not made in time is retried, which an attempt
+            // that waited out the whole timeout could not be.
+            .connect_timeout(connect_timeout(settings))
             // A redirect would take the headers, credentials among them,
             // somewhere not configured.
             .redirect(reqwest::redirect::Policy::none())
@@ -807,17 +811,14 @@ impl HttpSender {
             .body(request.encode_to_vec())
             .send()
             .await
-            .map_err(|error| crate::net::chain(&error.without_url()))?;
+            .map_err(unsent)?;
         let status = response.status();
         let retry_after = response
             .headers()
             .get(RETRY_AFTER)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| tocsin_alert::notifier::retry_after(value, jiff::Timestamp::now()));
-        let body = response
-            .bytes()
-            .await
-            .map_err(|error| crate::net::chain(&error.without_url()))?;
+        let body = response.bytes().await.map_err(unsent)?;
         if !status.is_success() {
             return Err(Failed {
                 reason: format!("the collector answered {status}{}", described(&body)),
@@ -827,6 +828,55 @@ impl HttpSender {
         Ok(ExportMetricsServiceResponse::decode(body)
             .map_err(|error| format!("the collector's answer is not an OTLP response: {error}"))?)
     }
+}
+
+/// How long an attempt may take to connect: half the timeout, leaving the
+/// rest for the request.
+fn connect_timeout(settings: &Settings) -> Duration {
+    settings.timeout / 2
+}
+
+/// A request that got no answer from the collector. It is retried when
+/// the connection could not be made (refused, unresolved, or not made
+/// within the connect timeout) or was lost before the answer came, as
+/// the OTLP specification has a client that cannot connect retry with
+/// backoff. A request that timed out is not.
+fn unsent(error: reqwest::Error) -> Failed {
+    let retry = if error.is_connect() || lost(&error) {
+        Retry::Backoff
+    } else {
+        Retry::Never
+    };
+    Failed {
+        reason: crate::net::chain(&error.without_url()),
+        retry,
+    }
+}
+
+/// Whether the connection was closed or reset under `error`.
+fn lost(error: &reqwest::Error) -> bool {
+    use std::io::ErrorKind;
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>()
+            && matches!(
+                io.kind(),
+                ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::BrokenPipe
+                    | ErrorKind::UnexpectedEof
+            )
+        {
+            return true;
+        }
+        if let Some(hyper) = cause.downcast_ref::<hyper::Error>()
+            && hyper.is_incomplete_message()
+        {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
 }
 
 /// The `google.rpc.Status` an OTLP/HTTP collector answers an error with.
@@ -1004,7 +1054,7 @@ impl Exporting {
         };
         deliver(
             &self.settings,
-            started + self.settings.interval,
+            started,
             || self.sender.send(&request),
             |message| self.failed(message),
         )
@@ -1060,24 +1110,33 @@ impl Exporting {
     }
 }
 
-/// Makes `attempt`s, each within `settings.timeout`, until one succeeds
-/// or a failure is not to be retried. A refused attempt is retried after
-/// the wait the collector asked for, or else the backoff, only if the
-/// retry would end, even timing out, by `deadline`, when the next export
-/// is due. Each failed attempt is passed to `failed` with what follows.
+/// Makes `attempt`s for the export `started` then, until one succeeds or
+/// a failure is not to be retried. The first ends within
+/// `settings.timeout` of `started`, so reading the state and sending it
+/// share one timeout; each retry gets a timeout of its own. A refused
+/// attempt is retried after the wait the collector asked for, or else
+/// the backoff, only if the retry would end, even timing out, by the
+/// time the next export is due. Each failed attempt is passed to
+/// `failed` with what follows.
 async fn deliver<Attempt, Sent>(
     settings: &Settings,
-    deadline: Instant,
+    started: Instant,
     mut attempt: Attempt,
     mut failed: impl FnMut(&str),
 ) where
     Attempt: FnMut() -> Sent,
     Sent: Future<Output = Result<(), Failed>>,
 {
+    let deadline = started + settings.interval;
     let mut attempts = 0;
     loop {
         attempts += 1;
-        let outcome = tokio::time::timeout(settings.timeout, attempt())
+        let within = if attempts == 1 {
+            (started + settings.timeout).saturating_duration_since(Instant::now())
+        } else {
+            settings.timeout
+        };
+        let outcome = tokio::time::timeout(within, attempt())
             .await
             .unwrap_or_else(|_| Err(format!("no answer within {:?}", settings.timeout).into()));
         let Err(failure) = outcome else {

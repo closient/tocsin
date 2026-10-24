@@ -149,10 +149,14 @@ fn find_toml_files(root: &Path, relative: &Path, found: &mut Vec<PathBuf>) -> st
 /// Slack revoked, is a warning, not an error: the channel is connected on
 /// the admin page of a running server, after the configuration is valid.
 /// The connections are read from the database in `data`, or in `[server]
-/// data_dir`, without writing to it.
+/// data_dir`, without writing to it. So is `[telemetry.otlp]` that
+/// `OTEL_SDK_DISABLED` turns off.
 pub fn check(folder: &Path, data: Option<&Path>) -> Result<Report, Failure> {
     let Loaded { config, files } = load(folder)?;
-    let warnings = slack_warnings(&config, folder, data);
+    let mut warnings = slack_warnings(&config, folder, data);
+    if crate::otlp::disabled(&config, &|name| std::env::var(name).ok()) {
+        warnings.push(crate::otlp::DISABLED.to_owned());
+    }
     let counts = counts(&config)?;
     let summary = counts
         .iter()

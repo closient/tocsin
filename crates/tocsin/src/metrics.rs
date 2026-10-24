@@ -775,10 +775,11 @@ pub struct HistogramSnapshot {
 
 /// How the OpenTelemetry export goes:
 ///
-/// - `tocsin_otlp_export_failures_total`, OTLP metric exports that failed:
-///   the collector could not be reached, did not answer within the
-///   timeout, or answered with an error. Absent unless `[telemetry.otlp]`
-///   is on; 0 from the moment its exporter starts.
+/// - `tocsin_otlp_export_failures_total`, attempts to send an OTLP metric
+///   export that failed, retried or not: the collector could not be
+///   reached, did not answer within the timeout, or answered with an
+///   error. Absent unless `[telemetry.otlp]` is on; 0 from the moment its
+///   exporter starts.
 ///
 /// Cheap to clone; clones share the series.
 #[derive(Debug, Clone, Default)]
@@ -791,7 +792,7 @@ impl ExportMetrics {
         let metrics = ExportMetrics::default();
         registry.register(
             "tocsin_otlp_export_failures",
-            "OTLP metric exports that failed: the collector was unreachable, timed out or answered with an error",
+            "Attempts to send an OTLP metric export that failed, retried or not: the collector was unreachable, timed out or answered with an error",
             metrics.failures.clone(),
         );
         metrics
@@ -802,7 +803,7 @@ impl ExportMetrics {
         self.failures.started.store(true, Ordering::Relaxed);
     }
 
-    /// An export failed.
+    /// An attempt to send an export failed.
     pub fn failed(&self) {
         self.failures.counter.inc();
     }

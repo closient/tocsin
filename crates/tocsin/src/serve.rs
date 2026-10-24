@@ -149,9 +149,14 @@ fn start_senders(
     }
 }
 
-/// The OpenTelemetry export, if `[telemetry.otlp]` turns it on.
+/// The OpenTelemetry export, if `[telemetry.otlp]` turns it on and
+/// `OTEL_SDK_DISABLED` does not turn it off, which is logged.
 fn telemetry(config: &Config) -> Result<Option<otlp::Prepared>, Failure> {
-    otlp::Prepared::new(config, &|name| std::env::var(name).ok()).map_err(|error| {
+    let variable = |name: &str| std::env::var(name).ok();
+    if otlp::disabled(config, &variable) {
+        tracing::warn!("{}", otlp::DISABLED);
+    }
+    otlp::Prepared::new(config, &variable).map_err(|error| {
         Failure::new(
             Exit::Runtime,
             format!("cannot start the OpenTelemetry export: {error}"),

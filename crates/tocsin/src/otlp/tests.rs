@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use axum::Router;
 use axum::body::Bytes;
 use axum::http::HeaderMap as RequestHeaders;
+use axum::http::StatusCode;
 use axum::routing::post;
 use opentelemetry_proto::tonic::collector::metrics::v1::{
     ExportMetricsPartialSuccess, ExportMetricsServiceRequest, ExportMetricsServiceResponse,
@@ -20,15 +21,16 @@ use opentelemetry_proto::tonic::collector::metrics::v1::{
 use opentelemetry_proto::tonic::common::v1::{KeyValue, any_value};
 use opentelemetry_proto::tonic::metrics::v1::{Metric, metric, number_data_point};
 use prost::Message as _;
+use tocsin_alert::{Backoff, Jitter};
 use tocsin_core::Health::{Degraded, Down, Up};
 use tocsin_core::config::{Config, Environment, OtlpProtocol, Source};
 use tocsin_core::state::{ComponentStatus, Confirmed};
 use tocsin_engine::ports::BoxFuture;
 use tocsin_engine::{CheckSnapshot, ComponentSnapshot, LastResult, MemberKind, Snapshot};
 use tocsin_store::SlackCounts;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
-use super::{Exporter, Prepared, Settings, SlackSource};
+use super::{Exporter, Failed, Prepared, Retry, Settings, SlackSource};
 use crate::metrics::{Metrics, SlackCensus};
 use crate::testing::Captured;
 
@@ -922,4 +924,525 @@ async fn grpc_exports_reach_the_collector() {
     assert_eq!(text(&resource.attributes)["service.instance.id"], NODE);
     assert!(named(&request, "tocsin.check.duration").data.is_some());
     assert_eq!(metrics.export.failures(), 0);
+}
+
+/// At shutdown the readings since the last export are sent once more:
+/// with an hour between exports, the only one is the last, and it
+/// carries a result recorded after the exporter started.
+#[tokio::test]
+async fn the_last_readings_are_sent_at_shutdown() {
+    let mut collector = Collector::start(ExportMetricsServiceResponse::default()).await;
+    let config = load(&exporting(&collector.url()), &token);
+    let metrics = metrics(&config);
+    let exporter = start(&config, &metrics, Duration::from_secs(3600));
+    metrics
+        .checks
+        .recorded(MemberKind::Check, "api-https", Down);
+    exporter.stop().await;
+
+    let Received { request, .. } = collector.next().await;
+    let down = attributes(&[
+        ("tocsin.check.health", "down"),
+        ("tocsin.check.id", "api-https"),
+        ("tocsin.check.kind", "check"),
+        ("tocsin.check.type", "http"),
+        ("tocsin.component.id", "api"),
+        ("tocsin.node.id", NODE),
+    ]);
+    let results = numbers(named(&request, "tocsin.check.results"));
+    assert!(results.contains(&(down, 2.0)), "{results:?}");
+    assert!(collector.received.try_recv().is_err(), "a second export");
+    assert_eq!(metrics.export.failures(), 0);
+}
+
+/// The last export waits on a silent collector no longer than the
+/// timeout, and its failure is counted like any other.
+#[tokio::test]
+async fn the_last_export_ends_within_the_timeout() {
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let config = load(
+        &exporting(&format!("http://{}", silent.local_addr().unwrap())),
+        &token,
+    );
+    let metrics = metrics(&config);
+    let mut prepared = Prepared::new(&config, &|_| None).unwrap().unwrap();
+    prepared.settings.interval = Duration::from_secs(3600);
+    prepared.settings.timeout = Duration::from_millis(200);
+    let exporter = prepared.start(Arc::clone(&metrics), Arc::new(snapshot()), no_slack());
+    let log = Captured::default();
+    let _capturing = log.capture();
+
+    tokio::time::timeout(Duration::from_secs(5), exporter.stop())
+        .await
+        .expect("the last export outlasted its timeout");
+    assert_eq!(metrics.export.failures(), 1);
+    assert!(
+        log.text().contains("it was the last, at shutdown"),
+        "{}",
+        log.text()
+    );
+}
+
+/// An exported request held by a [`Gate`] until the test answers it,
+/// with a status and headers.
+type Held = (
+    ExportMetricsServiceRequest,
+    oneshot::Sender<(StatusCode, RequestHeaders)>,
+);
+
+/// `status`, with no headers but the content type.
+fn plain(status: StatusCode) -> (StatusCode, RequestHeaders) {
+    (status, RequestHeaders::new())
+}
+
+/// A fake OTLP/HTTP collector that hands each export to the test and
+/// answers with the status and headers the test sends back.
+struct Gate {
+    address: std::net::SocketAddr,
+    held: mpsc::UnboundedReceiver<Held>,
+}
+
+impl Gate {
+    async fn start() -> Self {
+        let (sender, held) = mpsc::unbounded_channel();
+        let app = Router::new().route(
+            "/v1/metrics",
+            post(move |body: Bytes| {
+                let sender = sender.clone();
+                async move {
+                    let request = ExportMetricsServiceRequest::decode(body).unwrap();
+                    let (answer, answered) = oneshot::channel();
+                    let _ = sender.send((request, answer));
+                    let (status, headers) = answered
+                        .await
+                        .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR));
+                    (
+                        status,
+                        headers,
+                        [(axum::http::header::CONTENT_TYPE, "application/x-protobuf")],
+                        ExportMetricsServiceResponse::default().encode_to_vec(),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        Gate { address, held }
+    }
+
+    /// The next export, within five seconds.
+    async fn next(&mut self) -> Held {
+        tokio::time::timeout(Duration::from_secs(5), self.held.recv())
+            .await
+            .expect("no export reached the collector within 5s")
+            .unwrap()
+    }
+}
+
+/// Stand-ins for probes, as in [`a_hanging_collector_does_not_slow_the_probes`]:
+/// the slowest of `runs` runs, each recording into `metrics` and sleeping
+/// 10ms.
+async fn probe(metrics: &Metrics, runs: usize) -> Duration {
+    let mut slowest = Duration::ZERO;
+    for _ in 0..runs {
+        let run = Instant::now();
+        metrics
+            .checks
+            .observe("db", None, NODE, Duration::from_millis(4));
+        metrics.checks.recorded(MemberKind::Check, "db", Up);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        slowest = slowest.max(run.elapsed());
+    }
+    slowest
+}
+
+/// A collector answering 503 and then 200 gets the same export twice and
+/// takes it once; the refused attempt is counted, and probes keep their
+/// pace while each attempt is held.
+#[tokio::test]
+async fn an_unavailable_collector_is_retried_and_counted() {
+    let mut gate = Gate::start().await;
+    let config = load(&exporting(&format!("http://{}", gate.address)), &token);
+    let metrics = metrics(&config);
+    let mut prepared = Prepared::new(&config, &|_| None).unwrap().unwrap();
+    prepared.settings.interval = Duration::from_secs(1);
+    prepared.settings.timeout = Duration::from_millis(500);
+    prepared.settings.backoff = Backoff {
+        base: Duration::from_millis(1),
+        cap: Duration::from_millis(1),
+        jitter: Jitter::None,
+    };
+    let exporter = prepared.start(Arc::clone(&metrics), Arc::new(snapshot()), no_slack());
+
+    let (first, answer) = gate.next().await;
+    let mut slowest = probe(&metrics, 5).await;
+    answer.send(plain(StatusCode::SERVICE_UNAVAILABLE)).unwrap();
+    let (retried, answer) = gate.next().await;
+    slowest = slowest.max(probe(&metrics, 5).await);
+    answer.send(plain(StatusCode::OK)).unwrap();
+    assert_eq!(retried, first, "the retry sent a different export");
+
+    // Everything after is answered 200: the last export, at shutdown.
+    let mut stopping = tokio::spawn(exporter.stop());
+    let mut later = Vec::new();
+    loop {
+        tokio::select! {
+            stopped = &mut stopping => break stopped.unwrap(),
+            Some((request, answer)) = gate.held.recv() => {
+                let _ = answer.send(plain(StatusCode::OK));
+                later.push(request);
+            }
+        }
+    }
+    assert_ne!(later.len(), 0, "nothing was sent at shutdown");
+    assert!(later.iter().all(|request| *request != first));
+    assert_eq!(metrics.export.failures(), 1);
+    assert!(
+        slowest < Duration::from_millis(100),
+        "a probe run took {slowest:?}"
+    );
+}
+
+/// A 503 with `Retry-After` is retried after the wait the collector
+/// asked for, not the backoff.
+#[tokio::test]
+async fn retry_after_is_honoured() {
+    let mut gate = Gate::start().await;
+    let config = load(&exporting(&format!("http://{}", gate.address)), &token);
+    let metrics = metrics(&config);
+    let mut prepared = Prepared::new(&config, &|_| None).unwrap().unwrap();
+    prepared.settings.interval = Duration::from_secs(2);
+    prepared.settings.timeout = Duration::from_millis(500);
+    prepared.settings.backoff = Backoff {
+        base: Duration::from_millis(1),
+        cap: Duration::from_millis(1),
+        jitter: Jitter::None,
+    };
+    let log = Captured::default();
+    let _capturing = log.capture();
+    let exporter = prepared.start(Arc::clone(&metrics), Arc::new(snapshot()), no_slack());
+
+    let (first, answer) = gate.next().await;
+    let mut headers = RequestHeaders::new();
+    headers.insert(axum::http::header::RETRY_AFTER, "1".parse().unwrap());
+    answer
+        .send((StatusCode::SERVICE_UNAVAILABLE, headers))
+        .unwrap();
+    let refused = Instant::now();
+    let (retried, answer) = gate.next().await;
+    let waited = refused.elapsed();
+    answer.send(plain(StatusCode::OK)).unwrap();
+    assert_eq!(retried, first);
+
+    let mut stopping = tokio::spawn(exporter.stop());
+    loop {
+        tokio::select! {
+            stopped = &mut stopping => break stopped.unwrap(),
+            Some((_, answer)) = gate.held.recv() => {
+                let _ = answer.send(plain(StatusCode::OK));
+            }
+        }
+    }
+    assert!(
+        waited >= Duration::from_millis(900),
+        "retried after {waited:?}"
+    );
+    assert!(log.text().contains("; retrying in 1s"), "{}", log.text());
+    assert_eq!(metrics.export.failures(), 1);
+}
+
+/// Settings for [`delivered`]: an export every minute, attempts timing
+/// out after 10s, and retries 1s, 2s, 4s... apart, without jitter.
+fn retrying() -> Settings {
+    let mut settings = resolved("interval = \"60s\"\ntimeout = \"10s\"", &[]).unwrap();
+    settings.backoff = Backoff {
+        base: Duration::from_secs(1),
+        cap: settings.interval,
+        jitter: Jitter::None,
+    };
+    settings
+}
+
+/// Delivers through attempts that fail as `failing` says until the
+/// `succeeds`th, if any, on a paused clock: when each attempt was made,
+/// from the start, and what was counted.
+async fn delivered(
+    settings: &Settings,
+    failing: &Failed,
+    succeeds: Option<usize>,
+) -> (Vec<Duration>, Vec<String>) {
+    let start = tokio::time::Instant::now();
+    let mut made = Vec::new();
+    let mut counted = Vec::new();
+    super::deliver(
+        settings,
+        start + settings.interval,
+        || {
+            made.push(start.elapsed());
+            let outcome = if Some(made.len()) == succeeds {
+                Ok(())
+            } else {
+                Err(failing.clone())
+            };
+            std::future::ready(outcome)
+        },
+        |message| counted.push(message.to_owned()),
+    )
+    .await;
+    (made, counted)
+}
+
+fn unavailable(retry: Retry) -> Failed {
+    Failed {
+        reason: "the collector answered 503 Service Unavailable".into(),
+        retry,
+    }
+}
+
+/// Retries back off, doubling, and stop once the next could not end,
+/// even timing out, before the next export is due; each failed attempt
+/// is counted.
+#[tokio::test(start_paused = true)]
+async fn retries_back_off_within_the_interval() {
+    let seconds = |list: &[u64]| {
+        list.iter()
+            .map(|s| Duration::from_secs(*s))
+            .collect::<Vec<_>>()
+    };
+    let (made, counted) = delivered(&retrying(), &unavailable(Retry::Backoff), None).await;
+    // The next, 32s after the sixth, would end at 73s, past 60s.
+    assert_eq!(made, seconds(&[0, 1, 3, 7, 15, 31]));
+    assert_eq!(counted.len(), 6, "{counted:?}");
+    assert!(counted[0].ends_with("; retrying in 1s"), "{counted:?}");
+    assert!(
+        counted[5].ends_with(
+            "; not retried, as the retry 32s from now could not end before the next export"
+        ),
+        "{counted:?}"
+    );
+
+    // The collector's wait is taken over the backoff.
+    let after = unavailable(Retry::After(Duration::from_secs(20)));
+    let (made, counted) = delivered(&retrying(), &after, None).await;
+    assert_eq!(made, seconds(&[0, 20, 40]));
+    assert_eq!(counted.len(), 3);
+    for wait in [55, u64::MAX] {
+        let after = unavailable(Retry::After(Duration::from_secs(wait)));
+        let (made, counted) = delivered(&retrying(), &after, None).await;
+        assert_eq!(made, seconds(&[0]), "Retry-After {wait}s");
+        assert_eq!(counted.len(), 1);
+    }
+
+    // A success ends it.
+    let (made, counted) = delivered(&retrying(), &unavailable(Retry::Backoff), Some(3)).await;
+    assert_eq!(made, seconds(&[0, 1, 3]));
+    assert_eq!(counted.len(), 2);
+
+    // What a retry would not mend is not retried.
+    let (made, counted) = delivered(&retrying(), &unavailable(Retry::Never), None).await;
+    assert_eq!(made, seconds(&[0]));
+    assert_eq!(counted, ["the collector answered 503 Service Unavailable"]);
+}
+
+/// An attempt that times out is counted and not retried.
+#[tokio::test(start_paused = true)]
+async fn a_timed_out_attempt_is_not_retried() {
+    let settings = retrying();
+    let start = tokio::time::Instant::now();
+    let mut attempts = 0;
+    let mut counted = Vec::new();
+    super::deliver(
+        &settings,
+        start + settings.interval,
+        || {
+            attempts += 1;
+            std::future::pending::<Result<(), Failed>>()
+        },
+        |message| counted.push(message.to_owned()),
+    )
+    .await;
+    assert_eq!(attempts, 1);
+    assert_eq!(counted, ["no answer within 10s"]);
+    assert_eq!(start.elapsed(), Duration::from_secs(10));
+}
+
+/// 429, 502, 503 and 504 are retried, after the collector's wait if it
+/// gives one; any other refusal is not.
+#[test]
+fn which_http_answers_are_retried() {
+    let wait = Some(Duration::from_secs(7));
+    for status in [
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::BAD_GATEWAY,
+        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::GATEWAY_TIMEOUT,
+    ] {
+        assert_eq!(super::http_retry(status, None), Retry::Backoff, "{status}");
+        assert_eq!(
+            super::http_retry(status, wait),
+            Retry::After(Duration::from_secs(7)),
+            "{status}"
+        );
+    }
+    for status in [
+        StatusCode::BAD_REQUEST,
+        StatusCode::UNAUTHORIZED,
+        StatusCode::NOT_FOUND,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        StatusCode::NOT_IMPLEMENTED,
+    ] {
+        assert_eq!(super::http_retry(status, wait), Retry::Never, "{status}");
+    }
+}
+
+/// `OTEL_SDK_DISABLED=true` turns a configured export off without
+/// reading the other variables, so a bad one does not fail the check;
+/// any other value leaves it on.
+#[test]
+fn otel_sdk_disabled_turns_the_export_off() {
+    for value in ["true", "TRUE", " True "] {
+        let environment = |name: &str| match name {
+            "OTEL_SDK_DISABLED" => Some(value.to_owned()),
+            "OTEL_EXPORTER_OTLP_PROTOCOL" => Some("carrier-pigeon".to_owned()),
+            _ => token(name),
+        };
+        let config = load(&exporting("http://127.0.0.1:4318"), &environment);
+        assert!(super::disabled(&config, &environment), "{value:?}");
+        assert!(Prepared::new(&config, &environment).unwrap().is_none());
+        assert_eq!(Settings::resolve(&config, &environment), Ok(None));
+        assert_eq!(super::check(&config, &environment), Ok(()));
+    }
+    for value in ["false", "1", "yes", ""] {
+        let environment = |name: &str| match name {
+            "OTEL_SDK_DISABLED" => Some(value.to_owned()),
+            _ => token(name),
+        };
+        let config = load(&exporting("http://127.0.0.1:4318"), &environment);
+        assert!(!super::disabled(&config, &environment), "{value:?}");
+        assert!(Prepared::new(&config, &environment).unwrap().is_some());
+    }
+    // Without the table there is nothing to turn off, and nothing to say.
+    let environment = |name: &str| (name == "OTEL_SDK_DISABLED").then(|| "true".to_owned());
+    assert!(!super::disabled(&load(CHECKS, &environment), &environment));
+}
+
+/// Over gRPC, `UNAVAILABLE` is retried, after the `RetryInfo` delay if
+/// there is one, and `RESOURCE_EXHAUSTED` only with a `RetryInfo`.
+#[cfg(feature = "grpc")]
+#[test]
+fn which_grpc_answers_are_retried() {
+    use super::grpc::{ProtoAny, ProtoDuration, RetryInfo, StatusDetails, retry};
+    use tonic::{Code, Status};
+
+    let info = StatusDetails {
+        details: vec![
+            ProtoAny {
+                type_url: "type.googleapis.com/google.rpc.DebugInfo".into(),
+                value: vec![1, 2, 3],
+            },
+            ProtoAny {
+                type_url: "type.googleapis.com/google.rpc.RetryInfo".into(),
+                value: RetryInfo {
+                    retry_delay: Some(ProtoDuration {
+                        seconds: 3,
+                        nanos: 500_000_000,
+                    }),
+                }
+                .encode_to_vec(),
+            },
+        ],
+    }
+    .encode_to_vec();
+    let with = |code| Status::with_details(code, "busy", info.clone().into());
+    let delay = Retry::After(Duration::from_millis(3_500));
+
+    assert_eq!(
+        retry(&Status::new(Code::Unavailable, "busy")),
+        Retry::Backoff
+    );
+    assert_eq!(retry(&with(Code::Unavailable)), delay);
+    assert_eq!(
+        retry(&Status::new(Code::ResourceExhausted, "full")),
+        Retry::Never
+    );
+    assert_eq!(retry(&with(Code::ResourceExhausted)), delay);
+    for code in [
+        Code::InvalidArgument,
+        Code::Unauthenticated,
+        Code::Internal,
+        Code::DeadlineExceeded,
+    ] {
+        assert_eq!(retry(&with(code)), Retry::Never, "{code:?}");
+    }
+    let garbled = Status::with_details(Code::Unavailable, "busy", vec![0xff, 0xff].into());
+    assert_eq!(retry(&garbled), Retry::Backoff);
+}
+
+/// A gRPC collector answering `UNAVAILABLE` and then OK takes the same
+/// export on the retry; the refused call is counted.
+#[cfg(feature = "grpc")]
+#[tokio::test]
+async fn grpc_unavailable_is_retried_and_counted() {
+    use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::{
+        MetricsService, MetricsServiceServer,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Fake(
+        mpsc::UnboundedSender<ExportMetricsServiceRequest>,
+        AtomicUsize,
+    );
+
+    #[tonic::async_trait]
+    impl MetricsService for Fake {
+        async fn export(
+            &self,
+            request: tonic::Request<ExportMetricsServiceRequest>,
+        ) -> Result<tonic::Response<ExportMetricsServiceResponse>, tonic::Status> {
+            let _ = self.0.send(request.into_inner());
+            if self.1.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(tonic::Status::unavailable("warming up"));
+            }
+            Ok(tonic::Response::new(ExportMetricsServiceResponse::default()))
+        }
+    }
+
+    let (sender, mut received) = mpsc::unbounded_channel();
+    let app =
+        tonic::service::Routes::new(MetricsServiceServer::new(Fake(sender, AtomicUsize::new(0))))
+            .into_axum_router();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let config = load(
+        &format!(
+            "{}protocol = \"grpc\"\n",
+            exporting(&format!("http://{address}"))
+        ),
+        &token,
+    );
+    let metrics = metrics(&config);
+    let mut prepared = Prepared::new(&config, &|_| None).unwrap().unwrap();
+    prepared.settings.interval = Duration::from_secs(1);
+    prepared.settings.timeout = Duration::from_millis(500);
+    prepared.settings.backoff = Backoff {
+        base: Duration::from_millis(1),
+        cap: Duration::from_millis(1),
+        jitter: Jitter::None,
+    };
+    let exporter = prepared.start(Arc::clone(&metrics), Arc::new(snapshot()), no_slack());
+    let mut next = async || {
+        tokio::time::timeout(Duration::from_secs(5), received.recv())
+            .await
+            .expect("no export reached the collector within 5s")
+            .unwrap()
+    };
+    let first = next().await;
+    let retried = next().await;
+    exporter.stop().await;
+    assert_eq!(retried, first, "the retry sent a different export");
+    assert_eq!(metrics.export.failures(), 1);
 }

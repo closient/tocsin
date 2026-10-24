@@ -138,6 +138,8 @@ struct IncidentPage {
     resolve: Option<Resolve>,
     message: String,
     errors: Vec<FieldError>,
+    /// Whether subscribers exist to be told, so the form offers the switch.
+    can_notify: bool,
 }
 
 #[derive(Deserialize)]
@@ -307,7 +309,7 @@ async fn update(
         let update = NewUpdate {
             status,
             message: message.clone(),
-            notify: true,
+            notify: wants_notify(&fields),
         };
         match incidents::append(&state, id, update, admin.actor()).await {
             Ok(_) => return Ok(Redirect::to(&format!("/admin/incidents/{id}")).into_response()),
@@ -326,6 +328,14 @@ async fn update(
         StatusCode::UNPROCESSABLE_ENTITY,
     )
     .await
+}
+
+/// Whether the update form asks to tell subscribers. An unchecked checkbox
+/// sends nothing, so the form also sends `notify_shown`: with it, a missing
+/// `notify` means the box was unchecked; without it (a hand-made post, an
+/// older page) the default holds and subscribers hear.
+fn wants_notify(fields: &Fields) -> bool {
+    fields.get("notify_shown").is_none() || fields.get("notify").is_some()
 }
 
 async fn incident_page(
@@ -366,6 +376,7 @@ async fn incident_page(
         resolve,
         message,
         errors,
+        can_notify: state.subscribers.is_some(),
         incident,
     };
     Ok(render(status, &page))

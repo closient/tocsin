@@ -15,6 +15,7 @@ use axum::response::{IntoResponse, Response};
 use super::AppState;
 use super::auth::{Authorized, scope};
 use super::error::ApiError;
+use crate::metrics::slack_names;
 
 /// Where it is served.
 pub const PATH: &str = "/metrics";
@@ -36,13 +37,7 @@ pub async fn get_metrics(
     let db_size_bytes = state.store.size_on_disk().map_err(|error| {
         ApiError::internal(&format!("cannot read the database's size: {error}"))
     })?;
-    let named = state.config.notifiers.iter().any(|notifier| {
-        notifier
-            .slack
-            .as_ref()
-            .is_some_and(|slack| slack.connection.is_some())
-    });
-    let slack = if state.slack.is_some() || named {
+    let slack = if slack_names(&state.config).is_some() {
         Some(state.store.slack_census().await.map_err(|error| {
             ApiError::internal(&format!("cannot read the Slack connections: {error}"))
         })?)

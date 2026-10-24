@@ -500,6 +500,31 @@ It needs `[server] public_url`, for the links in each email, and a complete `[se
 | `secret_key` | [`Secret`](#type-secret) | yes |  | The widget's secret key, which tocsin sends to Cloudflare to check each answer. Secret. |
 | `site_key` | string | yes |  | The widget's site key, which the page shows. |
 
+<a id="table-telemetry"></a>
+
+### `[telemetry]`
+
+`[telemetry]`: where tocsin sends its own telemetry. Without it, it sends none. Like `[server]`, it is read only at startup.
+
+| Key | Type | Required | Default | Description |
+|-----|------|----------|---------|-------------|
+| `otlp` | [table](#table-otlp) |  |  | `[telemetry.otlp]`: push the checks' metrics over OTLP. The table turns the export on, even empty: each key it leaves out is taken from the standard `OTEL_EXPORTER_OTLP_*` environment variables, and a key it sets wins over them. |
+
+<a id="table-otlp"></a>
+
+#### `[telemetry.otlp]`
+
+`[telemetry.otlp]`: an OTLP metrics exporter.
+
+| Key | Type | Required | Default | Description |
+|-----|------|----------|---------|-------------|
+| `endpoint` | string |  |  | The collector's base URL, such as `"http://otel-collector:4318"`. Over `http/protobuf` the metrics go to its `/v1/metrics`. Without it, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` (used as is), then `OTEL_EXPORTER_OTLP_ENDPOINT`, then `http://localhost:4318` (`http://localhost:4317` over `grpc`). |
+| `headers` | table of [`Text`](#type-text) |  |  | Headers sent with each export, such as an API key. A value may be an `${ENV:NAME}` secret, which is never logged. They are added to those in `OTEL_EXPORTER_OTLP_HEADERS` and `OTEL_EXPORTER_OTLP_METRICS_HEADERS`; a header named in both is sent with the value given here. |
+| `interval` | [`Duration`](#type-duration) |  |  | How often the metrics are sent. Without it, `OTEL_METRIC_EXPORT_INTERVAL` (milliseconds), then 60s. |
+| `protocol` | [`OtlpProtocol`](#type-otlpprotocol) |  |  | `"http/protobuf"` or `"grpc"`. Without it, `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL`, then `OTEL_EXPORTER_OTLP_PROTOCOL`, then `"http/protobuf"`. |
+| `resource` | table of string |  |  | Resource attributes added to those tocsin sets, such as `{ "deployment.environment.name" = "production" }`. They win over `OTEL_RESOURCE_ATTRIBUTES`, and `service.name` here wins over `OTEL_SERVICE_NAME` and the default `"tocsin"`. `service.version` and `service.instance.id` (the `node_id`) are tocsin's own and cannot be set. |
+| `timeout` | [`Duration`](#type-duration) |  |  | How long one export may take before it is abandoned and counted as failed. Without it, `OTEL_EXPORTER_OTLP_METRICS_TIMEOUT`, then `OTEL_EXPORTER_OTLP_TIMEOUT` (milliseconds), then 10s or `interval`, whichever is shorter. It may not be longer than `interval`. |
+
 <a id="table-token"></a>
 
 ### `[[token]]`
@@ -629,6 +654,17 @@ The service a notifier posts to.
 | `"telegram"` | A Telegram bot. |
 | `"webhook"` | A generic JSON webhook. |
 | `"alertmanager"` | The Alertmanager v2 alerts API. |
+
+<a id="type-otlpprotocol"></a>
+
+### `OtlpProtocol`
+
+How OTLP is carried.
+
+| Value | Meaning |
+|-------|---------|
+| `"http/protobuf"` | Protobuf in an HTTP POST, to port 4318 by convention. |
+| `"grpc"` | gRPC, to port 4317 by convention. |
 
 <a id="type-recordtype"></a>
 

@@ -125,7 +125,10 @@ impl Api {
         .map_err(|error| {
             Failure::new(
                 Exit::Runtime,
-                format!("{method} {url} failed: {}", chain(&error.without_url())),
+                format!(
+                    "{method} {url} failed: {}",
+                    crate::net::chain(&error.without_url())
+                ),
             )
         })?;
         if !status.is_success() {
@@ -211,19 +214,6 @@ impl Client {
         self.runtime
             .block_on(self.api.send(method, url, &[], body, authenticated))
     }
-}
-
-/// An error with its causes, which say what actually went wrong
-/// ("connection refused") where the error itself does not.
-fn chain(error: &dyn std::error::Error) -> String {
-    let mut text = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        text.push_str(": ");
-        text.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    text
 }
 
 /// The failure for an error response: its message and field errors.

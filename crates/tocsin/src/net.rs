@@ -19,3 +19,16 @@ pub fn http_client(timeout: Duration) -> reqwest::ClientBuilder {
 pub fn since_epoch(now: SystemTime) -> Duration {
     now.duration_since(UNIX_EPOCH).unwrap_or_default()
 }
+
+/// An error with its causes, which say what actually went wrong
+/// ("connection refused") where the error itself does not.
+pub fn chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}

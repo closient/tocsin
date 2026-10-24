@@ -1,0 +1,79 @@
+---
+source: crates/tocsin/src/http/metrics_tests.rs
+expression: normalized(&api.metrics().await)
+---
+# HELP tocsin_notification_failures_total Failed attempts to deliver an alert message, retried or not, by notifier.
+# TYPE tocsin_notification_failures_total counter
+tocsin_notification_failures_total{notifier="pager"} 1
+# HELP tocsin_notifications_abandoned_total Alert messages given up on after their last attempt failed, by notifier.
+# TYPE tocsin_notifications_abandoned_total counter
+tocsin_notifications_abandoned_total{notifier="pager"} 1
+# HELP tocsin_config_reload_success 1 if the last configuration reload succeeded, 0 if it failed and the last good configuration is still running.
+# TYPE tocsin_config_reload_success gauge
+tocsin_config_reload_success 1
+# HELP tocsin_config_last_error_timestamp When a configuration reload last failed, in unix seconds; 0 if none has.
+# TYPE tocsin_config_last_error_timestamp gauge
+tocsin_config_last_error_timestamp 0
+# HELP tocsin_check_duration_seconds How long each check's probes take.
+# TYPE tocsin_check_duration_seconds histogram
+tocsin_check_duration_seconds_sum{check="api-https",component="api",node="node-a"} 0.12
+tocsin_check_duration_seconds_count{check="api-https",component="api",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="0.005",check="api-https",component="api",node="node-a"} 0
+tocsin_check_duration_seconds_bucket{le="0.01",check="api-https",component="api",node="node-a"} 0
+tocsin_check_duration_seconds_bucket{le="0.025",check="api-https",component="api",node="node-a"} 0
+tocsin_check_duration_seconds_bucket{le="0.05",check="api-https",component="api",node="node-a"} 0
+tocsin_check_duration_seconds_bucket{le="0.1",check="api-https",component="api",node="node-a"} 0
+tocsin_check_duration_seconds_bucket{le="0.25",check="api-https",component="api",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="0.5",check="api-https",component="api",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="1.0",check="api-https",component="api",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="2.5",check="api-https",component="api",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="5.0",check="api-https",component="api",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="10.0",check="api-https",component="api",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="30.0",check="api-https",component="api",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="60.0",check="api-https",component="api",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="+Inf",check="api-https",component="api",node="node-a"} 1
+tocsin_check_duration_seconds_sum{check="db",component="",node="node-a"} 0.004
+tocsin_check_duration_seconds_count{check="db",component="",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="0.005",check="db",component="",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="0.01",check="db",component="",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="0.025",check="db",component="",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="0.05",check="db",component="",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="0.1",check="db",component="",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="0.25",check="db",component="",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="0.5",check="db",component="",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="1.0",check="db",component="",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="2.5",check="db",component="",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="5.0",check="db",component="",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="10.0",check="db",component="",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="30.0",check="db",component="",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="60.0",check="db",component="",node="node-a"} 1
+tocsin_check_duration_seconds_bucket{le="+Inf",check="db",component="",node="node-a"} 1
+# HELP tocsin_build_info Always 1; the version label is the running tocsin's.
+# TYPE tocsin_build_info gauge
+tocsin_build_info{version="<version>"} 1
+# HELP tocsin_check_up Each check's and heartbeat's confirmed health: 1 up, 0.5 degraded, 0 down; absent until confirmed.
+# TYPE tocsin_check_up gauge
+tocsin_check_up{check="api-https",component="api",node="node-a",kind="check"} 0.0
+tocsin_check_up{check="backup",component="jobs",node="node-a",kind="heartbeat"} 1.0
+# HELP tocsin_check_last_run_timestamp When each check's latest probe started, in unix seconds.
+# TYPE tocsin_check_last_run_timestamp gauge
+tocsin_check_last_run_timestamp{check="api-https",component="api",node="node-a"} 1760000060
+tocsin_check_last_run_timestamp{check="db",component="",node="node-a"} 1760000061
+# HELP tocsin_heartbeat_last_ping_timestamp When each heartbeat was last pinged, in unix seconds; absent until its first ping since tocsin started.
+# TYPE tocsin_heartbeat_last_ping_timestamp gauge
+tocsin_heartbeat_last_ping_timestamp{check="backup",component="jobs",node="node-a"} 1760000030
+# HELP tocsin_component_status 1 for the status each component shows on the status page, 0 for the others.
+# TYPE tocsin_component_status gauge
+tocsin_component_status{component="api",node="node-a",status="degraded"} 0
+tocsin_component_status{component="api",node="node-a",status="down"} 1
+tocsin_component_status{component="api",node="node-a",status="maintenance"} 0
+tocsin_component_status{component="api",node="node-a",status="operational"} 0
+tocsin_component_status{component="api",node="node-a",status="unknown"} 0
+tocsin_component_status{component="jobs",node="node-a",status="degraded"} 0
+tocsin_component_status{component="jobs",node="node-a",status="down"} 0
+tocsin_component_status{component="jobs",node="node-a",status="maintenance"} 1
+tocsin_component_status{component="jobs",node="node-a",status="operational"} 0
+tocsin_component_status{component="jobs",node="node-a",status="unknown"} 0
+# HELP tocsin_db_size_bytes The database's size on disk, its write-ahead log included.
+# TYPE tocsin_db_size_bytes gauge
+tocsin_db_size_bytes <size>

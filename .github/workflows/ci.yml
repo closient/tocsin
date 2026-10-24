@@ -28,6 +28,8 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Clippy with OTLP over gRPC
+        run: cargo clippy --workspace --all-targets --locked --features tocsin/grpc -- -D warnings
 
   test:
     strategy:
@@ -70,6 +72,8 @@ jobs:
           "$TOCSIN_PROMTOOL" check rules examples/prometheus/tocsin-rules.yml
           "$TOCSIN_PROMTOOL" test rules examples/prometheus/tocsin-rules.test.yml
       - run: cargo test --workspace --locked
+      - name: The OTLP export over gRPC
+        run: cargo test --locked -p tocsin --features grpc --bin tocsin otlp
 
   # The JSON Schema editors use must accept every example, both as
   # committed and through each file's own `#:schema` directive, the way an

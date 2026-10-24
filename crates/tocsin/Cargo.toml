@@ -25,7 +25,10 @@ hyper.workspace = true
 hyper-util.workspace = true
 jiff.workspace = true
 notify.workspace = true
+opentelemetry-proto.workspace = true
+percent-encoding.workspace = true
 prometheus-client.workspace = true
+prost.workspace = true
 pulldown-cmark.workspace = true
 reqwest.workspace = true
 ring.workspace = true
@@ -39,6 +42,7 @@ serde_path_to_error.workspace = true
 subtle.workspace = true
 tokio = { workspace = true, features = ["net", "sync", "time"] }
 tocsin-store.workspace = true
+tonic = { workspace = true, optional = true }
 # Hands each request to the router the configuration last reloaded into.
 tower = { version = "0.5", default-features = false, features = ["util"] }
 tracing.workspace = true
@@ -46,6 +50,10 @@ tracing-subscriber.workspace = true
 url.workspace = true
 utoipa.workspace = true
 utoipa-axum.workspace = true
+
+[features]
+# OTLP over gRPC as well as HTTP: adds tonic and its HTTP/2 stack.
+grpc = ["dep:tonic", "opentelemetry-proto/gen-tonic"]
 
 [lints]
 workspace = true
@@ -69,6 +77,10 @@ tocsin-core.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 # The log-capturing tests rebuild tracing's cache of which lines are wanted.
 tracing-core.workspace = true
+# A fake OTLP/gRPC collector for the `grpc` feature's test: the server side
+# of tonic, served over HTTP/2 by axum.
+tonic = { workspace = true, features = ["router"] }
+axum = { workspace = true, features = ["http2"] }
 
 # The workspace sets `publish = false`, which `dist` reads as "do not
 # release"; this is the one package it builds (dist-workspace.toml).

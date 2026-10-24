@@ -21,10 +21,11 @@ use super::check::CheckType;
 use super::colour::{AA_TEXT, DARK, LIGHT};
 use super::diagnostic::{Diagnostic, LineIndex};
 use super::notifier::NotifierType;
+use super::telemetry::OWN_RESOURCE_ATTRIBUTES;
 use super::values::{Id, Secret, Text, email_address, is_unanswerable};
 use super::{
     Auth, AuthMode, Check, Component, Config, Group, Heartbeat, Link, MAX_APP_NAME, Notifier, Page,
-    Project, Route, Server, Slack, Subscribers, Token,
+    Project, Route, Server, Slack, Subscribers, Telemetry, Token,
 };
 use crate::link::{http_url, site_path};
 
@@ -61,6 +62,7 @@ pub(crate) const TOP_LEVEL_KEYS: &[&str] = &[
     "token",
     "subscribers",
     "slack",
+    "telemetry",
 ];
 
 /// Parses, merges and validates configuration files, given in merge order.
@@ -172,6 +174,7 @@ struct Items {
     tokens: Vec<Item<Token>>,
     subscribers: Option<Item<Subscribers>>,
     slack: Option<Item<Slack>>,
+    telemetry: Option<Item<Telemetry>>,
 }
 
 struct ParsedFile<'a> {
@@ -350,6 +353,10 @@ impl<'a> Loader<'a> {
                             self.singleton(&origin, "subscribers", items.subscribers.take());
                     }
                     "slack" => items.slack = self.singleton(&origin, "slack", items.slack.take()),
+                    "telemetry" => {
+                        items.telemetry =
+                            self.singleton(&origin, "telemetry", items.telemetry.take());
+                    }
                     _ => {
                         let hint = closest(&key, TOP_LEVEL_KEYS.iter().copied()).map_or_else(
                             || format!("top-level tables are {}", list(TOP_LEVEL_KEYS)),
@@ -599,6 +606,9 @@ impl<'a> Loader<'a> {
         }
         if let Some(slack) = &items.slack {
             self.validate_slack(slack, items);
+        }
+        if let Some(telemetry) = &items.telemetry {
+            self.validate_telemetry(telemetry);
         }
         if let Some(page) = &items.page {
             self.validate_page(page);
@@ -1012,6 +1022,63 @@ impl<'a> Loader<'a> {
                     &origin.key("app_name"),
                     format!("`app_name` must be 1 to {MAX_APP_NAME} characters, as Slack requires; this one is {length}"),
                     None,
+                );
+            }
+        }
+    }
+
+    /// `[telemetry.otlp]`: what the file sets must make a working
+    /// exporter on its own. What it leaves to the environment is checked
+    /// when the exporter starts.
+    fn validate_telemetry(&mut self, telemetry: &Item<Telemetry>) {
+        let Some(otlp) = &telemetry.value.otlp else {
+            return;
+        };
+        let origin = telemetry.origin.key("otlp");
+        if let Some(endpoint) = &otlp.endpoint {
+            self.url(&origin.key("endpoint"), endpoint);
+        }
+        if let Some(interval) = otlp.interval
+            && interval.get() < std::time::Duration::from_secs(1)
+        {
+            self.report(
+                &origin.key("interval"),
+                "`interval` must be at least 1s",
+                None,
+            );
+        }
+        if let Some(timeout) = otlp.timeout {
+            if timeout.get().is_zero() {
+                self.report(&origin.key("timeout"), "`timeout` must be above 0", None);
+            } else if let Some(interval) = otlp.interval
+                && timeout.get() > interval.get()
+            {
+                self.report(
+                    &origin.key("timeout"),
+                    format!(
+                        "`timeout` ({timeout}) must not be longer than `interval` ({interval})"
+                    ),
+                    Some(
+                        "an export still running when the next one is due is abandoned".to_owned(),
+                    ),
+                );
+            }
+        }
+        for name in otlp.resource.keys() {
+            if name.trim().is_empty() {
+                self.report(
+                    &origin.key("resource"),
+                    "a resource attribute needs a non-empty name",
+                    None,
+                );
+            } else if OWN_RESOURCE_ATTRIBUTES.contains(&name.as_str()) {
+                self.report(
+                    &origin.keys(&["resource", name]),
+                    format!("`{name}` is set by tocsin and cannot be overridden"),
+                    Some(
+                        "tocsin sets service.version, and service.instance.id to the node_id"
+                            .to_owned(),
+                    ),
                 );
             }
         }
@@ -1522,34 +1589,29 @@ impl<'a> Loader<'a> {
 
     // ---- secrets --------------------------------------------------------
 
-    /// Rejects an `http` check's header that could not be sent: a name that
-    /// is not an HTTP token, or a value (secrets included, once resolved)
-    /// holding a control character such as a newline. A secret's value is
-    /// never repeated; its variable is named instead.
+    /// Rejects an `http` check's or `[telemetry.otlp]`'s header that could
+    /// not be sent: a name that is not an HTTP token, or a value (secrets
+    /// included, once resolved) holding a control character such as a
+    /// newline. A secret's value is never repeated; its variable is named
+    /// instead.
     fn validate_headers(&mut self, items: &Items) {
+        if let Some(telemetry) = &items.telemetry
+            && let Some(otlp) = &telemetry.value.otlp
+        {
+            for (name, value) in &otlp.headers {
+                self.header(
+                    &telemetry.origin.keys(&["otlp", "headers", name]),
+                    name,
+                    value,
+                );
+            }
+        }
         for check in &items.checks {
             let Some(http) = &check.value.http else {
                 continue;
             };
             for (name, value) in &http.headers {
-                let origin = check.origin.keys(&["http", "headers", name]);
-                if http::HeaderName::from_bytes(name.as_bytes()).is_err() {
-                    self.report(
-                        &origin,
-                        format!("`{name}` is not an HTTP header name"),
-                        Some(
-                            "a header name is letters, digits and !#$%&'*+-.^_`|~, such as \"X-Request-Id\""
-                                .to_owned(),
-                        ),
-                    );
-                }
-                let (text, source) = match value {
-                    Text::Literal(text) => (Some(text.as_str()), None),
-                    Text::Secret(secret) => (secret.resolved(), Some(secret.variable())),
-                };
-                if let Some(text) = text {
-                    self.header_value(&origin, text, source);
-                }
+                self.header(&check.origin.keys(&["http", "headers", name]), name, value);
             }
             if let Some(token) = &http.bearer_token
                 && let Some(text) = token.resolved()
@@ -1560,6 +1622,28 @@ impl<'a> Loader<'a> {
                     Some(token.variable()),
                 );
             }
+        }
+    }
+
+    /// Reports a header that could not be sent: a name that is not an HTTP
+    /// token, or a value holding a control character.
+    fn header(&mut self, origin: &Origin, name: &str, value: &Text) {
+        if http::HeaderName::from_bytes(name.as_bytes()).is_err() {
+            self.report(
+                origin,
+                format!("`{name}` is not an HTTP header name"),
+                Some(
+                    "a header name is letters, digits and !#$%&'*+-.^_`|~, such as \"X-Request-Id\""
+                        .to_owned(),
+                ),
+            );
+        }
+        let (text, source) = match value {
+            Text::Literal(text) => (Some(text.as_str()), None),
+            Text::Secret(secret) => (secret.resolved(), Some(secret.variable())),
+        };
+        if let Some(text) = text {
+            self.header_value(origin, text, source);
         }
     }
 
@@ -1606,6 +1690,7 @@ impl<'a> Loader<'a> {
                 &mut slack.value.client_secret,
             ));
         }
+        telemetry_secrets(&mut items.telemetry, &mut secrets);
         for notifier in &mut items.notifiers {
             for (path, secret) in notifier.value.secrets_mut() {
                 secrets.push((notifier.origin.keys(&path), secret));
@@ -1783,6 +1868,7 @@ impl<'a> Loader<'a> {
             page: items.page.map(|item| item.value).unwrap_or_default(),
             subscribers: items.subscribers.map(|item| item.value),
             slack: items.slack.map(|item| item.value),
+            telemetry: items.telemetry.map(|item| item.value),
         })
     }
 }
@@ -2031,6 +2117,25 @@ fn is_domain(text: &str) -> bool {
     text.len() <= 253 && text.contains('.') && text.split('.').all(is_label)
 }
 
+/// Adds the `${ENV:...}` header values of `[telemetry.otlp]`, if there
+/// is one, to `secrets`.
+fn telemetry_secrets<'a>(
+    telemetry: &'a mut Option<Item<Telemetry>>,
+    secrets: &mut Vec<(Origin, &'a mut Secret)>,
+) {
+    let Some(Item { origin, value }) = telemetry else {
+        return;
+    };
+    let Some(otlp) = &mut value.otlp else {
+        return;
+    };
+    for (name, value) in &mut otlp.headers {
+        if let Text::Secret(secret) = value {
+            secrets.push((origin.keys(&["otlp", "headers", name]), secret));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -2083,6 +2188,7 @@ mod tests {
                 "slack",
                 "[slack]\nclient_id = \"${ENV:ID}\"\nclient_secret = \"${ENV:SECRET}\"\n",
             ),
+            ("telemetry", "[telemetry.otlp]\n"),
         ];
         let kinds: BTreeSet<&str> = TOP_LEVEL_KEYS.iter().copied().collect();
         let covered: BTreeSet<&str> = samples.iter().map(|(kind, _)| *kind).collect();

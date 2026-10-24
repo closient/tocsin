@@ -1134,6 +1134,82 @@
       ],
       "type": "object"
     },
+    "Otlp": {
+      "additionalProperties": false,
+      "description": "`[telemetry.otlp]`: an OTLP metrics exporter.",
+      "properties": {
+        "endpoint": {
+          "description": "The collector's base URL, such as `\"http://otel-collector:4318\"`.\nOver `http/protobuf` the metrics go to its `/v1/metrics`. Without\nit, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` (used as is), then\n`OTEL_EXPORTER_OTLP_ENDPOINT`, then `http://localhost:4318`\n(`http://localhost:4317` over `grpc`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "headers": {
+          "additionalProperties": {
+            "$ref": "#/definitions/Text"
+          },
+          "description": "Headers sent with each export, such as an API key. A value may be\nan `${ENV:NAME}` secret, which is never logged. They are added to\nthose in `OTEL_EXPORTER_OTLP_HEADERS` and\n`OTEL_EXPORTER_OTLP_METRICS_HEADERS`; a header named in both is\nsent with the value given here.",
+          "type": "object"
+        },
+        "interval": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Duration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How often the metrics are sent. Without it,\n`OTEL_METRIC_EXPORT_INTERVAL` (milliseconds), then 60s."
+        },
+        "protocol": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OtlpProtocol"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`\"http/protobuf\"` or `\"grpc\"`. Without it,\n`OTEL_EXPORTER_OTLP_METRICS_PROTOCOL`, then\n`OTEL_EXPORTER_OTLP_PROTOCOL`, then `\"http/protobuf\"`."
+        },
+        "resource": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Resource attributes added to those tocsin sets, such as\n`{ \"deployment.environment.name\" = \"production\" }`. They win over\n`OTEL_RESOURCE_ATTRIBUTES`, and `service.name` here wins over\n`OTEL_SERVICE_NAME` and the default `\"tocsin\"`. `service.version` and\n`service.instance.id` (the `node_id`) are tocsin's own and cannot be\nset.",
+          "type": "object"
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Duration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How long one export may take before it is abandoned and counted as\nfailed. Without it, `OTEL_EXPORTER_OTLP_METRICS_TIMEOUT`, then\n`OTEL_EXPORTER_OTLP_TIMEOUT` (milliseconds), then 10s or `interval`,\nwhichever is shorter. It may not be longer than `interval`."
+        }
+      },
+      "type": "object"
+    },
+    "OtlpProtocol": {
+      "description": "How OTLP is carried.",
+      "oneOf": [
+        {
+          "const": "http/protobuf",
+          "description": "Protobuf in an HTTP POST, to port 4318 by convention.",
+          "type": "string"
+        },
+        {
+          "const": "grpc",
+          "description": "gRPC, to port 4317 by convention.",
+          "type": "string"
+        }
+      ]
+    },
     "Page": {
       "additionalProperties": false,
       "description": "`[page]`: how the public status page looks, its title, logo, links,\nthe order of its groups and components, and the time zone it shows\ntimes in.",
@@ -1730,6 +1806,24 @@
       ],
       "type": "object"
     },
+    "Telemetry": {
+      "additionalProperties": false,
+      "description": "`[telemetry]`: where tocsin sends its own telemetry. Without it, it\nsends none. Like `[server]`, it is read only at startup.",
+      "properties": {
+        "otlp": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Otlp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[telemetry.otlp]`: push the checks' metrics over OTLP. The table\nturns the export on, even empty: each key it leaves out is taken\nfrom the standard `OTEL_EXPORTER_OTLP_*` environment variables, and\na key it sets wins over them."
+        }
+      },
+      "type": "object"
+    },
     "Text": {
       "description": "A string, or a secret read from an environment variable: \"${ENV:NAME}\".",
       "type": "string"
@@ -2000,6 +2094,17 @@
         }
       ],
       "description": "Email subscriptions on the public page. At most one file may hold\n`[subscribers]`; without it, there are none."
+    },
+    "telemetry": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Telemetry"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Sending the checks' metrics to an OpenTelemetry collector. At most\none file may hold `[telemetry]`; without it, nothing is sent."
     },
     "token": {
       "description": "Bearer tokens for the write API.",

@@ -23,6 +23,7 @@ mod mcp;
 mod metrics;
 mod net;
 mod notify;
+mod otlp;
 mod output;
 mod probe;
 mod query;

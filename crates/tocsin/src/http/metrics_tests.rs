@@ -80,7 +80,7 @@ const READER: &str = "reader-secret-0123456789";
 const NODE: &str = "node-a";
 
 /// Every family `/metrics` serves.
-const FAMILIES: [&str; 11] = [
+const FAMILIES: [&str; 12] = [
     "tocsin_build_info",
     "tocsin_check_up",
     "tocsin_check_duration_seconds",
@@ -92,6 +92,7 @@ const FAMILIES: [&str; 11] = [
     "tocsin_notification_failures_total",
     "tocsin_notifications_abandoned_total",
     "tocsin_db_size_bytes",
+    "tocsin_otlp_export_failures_total",
 ];
 
 /// The API down on its HTTPS check, `db` degraded but not yet confirmed,
@@ -244,6 +245,8 @@ impl Api {
         metrics.checks.pinged("backup", 1_760_000_030_250);
         metrics.alerting.attempt_failed("pager");
         metrics.alerting.abandoned("pager");
+        metrics.export.started();
+        metrics.export.failed();
     }
 }
 
@@ -328,6 +331,88 @@ async fn the_state_now_is_exported_per_check_and_component() {
         text.contains(&format!("tocsin_db_size_bytes {size}\n")),
         "{text}"
     );
+}
+
+/// The text with each family's samples in a fixed order: a family's
+/// series come out of a hash map, in an order that changes per process.
+/// A histogram's lines for one series keep their order (the sort is
+/// stable and ignores `le`). The size of the database file and the
+/// version are redacted.
+fn normalized(text: &str) -> String {
+    fn key(line: &str) -> String {
+        let (series, _value) = line.rsplit_once(' ').unwrap();
+        let (_name, labels) = series.split_once('{').unwrap_or((series, ""));
+        labels
+            .split(',')
+            .filter(|pair| !pair.starts_with("le="))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+    let mut out = String::new();
+    let mut family: Vec<&str> = Vec::new();
+    let flush = |family: &mut Vec<&str>, out: &mut String| {
+        family.sort_by_key(|line| key(line));
+        for line in family.drain(..) {
+            out.push_str(line);
+            out.push('\n');
+        }
+    };
+    for line in text.lines() {
+        if line.starts_with('#') {
+            flush(&mut family, &mut out);
+            out.push_str(line);
+            out.push('\n');
+        } else if line.starts_with("tocsin_db_size_bytes ") {
+            family.push("tocsin_db_size_bytes <size>");
+        } else if line.starts_with("tocsin_build_info{") {
+            family.push("tocsin_build_info{version=\"<version>\"} 1");
+        } else {
+            family.push(line);
+        }
+    }
+    flush(&mut family, &mut out);
+    out
+}
+
+/// The whole of `/metrics` after a probe, a ping and failed deliveries:
+/// a change to any family, label, bucket, value or line shows up here.
+#[tokio::test]
+async fn the_whole_text_is_unchanged() {
+    let api = api();
+    let metrics = &api.state.metrics;
+    metrics
+        .checks
+        .observe("api-https", Some("api"), NODE, Duration::from_millis(120));
+    metrics
+        .checks
+        .observe("db", None, NODE, Duration::from_millis(4));
+    metrics.checks.pinged("backup", 1_760_000_030_250);
+    metrics.alerting.attempt_failed("pager");
+    metrics.alerting.abandoned("pager");
+    insta::assert_snapshot!(normalized(&api.metrics().await));
+}
+
+/// Without an exporter the failure count is not written at all, so
+/// `/metrics` stays as it was; once one starts it is written from 0.
+#[tokio::test]
+async fn export_failures_are_written_once_an_exporter_starts() {
+    let api = api();
+    let export = &api.state.metrics.export;
+    assert!(!api.metrics().await.contains("tocsin_otlp_export_failures"));
+    export.started();
+    assert!(
+        api.metrics()
+            .await
+            .contains("\ntocsin_otlp_export_failures_total 0\n")
+    );
+    export.failed();
+    export.failed();
+    assert!(
+        api.metrics()
+            .await
+            .contains("\ntocsin_otlp_export_failures_total 2\n")
+    );
+    assert_eq!(export.failures(), 2);
 }
 
 #[tokio::test]

@@ -66,6 +66,10 @@
   <label>Message <span class="hint">Markdown</span>
     <textarea name="message" rows="5" required>{{ form.message }}</textarea>
   </label>
+  {%- if subscribers %}
+  <input type="hidden" name="notify_shown" value="1">
+  <label class="check"><input type="checkbox" name="notify" value="1"{% if !form.quiet %} checked{% endif %}> Notify subscribers <span class="hint">Untick to open it quietly</span></label>
+  {%- endif %}
   <div class="actions"><button type="submit">Open incident</button></div>
 </form>
 {% endblock %}

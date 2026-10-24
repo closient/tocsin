@@ -1090,3 +1090,60 @@ fn config_check_warns_of_a_slack_connection_not_connected() {
     // Nothing written to the data folder.
     assert_eq!(std::fs::read_dir(data.path()).unwrap().count(), 0);
 }
+
+/// What `tocsin incident new` sends to a server that answers 500 after
+/// reading one request: the JSON body of that request.
+fn body_sent_by_incident_new(extra: &[&str]) -> Value {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let body = loop {
+            let read = stream.read(&mut chunk).unwrap();
+            request.extend_from_slice(&chunk[..read]);
+            let text = String::from_utf8_lossy(&request).into_owned();
+            if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                let length = head
+                    .to_ascii_lowercase()
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:").map(str::to_owned))
+                    .map_or(0, |value| value.trim().parse::<usize>().unwrap());
+                if body.len() >= length {
+                    break body.to_owned();
+                }
+            }
+            assert!(read > 0, "the client closed before sending its body");
+        };
+        stream
+            .write_all(b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .unwrap();
+        body
+    });
+    let mut args = vec![
+        "incident",
+        "new",
+        "--url",
+        &url,
+        "--token",
+        "t",
+        "--title",
+        "API errors",
+        "--message",
+        "Looking into it.",
+    ];
+    args.extend_from_slice(extra);
+    tocsin(&args);
+    serde_json::from_str(&server.join().unwrap()).unwrap()
+}
+
+#[test]
+fn incident_new_quiet_sends_notify_false_and_the_default_leaves_it_out() {
+    let quiet = body_sent_by_incident_new(&["--quiet"]);
+    assert_eq!(quiet["notify"], false, "{quiet}");
+    // The default is the field's absence: the server's default is to tell.
+    let loud = body_sent_by_incident_new(&[]);
+    assert!(loud.get("notify").is_none(), "{loud}");
+}

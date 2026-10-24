@@ -226,6 +226,7 @@ impl Site {
                 message: format!("Looking into **{title}**."),
                 scheduled_start: scheduled.map(|(start, _)| start),
                 scheduled_end: scheduled.map(|(_, end)| end),
+                notify: true,
             },
             Actor::person("alice@example.com"),
         )

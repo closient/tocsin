@@ -5,6 +5,11 @@ resolve it from a phone. It is off until `[server.auth]` names an
 authenticating proxy; with `mode = "none"` (the default) `/admin/` is a
 404 like any unknown path.
 
+When `[subscribers]` is on, the update forms carry a "Notify subscribers"
+box, ticked by default. Unticked, the update is posted quietly, as
+`"notify": false` is through the API: neither email nor Slack subscribers
+hear about it. A post without the field still notifies.
+
 tocsin does no sign-in of its own. A proxy in front of it signs people in
 and tells tocsin who they are, in one of two ways:
 

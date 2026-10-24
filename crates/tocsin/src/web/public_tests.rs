@@ -295,6 +295,7 @@ async fn seeded() -> (Board, String) {
             message: "Looking into it.".to_owned(),
             scheduled_start: None,
             scheduled_end: None,
+            notify: true,
         },
         Actor::person(ALICE),
     )

@@ -2357,6 +2357,11 @@
             "type": "string",
             "description": "The first update, in markdown. Not empty."
           },
+          "notify": {
+            "type": "boolean",
+            "description": "Whether subscribers hear about it. `false` opens it quietly. It\nchanges nothing else.",
+            "default": true
+          },
           "scheduled_end": {
             "oneOf": [
               {

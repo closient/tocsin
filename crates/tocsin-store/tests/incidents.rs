@@ -50,6 +50,7 @@ fn outage() -> NewIncident {
         message: "Looking into elevated errors.".into(),
         scheduled_start: None,
         scheduled_end: None,
+        notify: true,
     }
 }
 
@@ -63,6 +64,7 @@ fn maintenance() -> NewIncident {
         message: "Upgrading Postgres.".into(),
         scheduled_start: Some(at(10_000)),
         scheduled_end: Some(at(20_000)),
+        notify: true,
     }
 }
 

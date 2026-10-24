@@ -119,7 +119,7 @@ before it sends anything.
 | `list_incidents` | `GET /api/v1/incidents` | any token | Incidents and maintenance, newest first. |
 | `list_releases` | `GET /api/v1/releases` | any token; `status:read` adds non-public projects | Releases, newest first. |
 | `create_incident` | `POST /api/v1/incidents` | `incident` | The new incident or maintenance. |
-| `update_incident` | `POST /api/v1/incidents/{id}/updates` | `incident` | The incident with the update appended. |
+| `update_incident` | `POST /api/v1/incidents/{id}/updates` | `incident` | The incident with the update appended. `notify: false` (default `true`) posts it without telling subscribers. |
 | `publish_release` | `POST /api/v1/releases` | `release` | The release, new or updated. |
 | `mark_deployed` | `POST /api/v1/releases/{project}/{version}/deployed` | `release` | The release with its deploy time. |
 | `validate_config` | none; `tocsin mcp` only | none | `tocsin config check --json` on a folder: `ok` and what it holds, or `ok: false` with every error. |

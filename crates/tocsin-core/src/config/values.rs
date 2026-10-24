@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Scalar value types shared across the configuration: identifiers,
-//! durations, secrets and email addresses.
+//! durations, sizes, secrets and email addresses.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -188,6 +188,102 @@ impl JsonSchema for Duration {
             "type": "string",
             "pattern": DURATION_PATTERN,
             "description": "A duration such as \"500ms\", \"30s\", \"5m\", \"1h30m\" or \"1d\"."
+        })
+    }
+}
+
+/// An amount of data, written as a number and a binary unit: `"512B"`,
+/// `"64KiB"` or `"1MiB"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ByteSize(u64);
+
+/// The pattern every [`ByteSize`] matches, as published in the JSON Schema.
+pub const BYTE_SIZE_PATTERN: &str = "^[0-9]+(B|KiB|MiB)$";
+
+impl ByteSize {
+    /// A size of whole kibibytes.
+    #[must_use]
+    pub const fn from_kib(kibibytes: u64) -> Self {
+        ByteSize(kibibytes * 1024)
+    }
+
+    /// A size of whole mebibytes.
+    #[must_use]
+    pub const fn from_mib(mebibytes: u64) -> Self {
+        ByteSize(mebibytes * 1024 * 1024)
+    }
+
+    /// Parses `"64KiB"` and the like.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when `text` is not a size.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let invalid = || {
+            format!(
+                "invalid size `{text}`: write a whole number followed by B, KiB or MiB, such as \"512KiB\" or \"1MiB\""
+            )
+        };
+        let digits = text
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(text.len());
+        if digits == 0 {
+            return Err(invalid());
+        }
+        let amount: u64 = text[..digits].parse().map_err(|_| invalid())?;
+        let unit: u64 = match &text[digits..] {
+            "B" => 1,
+            "KiB" => 1024,
+            "MiB" => 1024 * 1024,
+            _ => return Err(invalid()),
+        };
+        amount.checked_mul(unit).map(ByteSize).ok_or_else(invalid)
+    }
+
+    /// The size in bytes.
+    #[must_use]
+    pub const fn bytes(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for ByteSize {
+    /// Writes the largest unit that divides the size: `"1MiB"`, `"1536KiB"`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let bytes = self.0;
+        if bytes != 0 && bytes.is_multiple_of(1024 * 1024) {
+            write!(formatter, "{}MiB", bytes / (1024 * 1024))
+        } else if bytes != 0 && bytes.is_multiple_of(1024) {
+            write!(formatter, "{}KiB", bytes / 1024)
+        } else {
+            write!(formatter, "{bytes}B")
+        }
+    }
+}
+
+impl Serialize for ByteSize {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ByteSize {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        ByteSize::parse(&text).map_err(serde::de::Error::custom)
+    }
+}
+
+impl JsonSchema for ByteSize {
+    fn schema_name() -> Cow<'static, str> {
+        "ByteSize".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "pattern": BYTE_SIZE_PATTERN,
+            "description": "A size such as \"512B\", \"64KiB\" or \"1MiB\"."
         })
     }
 }
@@ -577,6 +673,41 @@ mod tests {
         assert_eq!(Duration::parse("1500ms").unwrap().to_string(), "1s500ms");
         for bad in ["", "60", "s", "1x", "1.5s", "-1s", "1 s", "1s2"] {
             assert!(Duration::parse(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn sizes_parse_and_print_canonically() {
+        let cases = [
+            ("0B", 0),
+            ("512B", 512),
+            ("64KiB", 65_536),
+            ("512KiB", 524_288),
+            ("1MiB", 1_048_576),
+            ("8MiB", 8_388_608),
+        ];
+        for (text, bytes) in cases {
+            assert_eq!(ByteSize::parse(text).unwrap().bytes(), bytes, "{text}");
+        }
+        assert_eq!(ByteSize::parse("1024KiB").unwrap().to_string(), "1MiB");
+        assert_eq!(ByteSize::parse("1536KiB").unwrap().to_string(), "1536KiB");
+        assert_eq!(ByteSize::parse("1025B").unwrap().to_string(), "1025B");
+        assert_eq!(ByteSize::from_kib(64), ByteSize::parse("65536B").unwrap());
+        for bad in [
+            "",
+            "64",
+            "KiB",
+            "64kib",
+            "64KB",
+            "64 KiB",
+            "1.5MiB",
+            "-1KiB",
+            "1GiB",
+            "64KiBB",
+            "99999999999999999999B",
+            "18446744073709551615MiB",
+        ] {
+            assert!(ByteSize::parse(bad).is_err(), "{bad:?} should be rejected");
         }
     }
 

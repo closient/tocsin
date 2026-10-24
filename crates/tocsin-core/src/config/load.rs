@@ -17,7 +17,7 @@ use toml::Spanned;
 use toml::de::{DeTable, DeValue, ValueDeserializer};
 
 use super::assertion::{Condition, TextAssertion};
-use super::check::CheckType;
+use super::check::{CheckType, MAX_BODY_CEILING};
 use super::colour::{AA_TEXT, DARK, LIGHT};
 use super::diagnostic::{Diagnostic, LineIndex};
 use super::notifier::NotifierType;
@@ -1332,6 +1332,22 @@ impl<'a> Loader<'a> {
                 "give `bearer_token` or `basic_auth`, not both",
                 None,
             );
+        }
+        if let Some(http) = &value.http {
+            let max_body = http.max_body;
+            if max_body.bytes() == 0 {
+                self.report(
+                    &origin.keys(&["http", "max_body"]),
+                    "`max_body` must be more than 0B",
+                    None,
+                );
+            } else if max_body > MAX_BODY_CEILING {
+                self.report(
+                    &origin.keys(&["http", "max_body"]),
+                    format!("`max_body` ({max_body}) must be at most {MAX_BODY_CEILING}"),
+                    None,
+                );
+            }
         }
     }
 

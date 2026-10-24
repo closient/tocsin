@@ -264,8 +264,9 @@ Type-specific settings go in a table named after the type; each is optional and 
 | `server_name` | none | The hostname for SNI, the `Host` header and the certificate check, when it differs from the target host. The connection still goes to the target host's address. |
 | `bearer_token` | none | Sent as `Authorization: Bearer <token>`. **Secret.** |
 | `basic_auth` | none | `{ username = "...", password = "${ENV:...}" }`, sent as HTTP basic authentication. `username` **may be secret**; `password` is **secret**. Give `bearer_token` or `basic_auth`, not both. |
+| `max_body` | `"64KiB"` | The most of the response body read, as a whole number of `B`, `KiB` or `MiB`, such as `"512KiB"`. At most `"8MiB"`; more, or `"0B"`, is a configuration error. |
 
-An `http` probe reads at most 64 KiB of the response body; assertions see that much, and the result says when the body was cut. Proxy environment variables are ignored: a probe measures the target, not a proxy.
+An `http` probe reads at most `max_body` of the response body; assertions see that much, and the result says when the body was cut. A `json` assertion needs the whole document, so raise `max_body` for a large one, such as a status page's `components.json`. Proxy environment variables are ignored: a probe measures the target, not a proxy.
 
 `[check.dns]`: `record_type` (`A` by default; also `AAAA`, `CNAME`, `MX`, `NS`, `TXT`, `SRV`, `CAA`) and `resolver`, an IP address as `ip`, `ip:port` or `[ipv6]:port` (the system resolver by default; a hostname is an error). Each probe asks once, with no cache and without the hosts file, and the target is a complete name: no search domains are tried.
 

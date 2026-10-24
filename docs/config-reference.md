@@ -146,6 +146,7 @@ A condition on the records a DNS lookup returns. Records are compared as text, i
 | `body` | [`Text`](#type-text) |  |  | Request body. It may be a secret, `${ENV:NAME}`. |
 | `follow_redirects` | boolean |  | `false` | Whether redirects are followed; when not, a 3xx is the result. |
 | `headers` | table of [`Text`](#type-text) |  |  | Request headers. A value may be a secret, `${ENV:NAME}`. |
+| `max_body` | [`ByteSize`](#type-bytesize) |  | `"64KiB"` | The most of the response body read, such as `"512KiB"`; the rest is not read, and assertions see only what was. At most 8MiB. Defaults to 64KiB. |
 | `method` | [`HttpMethod`](#type-httpmethod) |  | `"GET"` | Request method. |
 | `server_name` | string |  |  | The host name sent as TLS SNI and `Host`, and checked against the certificate, when it differs from the target's host. The target's host is still the address connected to. |
 | `verify_certificate` | boolean |  | `true` | Whether the server's certificate must verify. Defaults to true. When false, the request proceeds and the certificate is still reported, so `chain_valid` and `hostname_valid` can be asserted. |
@@ -553,6 +554,14 @@ How `Auth` proves who is asking.
 | `"none"` | No admin page. |
 | `"cloudflare_access"` | Cloudflare Access: verify the signed `Cf-Access-Jwt-Assertion` token against the team's published keys. |
 | `"trusted_header"` | A proxy on a trusted network names the person in a header. |
+
+<a id="type-bytesize"></a>
+
+### `ByteSize`
+
+A size such as "512B", "64KiB" or "1MiB".
+
+A string matching `^[0-9]+(B|KiB|MiB)$`.
 
 <a id="type-checktype"></a>
 

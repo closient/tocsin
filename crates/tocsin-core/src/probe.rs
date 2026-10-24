@@ -24,10 +24,6 @@ use crate::config::{
     JsonAssertion, RecordType, RecordsAssertion, TextAssertion,
 };
 
-/// The most response body a probe reads, in bytes. The rest is not read,
-/// and [`HttpFacts::body_truncated`] says so.
-pub const BODY_LIMIT: usize = 64 * 1024;
-
 /// The longest text an assertion verdict quotes as its actual value.
 const QUOTE_LIMIT: usize = 256;
 
@@ -192,12 +188,14 @@ pub struct HttpFacts {
     pub redirect_location: Option<String>,
     /// Response headers, names in lower case, each with every value sent.
     pub headers: BTreeMap<String, Vec<String>>,
-    /// The body as text (invalid UTF-8 replaced), at most [`BODY_LIMIT`]
-    /// bytes of it.
+    /// The body as text (invalid UTF-8 replaced), at most the check's
+    /// `max_body` of it.
     pub body: String,
-    /// How many body bytes were read.
+    /// How many body bytes were read: the check's `max_body` exactly when
+    /// the body was cut.
     pub body_bytes: usize,
-    /// Whether the body was longer than [`BODY_LIMIT`] and cut short.
+    /// Whether the body was longer than the check's `max_body` and cut
+    /// short.
     pub body_truncated: bool,
     /// The server certificate, for an https target.
     pub certificate: Option<CertificateFacts>,
@@ -642,8 +640,12 @@ fn evaluate_json(path: &JsonPath, test: &JsonTest, http: &HttpFacts) -> Evaluati
     let document: Value = match serde_json::from_str(&http.body) {
         Ok(document) => document,
         Err(error) => {
+            // A cut body is exactly `max_body` long.
             let truncated = if http.body_truncated {
-                format!(" (the body was cut at {BODY_LIMIT} bytes)")
+                format!(
+                    " (the body was cut at {} bytes, the check's `max_body`; raise it in `[check.http]` to read more)",
+                    http.body_bytes
+                )
             } else {
                 String::new()
             };

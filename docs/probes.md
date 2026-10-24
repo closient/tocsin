@@ -139,7 +139,7 @@ refused connection, and `records` never sees a resolver that timed out.
 
 ### http
 
-One request, with the method, headers, body and credentials from `[check.http]`. Redirects are not followed unless `follow_redirects = true`; when they are, up to 10 are followed, and the certificate reported is the last server's. At most 64 KiB of the body is read; `body_truncated` says when there was more, and assertions see only what was read. Proxy environment variables are ignored.
+One request, with the method, headers, body and credentials from `[check.http]`. Redirects are not followed unless `follow_redirects = true`; when they are, up to 10 are followed, and the certificate reported is the last server's. At most `max_body` of the body is read (64 KiB unless `[check.http]` sets it, up to 8 MiB); `body_truncated` says when there was more, and assertions see only what was read. A `json` assertion on a cut body fails with a message giving the cap, since the document no longer parses. Proxy environment variables are ignored.
 
 With `verify_certificate = true` (the default), a certificate that does not verify fails the probe with a `tls` error. With `false`, the request goes ahead and `certificate` still reports the chain, so `chain_valid` and `hostname_valid` assertions can decide how much that matters.
 

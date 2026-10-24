@@ -13,7 +13,8 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use tocsin_core::Health;
-use tocsin_core::probe::{BODY_LIMIT, Facts, HttpFacts, ProbeErrorKind, ProbeOutcome};
+use tocsin_core::config::DEFAULT_MAX_BODY;
+use tocsin_core::probe::{CompiledCheck, Facts, HttpFacts, ProbeErrorKind, ProbeOutcome};
 use tocsin_probe::{ProbeContext, run};
 use tokio::net::TcpListener;
 
@@ -29,6 +30,23 @@ const COMPONENTS: &str = r#"{
 
 /// The marker at the very end of `/big`, past the body limit.
 const TAIL: &str = "TAIL-PAST-THE-LIMIT";
+
+/// The default `max_body`, 64 KiB, in bytes.
+const DEFAULT_BODY: usize = 64 * 1024;
+
+/// A status-page document shaped like Cloudflare's `components.json`
+/// (about 176 KB): the component asserted on sits about 150,000 bytes in,
+/// well past the default `max_body`.
+fn big_components() -> String {
+    let filler: Vec<String> = (0..2100)
+        .map(|index| format!(r#"{{"id": "filler-{index:04}", "name": "Filler {index:04}", "status": "operational"}}"#))
+        .collect();
+    format!(
+        r#"{{"components": [{}, {{"id": "target", "name": "Target", "status": "operational"}}, {}]}}"#,
+        filler.join(", "),
+        filler[..350].join(", "),
+    )
+}
 
 async fn server() -> u16 {
     let app = Router::new()
@@ -50,7 +68,16 @@ async fn server() -> u16 {
         )
         .route(
             "/big",
-            get(|| async { format!("{}{TAIL}", "a".repeat(BODY_LIMIT)) }),
+            get(|| async { format!("{}{TAIL}", "a".repeat(DEFAULT_BODY)) }),
+        )
+        .route(
+            "/big.json",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "application/json")],
+                    big_components(),
+                )
+            }),
         )
         .route(
             "/unavailable",
@@ -336,12 +363,83 @@ body = {{ contains = "{TAIL}" }}
     ));
     let outcome = run(&check, &context()).await;
     let facts = http(&outcome);
-    assert_eq!(BODY_LIMIT, 64 * 1024);
-    assert_eq!(facts.body_bytes, BODY_LIMIT);
-    assert_eq!(facts.body.len(), BODY_LIMIT);
+    assert_eq!(DEFAULT_MAX_BODY.bytes(), 64 * 1024);
+    assert_eq!(facts.body_bytes, DEFAULT_BODY);
+    assert_eq!(facts.body.len(), DEFAULT_BODY);
     assert!(facts.body_truncated);
     assert!(!outcome.assertions[0].passed);
     assert_eq!(outcome.health, Health::Down);
+}
+
+/// A json assertion on the Target component of `/big.json`, with the
+/// given `[check.http]` lines.
+fn big_json_check(port: u16, http: &str) -> CompiledCheck {
+    check(&format!(
+        r#"
+[[check]]
+id = "big-json"
+type = "http"
+target = "http://127.0.0.1:{port}/big.json"
+{http}
+
+[[check.assert]]
+json = {{ path = "$.components[?@.id == 'target'].status", eq = "operational" }}
+"#
+    ))
+}
+
+#[tokio::test]
+async fn a_json_assertion_past_64_kib_fails_with_the_default_max_body() {
+    let document = big_components();
+    let offset = document
+        .find(r#""id": "target""#)
+        .expect("the target is in the document");
+    assert!(
+        offset > 140_000 && document.len() > 170_000,
+        "{offset} of {}",
+        document.len()
+    );
+    let port = server().await;
+    let outcome = run(&big_json_check(port, ""), &context()).await;
+    let facts = http(&outcome);
+    assert!(facts.body_truncated);
+    assert_eq!(facts.body_bytes, DEFAULT_BODY);
+    let verdict = &outcome.assertions[0];
+    assert!(!verdict.passed);
+    let message = verdict.message.as_deref().expect("a message");
+    assert!(
+        message.starts_with("the body is not JSON: ")
+            && message.ends_with(
+                " (the body was cut at 65536 bytes, the check's `max_body`; raise it in `[check.http]` to read more)"
+            ),
+        "{message}"
+    );
+    assert_eq!(outcome.health, Health::Down);
+}
+
+#[tokio::test]
+async fn max_body_lets_a_json_assertion_read_past_64_kib() {
+    let port = server().await;
+    let outcome = run(
+        &big_json_check(port, "[check.http]\nmax_body = \"256KiB\""),
+        &context(),
+    )
+    .await;
+    let facts = http(&outcome);
+    assert!(!facts.body_truncated);
+    assert_eq!(facts.body_bytes, big_components().len());
+    assert!(outcome.assertions[0].passed, "{:?}", outcome.assertions[0]);
+    assert_eq!(outcome.health, Health::Up);
+
+    // A cap the body still exceeds is reported as the cap configured.
+    let outcome = run(
+        &big_json_check(port, "[check.http]\nmax_body = \"100KiB\""),
+        &context(),
+    )
+    .await;
+    assert_eq!(http(&outcome).body_bytes, 100 * 1024);
+    let message = outcome.assertions[0].message.as_deref().expect("a message");
+    assert!(message.contains("cut at 102400 bytes"), "{message}");
 }
 
 #[tokio::test]

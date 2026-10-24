@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The `http` probe: one request, reading at most [`BODY_LIMIT`] bytes of
-//! the response body.
+//! The `http` probe: one request, reading at most `max_body` of the
+//! response body.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -10,7 +10,7 @@ use std::time::Instant;
 use reqwest::redirect::Policy;
 use reqwest::{Method, Url};
 use tocsin_core::config::{Check, HttpMethod, HttpSettings};
-use tocsin_core::probe::{BODY_LIMIT, HttpFacts, ProbeError, ProbeErrorKind};
+use tocsin_core::probe::{HttpFacts, ProbeError, ProbeErrorKind};
 use url::Host;
 
 use crate::tls::Recorder;
@@ -71,7 +71,9 @@ pub(crate) async fn probe(check: &Check, context: &ProbeContext) -> Result<HttpF
                 .cloned()
         })
         .flatten();
-    let (body, body_truncated) = read_body(&mut response, &recorder).await?;
+    // `config::load` bounds `max_body` far below `usize::MAX`.
+    let limit = usize::try_from(settings.max_body.bytes()).unwrap_or(usize::MAX);
+    let (body, body_truncated) = read_body(&mut response, limit, &recorder).await?;
     let latency_ms = milliseconds(start.elapsed());
 
     Ok(HttpFacts {
@@ -147,10 +149,11 @@ async fn client(
     })
 }
 
-/// Reads at most [`BODY_LIMIT`] bytes of the body; the flag says whether
-/// there was more.
+/// Reads at most `limit` bytes of the body; the flag says whether there
+/// was more.
 async fn read_body(
     response: &mut reqwest::Response,
+    limit: usize,
     recorder: &Recorder,
 ) -> Result<(Vec<u8>, bool), ProbeError> {
     let mut body = Vec::new();
@@ -159,7 +162,7 @@ async fn read_body(
         .await
         .map_err(|error| request_error(&error, recorder))?
     {
-        let room = BODY_LIMIT - body.len();
+        let room = limit - body.len();
         if chunk.len() > room {
             body.extend_from_slice(&chunk[..room]);
             return Ok((body, true));

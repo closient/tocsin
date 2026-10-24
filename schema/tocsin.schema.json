@@ -252,6 +252,11 @@
       ],
       "type": "object"
     },
+    "ByteSize": {
+      "description": "A size such as \"512B\", \"64KiB\" or \"1MiB\".",
+      "pattern": "^[0-9]+(B|KiB|MiB)$",
+      "type": "string"
+    },
     "Check": {
       "additionalProperties": false,
       "description": "A probe run on an interval, whose result sets a component's health.",
@@ -833,6 +838,15 @@
           },
           "description": "Request headers. A value may be a secret, `${ENV:NAME}`.",
           "type": "object"
+        },
+        "max_body": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ByteSize"
+            }
+          ],
+          "default": "64KiB",
+          "description": "The most of the response body read, such as `\"512KiB\"`; the rest\nis not read, and assertions see only what was. At most 8MiB.\nDefaults to 64KiB."
         },
         "method": {
           "allOf": [

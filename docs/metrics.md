@@ -74,7 +74,7 @@ on a removed check resolves rather than firing on forever.
 | `tocsin_slack_connections` | gauge | `purpose`, `state` | Slack channels connected by signing in: `purpose` is `operator` (alert channels on `/admin/slack`) or `subscriber` (added from the subscribe page), `state` is `live` or `dead` (Slack revoked it). |
 | `tocsin_slack_connection_up` | gauge | `notifier`, `connection` | 1 when the Slack `connection` a notifier names is connected and live; 0 when it is missing or dead, so its alerts fail. |
 | `tocsin_build_info` | gauge | `version` | Always 1; `version` is the running tocsin's. |
-| `tocsin_otlp_export_failures_total` | counter | | OTLP metric exports that failed: refused, partly rejected, unanswered within the timeout, or never sent. |
+| `tocsin_otlp_export_failures_total` | counter | | Attempts to send an OTLP metric export that failed, retried or not: refused, partly rejected, unanswered within the timeout, or never sent. |
 
 Some series are absent until there is something to say:
 
@@ -238,8 +238,12 @@ Header values are secrets: tocsin never logs them, nor a password in the
 endpoint. Its startup line and failure warnings name the endpoint without
 credentials and the headers by name only.
 
-`OTEL_SDK_DISABLED` and `OTEL_METRICS_EXPORTER` are not read; the table is
-the switch.
+The table is the switch, with one exception: `OTEL_SDK_DISABLED=true`
+(in any case) turns a configured export off, as the OpenTelemetry
+specification has it. No other `OTEL_*` variable is then read, nothing
+connects to a collector, and `tocsin serve` and `tocsin config check`
+warn that the table is set but the export is off. Any other value leaves
+the export on. `OTEL_METRICS_EXPORTER` is not read.
 
 ### Metrics
 
@@ -353,18 +357,42 @@ credentials) and why, and counted in
 the collector cannot be reached, answers with an error status, rejects
 some of the points, or does not answer within the timeout. It also fails,
 sending nothing, when the Slack connections cannot be read from the
-database, as a scrape of `/metrics` then answers 500. The failed
-export is not retried; the next one, an interval later, carries the
-cumulative counts again, so a collector that recovers loses only the
-points in between.
+database, as a scrape of `/metrics` then answers 500.
+
+An attempt the collector refuses for now is retried, as the OTLP
+specification has it: over `http/protobuf` an answer of 429, 502, 503 or
+504; over `grpc` `UNAVAILABLE`, or `RESOURCE_EXHAUSTED` when the
+collector sends a `RetryInfo`. So is an attempt that cannot reach the
+collector: the connection refused, its name not resolved, the connection
+not made within half the timeout, or the connection closed before the
+collector answered (over `grpc`, tonic answers these `UNAVAILABLE`). The
+retry waits as long as the collector's `Retry-After` header or
+`RetryInfo` asks, or else 1 s, doubling with each retry of the same
+export, jittered and never more than the interval. The same export is
+sent again. A retry is made only if it would end, even waiting out the
+timeout, before the next export is due, so retries never run into the
+next interval: with the timeout equal to the interval (the default for
+intervals of 10 s or less) there are none. Any other failure, an attempt
+left unanswered for the whole timeout among them, is not retried. Every
+failed attempt, retried or not, is counted and logged, the warning
+saying whether it is retried and when, so an export that succeeds on its
+second attempt still counts one failure. An export that is given up on
+is not lost: the next one, an interval later, carries the cumulative
+counts again, so a collector that recovers loses only the points in
+between.
 
 The export runs on its own task. It reads the counters the probes write,
 and never waits on a probe, a database write or the page; the Slack
-connections come from the database's readers, inside the timeout. A
-collector that hangs costs at most one timeout per interval and slows
-nothing else.
-On shutdown an export under way is abandoned, so the last interval's
-points are not sent.
+connections come from the database's readers. Reading them and the
+first attempt share one timeout, so an export that is not retried ends
+within it. A collector that hangs costs at most one timeout per interval
+and slows nothing else.
+On shutdown, on SIGTERM or SIGINT, tocsin sends one last export once
+the checks have stopped, so the points since the last export are not
+lost. An export under way or waiting to retry is abandoned for it; the
+last carries the same counts and newer. It is one attempt, never
+retried, and shutdown waits for it at most the timeout; if it fails it
+is counted and logged like any other.
 
 Alert on the counter alongside the rest:
 

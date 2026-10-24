@@ -2,14 +2,20 @@
 
 //! The OpenTelemetry export: when `[telemetry.otlp]` is configured, the
 //! checks' metrics, and the Slack connections' when `/metrics` has them,
-//! are pushed to a collector over OTLP every `interval`.
+//! are pushed to a collector over OTLP every `interval`, and once more at
+//! shutdown. `OTEL_SDK_DISABLED=true` turns it off whatever the table says.
 //!
 //! What is sent is a [`Reading`], the same one `/metrics` is written from
 //! ([`Metrics::read`]), so the two cannot disagree. An export runs on its
 //! own task and never holds a lock while it waits on the network: probes
-//! and database writes do not wait on the collector. A failed export is
-//! logged and counted in `tocsin_otlp_export_failures_total`; the header
-//! values, which may be secrets, are never logged.
+//! and database writes do not wait on the collector. An attempt the
+//! collector refuses for now (HTTP 429, 502, 503 or 504; gRPC
+//! `UNAVAILABLE`, or `RESOURCE_EXHAUSTED` with a `RetryInfo`), or that
+//! cannot reach it, is retried with backoff while the retry can end
+//! before the next export is due.
+//! Every failed attempt, retried or not, is logged and counted in
+//! `tocsin_otlp_export_failures_total`; the header values, which may be
+//! secrets, are never logged.
 //!
 //! docs/metrics.md lists what is sent and where each setting comes from.
 
@@ -19,6 +25,7 @@ mod grpc;
 mod tests;
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -32,13 +39,16 @@ use opentelemetry_proto::tonic::metrics::v1::{
 };
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use prost::Message as _;
-use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use reqwest::StatusCode;
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER};
+use tocsin_alert::{Backoff, Jitter};
 use tocsin_core::Health;
 use tocsin_core::config::{Config, Otlp, OtlpProtocol};
 use tocsin_core::state::ComponentStatus;
 use tocsin_engine::MemberKind;
 use tocsin_engine::ports::BoxFuture;
 use tocsin_store::Store;
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 use url::Url;
@@ -55,6 +65,16 @@ const DEFAULT_INTERVAL: Duration = Duration::from_secs(60);
 /// How long an export may take when neither the file nor the environment
 /// says, unless `interval` is shorter.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The wait before the first retry of an attempt the collector refused
+/// for now, without a `Retry-After` or `RetryInfo`; each later retry of
+/// the same export waits twice as long, jittered.
+const FIRST_RETRY: Duration = Duration::from_secs(1);
+
+/// What `tocsin config check` and `serve` say when `OTEL_SDK_DISABLED`
+/// turns a configured export off.
+pub const DISABLED: &str = "`[telemetry.otlp]` is set, but OTEL_SDK_DISABLED=true turns the \
+                            OpenTelemetry export off: no metrics are sent";
 
 /// The attribute names, in tocsin's namespace: OpenTelemetry's semantic
 /// conventions have none for a monitor's checks (docs/metrics.md).
@@ -88,12 +108,16 @@ pub struct Settings {
     /// The resource's attributes, `service.name`, `service.version` and
     /// `service.instance.id` among them.
     pub resource: BTreeMap<String, String>,
+    /// How long a refused attempt waits before it is retried, when the
+    /// collector does not say.
+    pub backoff: Backoff,
 }
 
 impl Settings {
     /// The export `config` turns on, reading the `OTEL_*` environment
     /// variables through `variable`; `None` without `[telemetry.otlp]`,
-    /// whatever the environment holds.
+    /// whatever the environment holds, and `None` when `OTEL_SDK_DISABLED`
+    /// is `true`, without reading the other variables.
     ///
     /// # Errors
     ///
@@ -110,6 +134,9 @@ impl Settings {
         else {
             return Ok(None);
         };
+        if sdk_disabled(variable) {
+            return Ok(None);
+        }
         let set = |name: &str| variable(name).filter(|value| !value.trim().is_empty());
 
         let protocol = match otlp.protocol {
@@ -199,8 +226,29 @@ impl Settings {
             interval,
             timeout,
             resource: resource(config, otlp, &set)?,
+            backoff: Backoff {
+                base: FIRST_RETRY,
+                cap: interval,
+                jitter: Jitter::Full,
+            },
         }))
     }
+}
+
+/// Whether `OTEL_SDK_DISABLED` turns the export off: only `true`, in any
+/// case, does, as the OpenTelemetry specification has it.
+fn sdk_disabled(variable: &dyn Fn(&str) -> Option<String>) -> bool {
+    variable("OTEL_SDK_DISABLED").is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+}
+
+/// Whether `config` has `[telemetry.otlp]` but `OTEL_SDK_DISABLED`, read
+/// through `variable`, turns it off; [`DISABLED`] says so.
+pub fn disabled(config: &Config, variable: &dyn Fn(&str) -> Option<String>) -> bool {
+    config
+        .telemetry
+        .as_ref()
+        .is_some_and(|telemetry| telemetry.otlp.is_some())
+        && sdk_disabled(variable)
 }
 
 /// The first of `names` that is set, and its value.
@@ -661,15 +709,56 @@ impl Sender {
         }
     }
 
-    /// Sends `request`, failing with why the collector did not take all of
-    /// it.
-    async fn send(&self, request: ExportMetricsServiceRequest) -> Result<(), String> {
+    /// Sends `request` once, failing with why the collector did not take
+    /// all of it and whether it may be sent again.
+    async fn send(&self, request: &ExportMetricsServiceRequest) -> Result<(), Failed> {
         let response = match self {
             Sender::Http(sender) => sender.send(request).await?,
             #[cfg(feature = "grpc")]
-            Sender::Grpc(sender) => sender.send(request).await?,
+            Sender::Grpc(sender) => sender.send(request.clone()).await?,
         };
-        accepted(response)
+        Ok(accepted(response)?)
+    }
+}
+
+/// Why an attempt to send an export failed, and whether to send it again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Failed {
+    reason: String,
+    retry: Retry,
+}
+
+/// Whether a failed attempt is sent again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Retry {
+    /// The collector will not take it: no.
+    Never,
+    /// The collector cannot take it now: after the backoff.
+    Backoff,
+    /// The collector cannot take it now: after the wait it asked for.
+    After(Duration),
+}
+
+impl From<String> for Failed {
+    /// A failure that sending again would not mend.
+    fn from(reason: String) -> Self {
+        Failed {
+            reason,
+            retry: Retry::Never,
+        }
+    }
+}
+
+/// Whether an attempt the collector answered with `status` may be sent
+/// again: 429, 502, 503 and 504 may, as the OTLP/HTTP specification has
+/// it, after `retry_after` if the collector said.
+fn http_retry(status: StatusCode, retry_after: Option<Duration>) -> Retry {
+    match status {
+        StatusCode::TOO_MANY_REQUESTS
+        | StatusCode::BAD_GATEWAY
+        | StatusCode::SERVICE_UNAVAILABLE
+        | StatusCode::GATEWAY_TIMEOUT => retry_after.map_or(Retry::Backoff, Retry::After),
+        _ => Retry::Never,
     }
 }
 
@@ -695,6 +784,9 @@ struct HttpSender {
 impl HttpSender {
     fn new(settings: &Settings) -> Result<Self, String> {
         let client = crate::net::http_client(settings.timeout)
+            // A connection not made in time is retried, which an attempt
+            // that waited out the whole timeout could not be.
+            .connect_timeout(connect_timeout(settings))
             // A redirect would take the headers, credentials among them,
             // somewhere not configured.
             .redirect(reqwest::redirect::Policy::none())
@@ -709,8 +801,8 @@ impl HttpSender {
 
     async fn send(
         &self,
-        request: ExportMetricsServiceRequest,
-    ) -> Result<ExportMetricsServiceResponse, String> {
+        request: &ExportMetricsServiceRequest,
+    ) -> Result<ExportMetricsServiceResponse, Failed> {
         let response = self
             .client
             .post(self.url.clone())
@@ -719,21 +811,72 @@ impl HttpSender {
             .body(request.encode_to_vec())
             .send()
             .await
-            .map_err(|error| crate::net::chain(&error.without_url()))?;
+            .map_err(unsent)?;
         let status = response.status();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|error| crate::net::chain(&error.without_url()))?;
+        let retry_after = response
+            .headers()
+            .get(RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| tocsin_alert::notifier::retry_after(value, jiff::Timestamp::now()));
+        let body = response.bytes().await.map_err(unsent)?;
         if !status.is_success() {
-            return Err(format!(
-                "the collector answered {status}{}",
-                described(&body)
-            ));
+            return Err(Failed {
+                reason: format!("the collector answered {status}{}", described(&body)),
+                retry: http_retry(status, retry_after),
+            });
         }
-        ExportMetricsServiceResponse::decode(body)
-            .map_err(|error| format!("the collector's answer is not an OTLP response: {error}"))
+        Ok(ExportMetricsServiceResponse::decode(body)
+            .map_err(|error| format!("the collector's answer is not an OTLP response: {error}"))?)
     }
+}
+
+/// How long an attempt may take to connect: half the timeout, leaving the
+/// rest for the request.
+fn connect_timeout(settings: &Settings) -> Duration {
+    settings.timeout / 2
+}
+
+/// A request that got no answer from the collector. It is retried when
+/// the connection could not be made (refused, unresolved, or not made
+/// within the connect timeout) or was lost before the answer came, as
+/// the OTLP specification has a client that cannot connect retry with
+/// backoff. A request that timed out is not.
+fn unsent(error: reqwest::Error) -> Failed {
+    let retry = if error.is_connect() || lost(&error) {
+        Retry::Backoff
+    } else {
+        Retry::Never
+    };
+    Failed {
+        reason: crate::net::chain(&error.without_url()),
+        retry,
+    }
+}
+
+/// Whether the connection was closed or reset under `error`.
+fn lost(error: &reqwest::Error) -> bool {
+    use std::io::ErrorKind;
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>()
+            && matches!(
+                io.kind(),
+                ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::BrokenPipe
+                    | ErrorKind::UnexpectedEof
+            )
+        {
+            return true;
+        }
+        if let Some(hyper) = cause.downcast_ref::<hyper::Error>()
+            && hyper.is_incomplete_message()
+        {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
 }
 
 /// The `google.rpc.Status` an OTLP/HTTP collector answers an error with.
@@ -829,8 +972,18 @@ impl Prepared {
                 .join(","),
             "sending metrics over OTLP"
         );
+        let (stop, stopped) = oneshot::channel();
+        let exporting = Exporting {
+            settings,
+            sender,
+            metrics,
+            live,
+            slack,
+            node,
+        };
         Exporter {
-            task: tokio::spawn(export(settings, sender, metrics, live, slack, node)),
+            task: tokio::spawn(exporting.run(stopped)),
+            stop,
         }
     }
 }
@@ -838,66 +991,179 @@ impl Prepared {
 /// The running export.
 pub struct Exporter {
     task: JoinHandle<()>,
+    stop: oneshot::Sender<()>,
 }
 
 impl Exporter {
-    /// Stops sending; an export under way is abandoned.
+    /// Stops sending after one last export, so the readings since the
+    /// last one are not lost. An export under way, or waiting to retry,
+    /// is abandoned for it: the last carries the same cumulative counts,
+    /// and newer. It is one attempt, never retried, and ends within the
+    /// timeout, so it delays shutdown by at most that.
     pub async fn stop(self) {
-        self.task.abort();
+        let _ = self.stop.send(());
         let _ = self.task.await;
     }
 }
 
-/// Sends a reading every `settings.interval`, until aborted. Each export
-/// ends within `settings.timeout`, which is no longer than the interval,
-/// so exports never pile up.
-async fn export(
+/// What the export task holds.
+struct Exporting {
     settings: Settings,
     sender: Sender,
     metrics: Arc<Metrics>,
     live: Arc<dyn LiveStatus>,
     slack: Arc<dyn SlackSource>,
     node: String,
-) {
-    let mut ticks = tokio::time::interval_at(Instant::now() + settings.interval, settings.interval);
-    ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    loop {
-        ticks.tick().await;
-        let once = export_once(&settings, &sender, &metrics, &*live, &*slack, &node);
-        let outcome = tokio::time::timeout(settings.timeout, once)
-            .await
-            .unwrap_or_else(|_| Err(format!("no answer within {:?}", settings.timeout)));
-        if let Err(reason) = outcome {
-            metrics.export.failed();
-            tracing::warn!(
-                endpoint = %shown(&settings.endpoint),
-                protocol = settings.protocol.as_str(),
-                "OTLP metric export failed, counted in tocsin_otlp_export_failures_total: {reason}"
-            );
+}
+
+impl Exporting {
+    /// Exports every `settings.interval` until `stopped`, then once more.
+    /// An export is retried only while the retry can end before the next
+    /// is due, so exports never pile up.
+    async fn run(self, mut stopped: oneshot::Receiver<()>) {
+        let interval = self.settings.interval;
+        let mut ticks = tokio::time::interval_at(Instant::now() + interval, interval);
+        ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        // `stopped` is polled again only while it has not resolved.
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut stopped => break,
+                _ = ticks.tick() => {}
+            }
+            tokio::select! {
+                biased;
+                _ = &mut stopped => break,
+                () = self.export() => {}
+            }
         }
+        self.flush().await;
+    }
+
+    /// One export: the state now, sent until the collector takes it or
+    /// a retry could no longer end before the next export is due.
+    async fn export(&self) {
+        let started = Instant::now();
+        let read = tokio::time::timeout(self.settings.timeout, self.read()).await;
+        let request = match read {
+            Ok(Ok(request)) => request,
+            Ok(Err(reason)) => return self.failed(&reason),
+            Err(_) => {
+                return self.failed(&format!("no answer within {:?}", self.settings.timeout));
+            }
+        };
+        deliver(
+            &self.settings,
+            started,
+            || self.sender.send(&request),
+            |message| self.failed(message),
+        )
+        .await;
+    }
+
+    /// The last export, at shutdown: one attempt within the timeout.
+    async fn flush(&self) {
+        let once = async {
+            let request = self.read().await?;
+            self.sender
+                .send(&request)
+                .await
+                .map_err(|failed| failed.reason)
+        };
+        let outcome = tokio::time::timeout(self.settings.timeout, once)
+            .await
+            .unwrap_or_else(|_| Err(format!("no answer within {:?}", self.settings.timeout)));
+        if let Err(reason) = outcome {
+            self.failed(&format!("{reason}; it was the last, at shutdown"));
+        }
+    }
+
+    /// Reads the state now as an OTLP request. Like a scrape of
+    /// `/metrics`, it fails whole when the Slack connections it describes
+    /// cannot be read, rather than leaving them out.
+    async fn read(&self) -> Result<ExportMetricsServiceRequest, String> {
+        let census = if self.metrics.reads_slack() {
+            let census = self.slack.census().await;
+            Some(census.map_err(|error| format!("cannot read the Slack connections: {error}"))?)
+        } else {
+            None
+        };
+        let reading = self
+            .metrics
+            .read(&self.live.snapshot(), &self.node, census.as_ref());
+        Ok(request(
+            &reading,
+            &self.node,
+            &self.settings.resource,
+            SystemTime::now(),
+        ))
+    }
+
+    /// Counts and logs a failed attempt.
+    fn failed(&self, message: &str) {
+        self.metrics.export.failed();
+        tracing::warn!(
+            endpoint = %shown(&self.settings.endpoint),
+            protocol = self.settings.protocol.as_str(),
+            "OTLP metric export failed, counted in tocsin_otlp_export_failures_total: {message}"
+        );
     }
 }
 
-/// Reads the state now and sends it. Like a scrape of `/metrics`, it
-/// fails whole when the Slack connections it describes cannot be read,
-/// rather than sending a reading without them.
-async fn export_once(
+/// Makes `attempt`s for the export `started` then, until one succeeds or
+/// a failure is not to be retried. The first ends within
+/// `settings.timeout` of `started`, so reading the state and sending it
+/// share one timeout; each retry gets a timeout of its own. A refused
+/// attempt is retried after the wait the collector asked for, or else
+/// the backoff, only if the retry would end, even timing out, by the
+/// time the next export is due. Each failed attempt is passed to
+/// `failed` with what follows.
+async fn deliver<Attempt, Sent>(
     settings: &Settings,
-    sender: &Sender,
-    metrics: &Metrics,
-    live: &dyn LiveStatus,
-    slack: &dyn SlackSource,
-    node: &str,
-) -> Result<(), String> {
-    let census = if metrics.reads_slack() {
-        let census = slack.census().await;
-        Some(census.map_err(|error| format!("cannot read the Slack connections: {error}"))?)
-    } else {
-        None
-    };
-    let reading = metrics.read(&live.snapshot(), node, census.as_ref());
-    let request = request(&reading, node, &settings.resource, SystemTime::now());
-    sender.send(request).await
+    started: Instant,
+    mut attempt: Attempt,
+    mut failed: impl FnMut(&str),
+) where
+    Attempt: FnMut() -> Sent,
+    Sent: Future<Output = Result<(), Failed>>,
+{
+    let deadline = started + settings.interval;
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let within = if attempts == 1 {
+            (started + settings.timeout).saturating_duration_since(Instant::now())
+        } else {
+            settings.timeout
+        };
+        let outcome = tokio::time::timeout(within, attempt())
+            .await
+            .unwrap_or_else(|_| Err(format!("no answer within {:?}", settings.timeout).into()));
+        let Err(failure) = outcome else {
+            return;
+        };
+        let wait = match failure.retry {
+            Retry::Never => {
+                failed(&failure.reason);
+                return;
+            }
+            Retry::Backoff => settings.backoff.wait(attempts),
+            Retry::After(wait) => wait,
+        };
+        // Saturating: a `RetryInfo` may ask for longer than an `Instant`
+        // can be pushed out.
+        if wait.saturating_add(settings.timeout)
+            > deadline.saturating_duration_since(Instant::now())
+        {
+            failed(&format!(
+                "{}; not retried, as the retry {wait:?} from now could not end before the next export",
+                failure.reason
+            ));
+            return;
+        }
+        failed(&format!("{}; retrying in {wait:?}", failure.reason));
+        tokio::time::sleep(wait).await;
+    }
 }
 
 /// Where the exporter reads the Slack connections: the store, or a fake

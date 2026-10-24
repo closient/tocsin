@@ -9,3 +9,6 @@
 # Secrets are passed as environment variables, never committed
 .env
 .env.*
+
+# insta snapshots awaiting review
+*.snap.new

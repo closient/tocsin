@@ -237,9 +237,21 @@ mod tests {
     #[test]
     fn only_answers_that_end_the_webhook_revoke_it() {
         for (status, body, reason) in [
-            (StatusCode::NOT_FOUND, "channel_not_found", Some("channel_not_found")),
-            (StatusCode::GONE, "channel_is_archived\n", Some("channel_is_archived")),
-            (StatusCode::FORBIDDEN, "invalid_token", Some("invalid_token")),
+            (
+                StatusCode::NOT_FOUND,
+                "channel_not_found",
+                Some("channel_not_found"),
+            ),
+            (
+                StatusCode::GONE,
+                "channel_is_archived\n",
+                Some("channel_is_archived"),
+            ),
+            (
+                StatusCode::FORBIDDEN,
+                "invalid_token",
+                Some("invalid_token"),
+            ),
             (StatusCode::NOT_FOUND, "no_service", Some("no_service")),
             (StatusCode::NOT_FOUND, "<html>gone</html>", Some("HTTP 404")),
             (StatusCode::GONE, "", Some("HTTP 410")),

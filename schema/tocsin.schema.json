@@ -1566,22 +1566,67 @@
       },
       "type": "object"
     },
-    "SlackSettings": {
+    "Slack": {
       "additionalProperties": false,
-      "description": "`[notifier.slack]`.",
+      "description": "`[slack]`: your own Slack app, which people approve on Slack's consent\nscreen to connect a channel. Each connection is an incoming webhook,\nkept in the database rather than in configuration.\n\nWith it, the admin page can connect channels for `[[notifier]]`s to\nname with `connection`, and, with `[subscribers]`, visitors can add\nstatus updates to their own Slack. `tocsin slack setup` prints the link\nthat creates the app. It needs an `https` `[server] public_url`, which\nSlack sends people back to. Like `[server]`, it is read only at startup.",
       "properties": {
-        "webhook_url": {
+        "app_name": {
+          "description": "The app's name, as Slack shows it on the consent screen and beside\neach message, at most 35 characters. Used only by `tocsin slack\nsetup`; defaults to the page's title.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client_id": {
           "allOf": [
             {
               "$ref": "#/definitions/Secret"
             }
           ],
-          "description": "The incoming webhook URL. Secret."
+          "description": "The app's Client ID, from its Basic Information page. Secret."
+        },
+        "client_secret": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            }
+          ],
+          "description": "The app's Client Secret, from the same page. Secret."
         }
       },
       "required": [
-        "webhook_url"
+        "client_id",
+        "client_secret"
       ],
+      "type": "object"
+    },
+    "SlackSettings": {
+      "additionalProperties": false,
+      "description": "`[notifier.slack]`.",
+      "properties": {
+        "connection": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Id"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The name of a channel connected on the admin page's Slack tab,\nwith `[slack]`. A name not connected yet is a warning from `tocsin\nconfig check`; an alert sent to it fails loudly."
+        },
+        "webhook_url": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "An incoming webhook URL you made yourself. Secret. Give this or\n`connection`, not both."
+        }
+      },
       "type": "object"
     },
     "Subscribers": {
@@ -1933,6 +1978,17 @@
         }
       ],
       "description": "Server settings. At most one file may hold `[server]`."
+    },
+    "slack": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Slack"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Your Slack app, for connecting channels by signing in to Slack. At\nmost one file may hold `[slack]`; without it, channels cannot be\nconnected."
     },
     "subscribers": {
       "anyOf": [

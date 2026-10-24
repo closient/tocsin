@@ -91,6 +91,8 @@ struct IndexPage {
     components: Vec<Choice>,
     /// Whether `[subscribers]` is on, to link its list.
     subscribers: bool,
+    /// Whether `[slack]` is on, to link its connections.
+    slack: bool,
 }
 
 /// One update in an incident's timeline.
@@ -216,6 +218,7 @@ async fn index_page(
             })
             .collect(),
         subscribers: state.subscribers.is_some(),
+        slack: state.slack.is_some(),
     };
     Ok(render(status, &page))
 }

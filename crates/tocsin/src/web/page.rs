@@ -171,6 +171,33 @@ pub const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'
      style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; \
      frame-ancestors 'none'; base-uri 'none'";
 
+/// Where Slack's consent screen is. A form posting to this site and
+/// answered with a redirect there is still bound by `form-action`, which
+/// browsers check against every hop.
+pub const SLACK_ORIGIN: &str = "https://slack.com";
+
+/// With `[slack]`, lets every page's forms lead on to Slack's consent
+/// screen: "Add to Slack" on `/subscribe` and "Connect Slack" on
+/// `/admin/slack` post here and are redirected there. Runs after
+/// [`security_headers`], so it widens whichever policy a page has.
+pub async fn slack_form_action(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    let widened = headers
+        .get(header::CONTENT_SECURITY_POLICY)
+        .and_then(|policy| policy.to_str().ok())
+        .map(|policy| {
+            policy.replace(
+                "form-action 'self'",
+                &format!("form-action 'self' {SLACK_ORIGIN}"),
+            )
+        })
+        .and_then(|policy| HeaderValue::from_str(&policy).ok());
+    if let Some(policy) = widened {
+        headers.insert(header::CONTENT_SECURITY_POLICY, policy);
+    }
+    response
+}
+
 /// Adds the security headers every HTML response gets, and `no-store`
 /// unless the response set its own caching. A response that set its own
 /// CSP keeps it: only `/subscribe` does, to let Turnstile in.

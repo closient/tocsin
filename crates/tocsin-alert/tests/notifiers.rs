@@ -515,15 +515,30 @@ async fn a_slack_connection_posts_the_fire_and_its_resolve_to_its_webhook() {
     fire_then_resolve(&slack).await;
     let (fire, resolve) = two(&mut requests).await;
     assert_eq!(fire.path, "/services/T0/B0/connected");
-    assert!(fire.json()["text"].as_str().unwrap().starts_with(":rotating_light:"));
+    assert!(
+        fire.json()["text"]
+            .as_str()
+            .unwrap()
+            .starts_with(":rotating_light:")
+    );
     assert!(
         resolve.json()["text"]
             .as_str()
             .unwrap()
             .starts_with(":white_check_mark:")
     );
-    assert!(fire.json()["blocks"][0]["text"]["text"].as_str().unwrap().contains(IDENTITY_LINE));
-    assert!(resolve.json()["blocks"][0]["text"]["text"].as_str().unwrap().contains(IDENTITY_LINE));
+    assert!(
+        fire.json()["blocks"][0]["text"]["text"]
+            .as_str()
+            .unwrap()
+            .contains(IDENTITY_LINE)
+    );
+    assert!(
+        resolve.json()["blocks"][0]["text"]["text"]
+            .as_str()
+            .unwrap()
+            .contains(IDENTITY_LINE)
+    );
 }
 
 #[tokio::test]
@@ -547,7 +562,11 @@ async fn slack_revoking_a_connection_marks_it_dead_and_stops_posting() {
     let slack = SlackConnection::new(client(), "ops-alerts".to_owned(), store.clone());
     let error = slack.send(&alert(AlertEvent::Fire)).await.unwrap_err();
     assert!(error.permanent);
-    assert!(!error.message.contains("revoked\"") && !error.message.contains("/services/"), "{}", error.message);
+    assert!(
+        !error.message.contains("revoked\"") && !error.message.contains("/services/"),
+        "{}",
+        error.message
+    );
     assert_eq!(
         error.message,
         "Slack revoked connection `ops-alerts` (channel_not_found); reconnect it on the admin page"
@@ -562,7 +581,11 @@ async fn slack_revoking_a_connection_marks_it_dead_and_stops_posting() {
     // The resolve is not posted to a dead webhook, and says why.
     let error = slack.send(&alert(AlertEvent::Resolve)).await.unwrap_err();
     assert!(error.permanent);
-    assert!(error.message.contains("is dead (channel_not_found)"), "{}", error.message);
+    assert!(
+        error.message.contains("is dead (channel_not_found)"),
+        "{}",
+        error.message
+    );
     assert!(requests.try_recv().is_err(), "nothing more was posted");
 
     // A failure that is not a revocation leaves the connection alone.

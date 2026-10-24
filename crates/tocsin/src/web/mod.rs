@@ -32,6 +32,7 @@ pub mod internal;
 pub mod markdown;
 pub mod page;
 pub mod releases;
+pub mod slack;
 pub mod status;
 pub mod subscribe;
 pub mod theme;
@@ -57,7 +58,8 @@ use crate::http::AppState;
 /// The HTML routes: assets, the status page, the release log and their feeds always, the admin pages
 /// when `[server.auth]` turns them on, and the subscription pages when `[subscribers]` does.
 /// Without them, `/admin/` and `/subscribe` are the same 404 as any unknown path. The internal
-/// board is always routed, and refuses everyone with a 403 until auth is on.
+/// board is always routed, and refuses everyone with a 403 until auth is on. With `[slack]`, the
+/// Slack pages are routed too, and every page's forms may lead on to Slack's consent screen.
 pub fn router(state: &AppState) -> Router<AppState> {
     let mut router = Router::new()
         .route(
@@ -81,5 +83,19 @@ pub fn router(state: &AppState) -> Router<AppState> {
             router = router.merge(subscribe::admin_router());
         }
     }
-    router.layer(axum::middleware::map_response(page::security_headers))
+    if state.slack.is_some() {
+        router = router.merge(slack::router());
+        if state.subscribers.is_some() {
+            router = router.merge(slack::subscribe_router());
+        }
+        if state.admin.is_some() {
+            router = router.merge(slack::admin_router());
+        }
+    }
+    let router = router.layer(axum::middleware::map_response(page::security_headers));
+    if state.slack.is_some() {
+        router.layer(axum::middleware::map_response(page::slack_form_action))
+    } else {
+        router
+    }
 }

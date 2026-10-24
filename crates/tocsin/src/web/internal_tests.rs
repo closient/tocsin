@@ -170,6 +170,7 @@ pub(super) fn serve(config: Config, admin: Option<AdminAuth>) -> Board {
         config_status: crate::reload::steady_status(),
         metrics: Arc::new(crate::metrics::Metrics::new()),
         subscribers: None,
+        slack: None,
     };
     Board {
         _dir: dir,

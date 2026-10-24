@@ -15,7 +15,7 @@
 {%- endif %}
 {%- if form.turnstile.is_some() && !form.full %}
 <p>Get an email when an incident is opened or updated{% if !form.projects.is_empty() %}, or a release is published{% endif %}.</p>
-<p class="actions"><a class="button" href="/subscribe">Subscribe by email</a></p>
+<p class="actions"><a class="button" href="/subscribe">Subscribe by email{% if form.slack %} or Slack{% endif %}</a></p>
 {%- else %}
 <form class="stack subscribe" method="post" action="/subscribe">
   <label for="subscribe-email">Email address
@@ -41,11 +41,17 @@
   {%- endif %}
   <div class="actions">
     <button type="submit">Subscribe</button>
+    {%- if form.slack %}
+    <button type="submit" class="secondary" formaction="/subscribe/slack" formnovalidate>Add to Slack</button>
+    {%- endif %}
     {%- if !form.full %}
     <a class="more" href="/subscribe">Choose components{% if !form.projects.is_empty() %} and projects{% endif %}</a>
     {%- endif %}
   </div>
   <p class="hint">A confirmation comes first, and nothing else until you follow its link. Every email can be answered and has an unsubscribe link.</p>
+  {%- if form.slack %}
+  <p class="hint">Add to Slack asks you to sign in to Slack and pick a channel; no address needed. Every message there links to change or remove it.</p>
+  {%- endif %}
 </form>
 {%- endif %}
 <p class="hint feeds">Rather not give an address? Follow the <a href="{{ form.incident_feed }}">incident feed</a>{% if let Some(feed) = form.release_feed %} or the <a href="{{ feed }}">release feed</a>{% endif %} in a feed reader.</p>

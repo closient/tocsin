@@ -2,14 +2,17 @@
 
 //! What subscriber mail says. Every message is plain text and ends with
 //! where to reply: From and Reply-To are `[server.email]`'s, which config
-//! validation keeps answerable.
+//! validation keeps answerable. A Slack channel gets the same text, ending
+//! with links to manage or remove it and the address to write to.
 
 use std::fmt::Write as _;
 use std::time::Duration;
 
+use serde_json::{Value, json};
 use tocsin_core::config::Config;
 use tocsin_core::incident::{Incident, IncidentKind, IncidentUpdate};
 use tocsin_core::release::Release;
+use tocsin_store::Preferences;
 
 use super::paths;
 
@@ -137,6 +140,67 @@ pub fn footer(base: &str, manage: &str) -> String {
         manage_path = paths::manage(manage),
         unsubscribe_path = paths::unsubscribe(manage),
     )
+}
+
+/// The first message a Slack channel gets once added: what it will hear
+/// about, from where.
+pub fn slack_welcome(config: &Config, base: &str, preferences: &Preferences) -> Text {
+    let site = site(config);
+    let what = match (
+        preferences.components.is_empty(),
+        preferences.projects.is_empty(),
+    ) {
+        (false, false) => "an incident is opened or updated, or a release is published",
+        (false, true) => "an incident is opened or updated",
+        (true, _) => "a release is published",
+    };
+    Text {
+        subject: format!("This channel now hears from {site}"),
+        body: format!(
+            "Someone added {site} to this channel. It gets a message when {what}.\n\n\
+             The status page: {base}/\n"
+        ),
+    }
+}
+
+/// The most of a message's text one Slack section holds (Slack allows
+/// 3000 characters), leaving room for the subject.
+const SLACK_SECTION: usize = 2800;
+
+/// `text` as a Slack message, ending with links to manage or remove the
+/// channel (`manage` is its token) and the address to write to.
+pub fn slack(base: &str, manage: &str, contact: &str, text: &Text) -> Value {
+    use crate::slack::escape;
+    let mut body = text.body.trim().to_owned();
+    if body.chars().count() > SLACK_SECTION {
+        body = body.chars().take(SLACK_SECTION).collect::<String>() + "…";
+    }
+    let footer = format!(
+        "<{base}{manage_path}|Choose what this channel hears> · \
+         <{base}{remove_path}|Remove this channel> · \
+         Questions? <mailto:{contact}|{contact}>",
+        manage_path = paths::slack_manage(manage),
+        remove_path = paths::slack_unsubscribe(manage),
+        contact = escape(contact),
+    );
+    json!({
+        "text": escape(&text.subject),
+        "unfurl_links": false,
+        "unfurl_media": false,
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": format!("*{}*\n{}", escape(&text.subject), escape(&body)),
+                },
+            },
+            {
+                "type": "context",
+                "elements": [{ "type": "mrkdwn", "text": footer }],
+            },
+        ],
+    })
 }
 
 /// The impact and components, one line each.

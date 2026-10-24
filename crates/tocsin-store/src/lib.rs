@@ -53,16 +53,16 @@ pub use crate::outage::{LastUp, LatestResult, Outage};
 use crate::readers::Readers;
 pub use crate::release::{ComponentScope, Order, Projects, ReleaseQuery, TimelineQuery, Written};
 pub use crate::rollup::DailyRollup;
-pub use crate::stats::{CheckpointEvent, CheckpointStats};
-pub use crate::subscriber::{
-    ClaimedMail, EVERY, MailOutcome, Mailbag, NewAnnouncement, NewSignup, Preferences, Scope,
-    Signup, Subscriber, SubscriberCounts, SubscriberPrune,
-};
 pub use crate::slack::{
     ClaimedSlack, NewSlackConnection, SlackConnection, SlackCounts, SlackHook, SlackPurpose,
     WebhookUrl,
 };
+pub use crate::stats::{CheckpointEvent, CheckpointStats};
 use crate::subscriber::Lane;
+pub use crate::subscriber::{
+    ClaimedMail, EVERY, MailOutcome, Mailbag, NewAnnouncement, NewSignup, Preferences, Scope,
+    Signup, Subscriber, SubscriberCounts, SubscriberPrune,
+};
 use crate::writer::{Insert, Writer};
 
 /// The database file's name inside the data folder.

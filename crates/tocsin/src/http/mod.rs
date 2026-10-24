@@ -79,6 +79,9 @@ pub struct AppState {
     /// Email subscriptions; `None` without `[subscribers]`, which leaves
     /// the form off the page and the subscriber API answering 404.
     pub subscribers: Option<Arc<Subscriptions>>,
+    /// The `[slack]` app connecting channels by signing in to Slack;
+    /// `None` without `[slack]`, which leaves its pages off.
+    pub slack: Option<Arc<crate::slack::SlackApp>>,
 }
 
 /// Where the read API gets the current state of every check and

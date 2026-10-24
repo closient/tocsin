@@ -112,6 +112,7 @@ fn site_with(subscribers: &str, turnstile_url: &str) -> Site {
         config_status: crate::reload::steady_status(),
         metrics: Arc::new(crate::metrics::Metrics::new()),
         subscribers: subscriptions,
+        slack: None,
     };
     Site {
         _dir: dir,

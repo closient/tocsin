@@ -178,7 +178,10 @@ async fn an_announcement_reaches_matching_live_slack_channels_beside_email() {
     posted.sort();
     assert_eq!(
         posted,
-        ["https://hooks.example/api", "https://hooks.example/everything"]
+        [
+            "https://hooks.example/api",
+            "https://hooks.example/everything"
+        ]
     );
     assert_eq!(store.expand_announcements(2_600).await.unwrap(), 0, "once");
 

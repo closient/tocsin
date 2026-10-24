@@ -76,6 +76,11 @@ pub enum Command {
         #[command(subcommand)]
         command: NotifyCommand,
     },
+    /// Set up the Slack app that connects channels by signing in.
+    Slack {
+        #[command(subcommand)]
+        command: SlackCommand,
+    },
     /// Ping a heartbeat on a running server, from the job it watches.
     Heartbeat {
         #[command(subcommand)]
@@ -514,6 +519,18 @@ pub enum NotifyCommand {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum SlackCommand {
+    /// Print the link that creates your own Slack app, its manifest filled
+    /// in from the configuration, and what to do once it exists. Needs an
+    /// `https` `[server] public_url`; works before `[slack]` is set.
+    Setup {
+        /// Folder of `*.toml` configuration files.
+        #[arg(long, value_name = "DIR", default_value = DEFAULT_CONFIG)]
+        config: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
     /// Validate every `*.toml` file in the folder, reporting every error
     /// with its file, line and column. Exits 2 if any error is found.
@@ -521,6 +538,12 @@ pub enum ConfigCommand {
         /// Folder of `*.toml` configuration files.
         #[arg(long, value_name = "DIR", default_value = DEFAULT_CONFIG)]
         config: PathBuf,
+
+        /// Folder holding the SQLite database, read but never written, to
+        /// warn about Slack connections notifiers name that are missing or
+        /// dead. Defaults to `server.data_dir` from the configuration.
+        #[arg(long, value_name = "DIR")]
+        data: Option<PathBuf>,
     },
     /// Print the merged configuration with defaults filled in and secrets
     /// redacted.

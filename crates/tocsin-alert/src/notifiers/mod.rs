@@ -50,7 +50,9 @@ pub fn build(
                     Arc::clone(hooks),
                 ))
             }
-            (None, None) => return Err("`[notifier.slack]` needs `webhook_url` or `connection`".to_owned()),
+            (None, None) => {
+                return Err("`[notifier.slack]` needs `webhook_url` or `connection`".to_owned());
+            }
         },
         NotifierSettings::Discord(settings) => Arc::new(discord::Discord::new(
             client,

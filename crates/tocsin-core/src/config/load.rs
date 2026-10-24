@@ -23,8 +23,8 @@ use super::diagnostic::{Diagnostic, LineIndex};
 use super::notifier::NotifierType;
 use super::values::{Id, Secret, Text, email_address, is_unanswerable};
 use super::{
-    Auth, AuthMode, Check, Component, Config, Group, Heartbeat, Link, MAX_APP_NAME, Notifier,
-    Page, Project, Route, Server, Slack, Subscribers, Token,
+    Auth, AuthMode, Check, Component, Config, Group, Heartbeat, Link, MAX_APP_NAME, Notifier, Page,
+    Project, Route, Server, Slack, Subscribers, Token,
 };
 use crate::link::{http_url, site_path};
 
@@ -996,7 +996,8 @@ impl<'a> Loader<'a> {
         let admin = server
             .and_then(|server| server.value.auth.as_ref())
             .is_some_and(|auth| auth.mode != AuthMode::None);
-        let subscribers = items.subscribers.is_some() || self.singletons.contains_key("subscribers");
+        let subscribers =
+            items.subscribers.is_some() || self.singletons.contains_key("subscribers");
         if !admin && !subscribers && !server_unknown && !self.incomplete {
             self.report(
                 origin,

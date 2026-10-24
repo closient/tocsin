@@ -1,18 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The postman: turns queued announcements into deliveries and sends them.
+//! The postman: turns queued announcements into deliveries and sends them,
+//! by email and to Slack channels.
 //!
 //! Each delivery is claimed (marked `sending` and committed) before it is
 //! handed to SMTP and finished after. On start the postman fails every
 //! delivery a stopped process left `sending`: the server may already have
 //! it, and a subscriber missing one email is better than getting two. So
 //! delivery is at most once; one failed before reaching SMTP is retried
-//! with backoff.
+//! with backoff. Slack posts work the same way, except that a webhook
+//! Slack says is revoked marks its channel dead and is never retried.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use tocsin_store::{ClaimedMail, MailOutcome, Store};
+use tocsin_alert::SendError;
+use tocsin_store::{ClaimedMail, ClaimedSlack, MailOutcome, Store};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -127,7 +130,7 @@ async fn round(
         tracing::info!(deliveries = expanded, "subscriber deliveries queued");
     }
     let bag = store.mailbag(now_ms, BATCH).await?;
-    let full = bag.due.len() >= BATCH as usize;
+    let mut full = bag.due.len() >= BATCH as usize;
     for id in bag.due {
         if *stopped.borrow() {
             return Ok(Duration::ZERO);
@@ -140,10 +143,28 @@ async fn round(
             .finish_mail(mail.id, outcome, tocsin_store::now_ms())
             .await?;
     }
+    let posts = store.slack_mailbag(now_ms, BATCH).await?;
+    full |= posts.due.len() >= BATCH as usize;
+    for id in posts.due {
+        if *stopped.borrow() {
+            return Ok(Duration::ZERO);
+        }
+        let Some(post) = store.claim_slack(id).await? else {
+            continue;
+        };
+        let outcome = post_slack(store, subscriptions, &post).await;
+        store
+            .finish_slack(post.id, outcome, tocsin_store::now_ms())
+            .await?;
+    }
     if full {
         return Ok(Duration::ZERO);
     }
-    Ok(match bag.next_at_ms {
+    let next_at_ms = match (bag.next_at_ms, posts.next_at_ms) {
+        (Some(mail), Some(slack)) => Some(mail.min(slack)),
+        (mail, slack) => mail.or(slack),
+    };
+    Ok(match next_at_ms {
         Some(at_ms) => Duration::from_millis(
             u64::try_from(at_ms.saturating_sub(tocsin_store::now_ms())).unwrap_or(0),
         )
@@ -182,31 +203,70 @@ async fn deliver(subscriptions: &Subscriptions, mail: &ClaimedMail) -> MailOutco
         Ok(message) => message,
         Err(error) => return MailOutcome::Failed { error },
     };
-    match subscriptions.outbox().send(&mail.email, &message).await {
+    let sent = subscriptions.outbox().send(&mail.email, &message).await;
+    let to = token::mask(&mail.email);
+    judge(sent, mail.id, &to, mail.attempts, now_ms)
+}
+
+/// Posts one claimed delivery to a subscriber's Slack channel.
+async fn post_slack(
+    store: &Store,
+    subscriptions: &Subscriptions,
+    post: &ClaimedSlack,
+) -> MailOutcome {
+    let now_ms = tocsin_store::now_ms();
+    let manage = token::manage(post.connection_id, &post.manage_secret);
+    let text = message::Text {
+        subject: post.subject.clone(),
+        body: post.body.clone(),
+    };
+    let posted = subscriptions
+        .post_slack(
+            store,
+            post.connection_id,
+            post.webhook_url.expose(),
+            &manage,
+            &text,
+        )
+        .await;
+    let to = format!("Slack channel {}", post.connection_id);
+    judge(posted, post.id, &to, post.attempts, now_ms)
+}
+
+/// What becomes of delivery `id` to `to` after attempt `attempts` ended
+/// with `result`: sent, given up, or retried with backoff.
+fn judge(
+    result: Result<(), SendError>,
+    id: i64,
+    to: &str,
+    attempts: u32,
+    now_ms: i64,
+) -> MailOutcome {
+    match result {
         Ok(()) => {
-            tracing::debug!(delivery = mail.id, email = %token::mask(&mail.email), "subscriber mail sent");
+            tracing::debug!(delivery = id, to, "subscriber delivery sent");
             MailOutcome::Sent
         }
-        Err(error) if error.permanent || mail.attempts >= MAX_ATTEMPTS => {
+        Err(error) if error.permanent || attempts >= MAX_ATTEMPTS => {
             tracing::warn!(
-                delivery = mail.id,
-                email = %token::mask(&mail.email),
-                attempts = mail.attempts,
+                delivery = id,
+                to,
+                attempts,
                 error = %error.message,
-                "subscriber mail given up"
+                "subscriber delivery given up"
             );
             MailOutcome::Failed {
                 error: error.message,
             }
         }
         Err(error) => {
-            let wait = backoff(mail.attempts).max(error.retry_after.unwrap_or_default());
+            let wait = backoff(attempts).max(error.retry_after.unwrap_or_default());
             tracing::info!(
-                delivery = mail.id,
-                email = %token::mask(&mail.email),
-                attempts = mail.attempts,
+                delivery = id,
+                to,
+                attempts,
                 error = %error.message,
-                "subscriber mail will be retried"
+                "subscriber delivery will be retried"
             );
             MailOutcome::Retry {
                 at_ms: now_ms.saturating_add(i64::try_from(wait.as_millis()).unwrap_or(i64::MAX)),

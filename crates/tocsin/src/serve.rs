@@ -145,6 +145,9 @@ async fn serve(
         })?
         .map(Arc::new);
     let subscriptions = subscriptions(config)?;
+    let slack = crate::slack::SlackApp::from_config(config)
+        .map_err(|error| Failure::new(Exit::Runtime, format!("cannot start `[slack]`: {error}")))?
+        .map(Arc::new);
     let store = open_store(data)?;
     let listen = config.server.listen;
     let listener = TcpListener::bind(listen).await.map_err(|error| {
@@ -187,6 +190,7 @@ async fn serve(
         config_status,
         metrics: Arc::clone(&metrics),
         subscribers: subscriptions,
+        slack,
     };
     let app = LiveRouter::new(http::router(state.clone()));
     let service = app.service();
@@ -304,9 +308,10 @@ impl Monitor {
             }
         };
         let hooks: Arc<dyn SlackHooks> = Arc::clone(store) as Arc<dyn SlackHooks>;
-        let notifiers = tocsin_alert::build_all(config, &client, Some(&hooks)).map_err(|error| {
-            Failure::new(Exit::Runtime, format!("cannot set up alerting: {error}"))
-        })?;
+        let notifiers =
+            tocsin_alert::build_all(config, &client, Some(&hooks)).map_err(|error| {
+                Failure::new(Exit::Runtime, format!("cannot set up alerting: {error}"))
+            })?;
         // Alerts left open on a notifier removed while tocsin was stopped
         // would otherwise stay open for good: nothing can resolve them.
         end_alerts_without_notifier(store, &notifiers).await?;
@@ -391,12 +396,13 @@ impl Monitor {
             ))
         })?;
         let hooks: Arc<dyn SlackHooks> = Arc::clone(&self.store) as Arc<dyn SlackHooks>;
-        let notifiers = tocsin_alert::build_all(config, &self.client, Some(&hooks)).map_err(|error| {
-            ReloadError::Rejected(Failure::new(
-                Exit::InvalidInput,
-                format!("cannot set up alerting: {error}"),
-            ))
-        })?;
+        let notifiers =
+            tocsin_alert::build_all(config, &self.client, Some(&hooks)).map_err(|error| {
+                ReloadError::Rejected(Failure::new(
+                    Exit::InvalidInput,
+                    format!("cannot set up alerting: {error}"),
+                ))
+            })?;
         let router = Arc::new(Router::new(config));
         self.alerter
             .reconfigure(notifiers.clone(), Arc::clone(&router));
@@ -1005,6 +1011,7 @@ mod tests {
             config_status: crate::reload::steady_status(),
             metrics: Arc::new(crate::metrics::Metrics::new()),
             subscribers: None,
+            slack: None,
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1290,6 +1297,7 @@ mod tests {
             config_status: crate::reload::steady_status(),
             metrics,
             subscribers: None,
+            slack: None,
         });
 
         let body = json!({

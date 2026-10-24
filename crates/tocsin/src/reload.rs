@@ -251,6 +251,13 @@ impl Running {
             );
         }
         config.subscribers.clone_from(&running.subscribers);
+        if config.slack != running.slack {
+            tracing::warn!(
+                "`[slack]` changed; it is read only at startup, so the running one is kept \
+                 until tocsin restarts"
+            );
+        }
+        config.slack.clone_from(&running.slack);
 
         let unfinished = match self.monitor.reload(&config).await {
             Ok(()) => None,
@@ -607,6 +614,7 @@ scopes = ["release"]
                 config_status: status.clone(),
                 metrics: Arc::clone(&metrics),
                 subscribers: None,
+                slack: None,
             };
             let app = LiveRouter::new(http::router(state.clone()));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

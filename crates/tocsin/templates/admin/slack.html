@@ -1,0 +1,103 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{#- /admin/slack (web/slack.rs `AdminPage`). No webhook URL is ever shown. -#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Slack</h1>
+<p><a href="/admin/">Incidents</a> · <a href="/admin/timeline">Timeline</a>{% if subscribers %} · <a href="/admin/subscribers">Subscribers</a>{% endif %}</p>
+{%- if let Some(done) = done %}
+<div class="notice done" role="status"><p>{{ done }}</p></div>
+{%- endif %}
+
+<h2>Alert channels</h2>
+<p>A notifier posts to one of these with <code>connection = "name"</code> under <code>[notifier.slack]</code>.</p>
+{%- if !unconnected.is_empty() %}
+<div class="notice error" role="alert">
+  <p>Named by a notifier but not connected, so its alerts fail:</p>
+  <ul>
+    {%- for missing in unconnected %}
+    <li><code>{{ missing.connection }}</code>, named by <code>{{ missing.notifier }}</code></li>
+    {%- endfor %}
+  </ul>
+</div>
+{%- endif %}
+{%- if operator.is_empty() %}
+<p class="muted">None yet.</p>
+{%- else %}
+<ul class="items">
+  {%- for row in operator %}
+  <li class="subscriber">
+    <div>
+      <span class="item-title">{{ row.name }}</span>
+      <div class="meta">
+        {%- if row.live %}
+        <span class="badge resolved">live</span>
+        {%- else %}
+        <span class="badge down">dead</span>
+        {%- endif %}
+        <span class="muted">{{ row.place }} · {{ row.uses }} · since {{ row.since }}{% if let Some(by) = row.by %} by {{ by }}{% endif %}</span>
+      </div>
+      {%- if let Some(dead) = row.dead %}
+      <p class="field-error">Slack stopped accepting posts: {{ dead }}. Connect it again under the same name.</p>
+      {%- endif %}
+    </div>
+    <form class="inline" method="post" action="/admin/slack/{{ row.id }}/remove">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit" class="secondary" aria-label="Remove {{ row.name }}">Remove</button>
+    </form>
+  </li>
+  {%- endfor %}
+</ul>
+{%- endif %}
+
+<h2 id="connect">Connect a channel</h2>
+{%- if !errors.is_empty() %}
+<div class="notice error" role="alert">
+  <p>Not connected:</p>
+  <ul>
+    {%- for error in errors %}
+    <li class="field-error">{{ error }}</li>
+    {%- endfor %}
+  </ul>
+</div>
+{%- endif %}
+<form class="stack" method="post" action="/admin/slack/connect">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Name <span class="hint">what notifiers call it, such as ops-alerts; connecting a name again replaces its channel</span>
+    <input type="text" name="name" value="{{ name }}" required maxlength="64" autocomplete="off">
+  </label>
+  <div class="actions"><button type="submit">Connect Slack</button></div>
+</form>
+{%- if subscribers %}
+
+<h2>Subscriber channels</h2>
+<p>Channels visitors added from the subscribe page.</p>
+{%- if subscriber.is_empty() %}
+<p class="muted">None yet.</p>
+{%- else %}
+<ul class="items">
+  {%- for row in subscriber %}
+  <li class="subscriber">
+    <div>
+      <span class="item-title">{{ row.place }}</span>
+      <div class="meta">
+        {%- if row.live %}
+        <span class="badge resolved">live</span>
+        {%- else %}
+        <span class="badge down">dead</span>
+        {%- endif %}
+        <span class="muted">#{{ row.id }} · {{ row.uses }} · since {{ row.since }}</span>
+      </div>
+      {%- if let Some(dead) = row.dead %}
+      <p class="field-error">Slack stopped accepting posts: {{ dead }}.</p>
+      {%- endif %}
+    </div>
+    <form class="inline" method="post" action="/admin/slack/{{ row.id }}/remove">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit" class="secondary" aria-label="Remove {{ row.place }}">Remove</button>
+    </form>
+  </li>
+  {%- endfor %}
+</ul>
+{%- endif %}
+{%- endif %}
+{% endblock %}

@@ -346,8 +346,7 @@ fn email_notifiers_need_sender_settings() {
     );
 }
 
-const SLACK: &str =
-    "[slack]\nclient_id = \"${ENV:SLACK_CLIENT_ID}\"\nclient_secret = \"${ENV:SLACK_CLIENT_SECRET}\"\n";
+const SLACK: &str = "[slack]\nclient_id = \"${ENV:SLACK_CLIENT_ID}\"\nclient_secret = \"${ENV:SLACK_CLIENT_SECRET}\"\n";
 const ADMIN: &str = "[server]\npublic_url = \"https://status.example.com\"\n[server.auth]\nmode = \"trusted_header\"\ntrusted_proxies = [\"10.0.0.0/8\"]\n";
 
 #[test]
@@ -370,12 +369,16 @@ fn slack_needs_an_https_page_and_someone_to_connect() {
     let plain = ADMIN.replace("https://", "http://");
     assert_eq!(
         errors(&[("server.toml", &plain), ("slack.toml", SLACK)]),
-        ["server.toml:2:14: `[slack]` needs an `https` `public_url`: Slack sends people back only to https addresses"]
+        [
+            "server.toml:2:14: `[slack]` needs an `https` `public_url`: Slack sends people back only to https addresses"
+        ]
     );
     let long = format!("{SLACK}app_name = \"{}\"\n", "a".repeat(36));
     assert_eq!(
         errors(&[("server.toml", ADMIN), ("slack.toml", &long)]),
-        ["slack.toml:4:12: `app_name` must be 1 to 35 characters, as Slack requires; this one is 36"]
+        [
+            "slack.toml:4:12: `app_name` must be 1 to 35 characters, as Slack requires; this one is 36"
+        ]
     );
     let pasted = SLACK.replace("${ENV:SLACK_CLIENT_SECRET}", "CLIENT-SECRET-PASTED");
     let diagnostic = only_error(&[("server.toml", ADMIN), ("slack.toml", &pasted)]);
@@ -391,7 +394,10 @@ fn a_slack_notifier_names_a_connection_or_a_webhook_not_both() {
     let config = run(&[("notify.toml", &notifier("connection = \"ops-alerts\"\n"))])
         .expect("a connection needs no [slack] to be named");
     let slack = config.notifiers[0].slack.as_ref().expect("slack");
-    assert_eq!(slack.connection.as_ref().map(Id::as_str), Some("ops-alerts"));
+    assert_eq!(
+        slack.connection.as_ref().map(Id::as_str),
+        Some("ops-alerts")
+    );
     assert!(slack.webhook_url.is_none());
     for settings in [
         "",

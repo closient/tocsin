@@ -27,7 +27,8 @@ pub const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 /// # Errors
 ///
 /// 401 without a token or with an unknown one, 403 without the
-/// `status:read` scope; 500 if the database's size cannot be read.
+/// `status:read` scope; 500 if the database's size or its Slack
+/// connections cannot be read.
 pub async fn get_metrics(
     State(state): State<AppState>,
     _reader: Authorized<scope::StatusRead>,
@@ -35,9 +36,25 @@ pub async fn get_metrics(
     let db_size_bytes = state.store.size_on_disk().map_err(|error| {
         ApiError::internal(&format!("cannot read the database's size: {error}"))
     })?;
-    let text = state
-        .metrics
-        .render(&state.live.snapshot(), &state.config, db_size_bytes);
+    let named = state.config.notifiers.iter().any(|notifier| {
+        notifier
+            .slack
+            .as_ref()
+            .is_some_and(|slack| slack.connection.is_some())
+    });
+    let slack = if state.slack.is_some() || named {
+        Some(state.store.slack_census().await.map_err(|error| {
+            ApiError::internal(&format!("cannot read the Slack connections: {error}"))
+        })?)
+    } else {
+        None
+    };
+    let text = state.metrics.render(
+        &state.live.snapshot(),
+        &state.config,
+        db_size_bytes,
+        slack.as_ref(),
+    );
     Ok((
         [(header::CONTENT_TYPE, HeaderValue::from_static(CONTENT_TYPE))],
         text,

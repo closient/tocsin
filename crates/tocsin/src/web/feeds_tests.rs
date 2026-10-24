@@ -478,6 +478,7 @@ async fn text_is_escaped_once_and_reads_back_exactly() {
             message: "Raw <script>alert(1)</script> & a bell \u{1} here; ✓".to_owned(),
             scheduled_start: None,
             scheduled_end: None,
+            notify: true,
         },
         Actor::person("alice@example.com"),
     )

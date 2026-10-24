@@ -75,6 +75,8 @@ struct Row {
 struct CreateForm {
     title: String,
     message: String,
+    /// The switch was unticked; the default form has it ticked.
+    quiet: bool,
     errors: Vec<FieldError>,
 }
 
@@ -237,6 +239,7 @@ async fn create(
     let form = CreateForm {
         title: fields.text("title"),
         message: fields.text("message"),
+        quiet: !wants_notify(&fields),
         errors: Vec::new(),
     };
     if errors.is_empty() {
@@ -249,6 +252,7 @@ async fn create(
             message: form.message.clone(),
             scheduled_start: None,
             scheduled_end: None,
+            notify: !form.quiet,
         };
         match incidents::open(&state, new, admin.actor()).await {
             Ok(incident) => {

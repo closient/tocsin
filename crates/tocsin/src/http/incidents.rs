@@ -196,8 +196,9 @@ pub async fn add_update(
 }
 
 /// Opens an incident as `actor`: validates, stores, logs, emits
-/// [`Event::IncidentCreated`] and announces it to subscribers. The JSON API
-/// and the admin page both write through here.
+/// [`Event::IncidentCreated`] and, unless `new.notify` is false, announces it
+/// to subscribers. The JSON API, the MCP tool and the admin page all write
+/// through here.
 ///
 /// # Errors
 ///
@@ -209,6 +210,7 @@ pub async fn open(
 ) -> Result<Arc<Incident>, ApiError> {
     new.validate(&|id| state.knows_component(id))
         .map_err(ApiError::invalid)?;
+    let notify = new.notify;
     let incident = state
         .store
         .create_incident(new, actor.clone(), now())
@@ -218,7 +220,7 @@ pub async fn open(
     state.events.emit(Event::IncidentCreated {
         incident: Arc::clone(&incident),
     });
-    if let Some(subscribers) = &state.subscribers {
+    if let Some(subscribers) = state.subscribers.as_ref().filter(|_| notify) {
         subscribers.incident_opened(state, &incident).await;
     }
     Ok(incident)

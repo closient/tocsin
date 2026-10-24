@@ -212,6 +212,10 @@ pub enum IncidentCommand {
         /// The first status. Defaults to investigating.
         #[arg(long)]
         status: Option<IncidentStatus>,
+
+        /// Open it without emailing subscribers.
+        #[arg(long)]
+        quiet: bool,
     },
     /// Post an update, moving the incident to a status.
     Update {

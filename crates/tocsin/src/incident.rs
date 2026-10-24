@@ -29,8 +29,10 @@ pub fn run(command: IncidentCommand) -> Result<Report, Failure> {
             components,
             message,
             status,
-        } => {
-            let new = NewIncident {
+            quiet,
+        } => open_incident(
+            &server,
+            &NewIncident {
                 kind: IncidentKind::Incident,
                 title,
                 impact: impact.unwrap_or(tocsin_core::incident::Impact::None),
@@ -39,10 +41,9 @@ pub fn run(command: IncidentCommand) -> Result<Report, Failure> {
                 message,
                 scheduled_start: None,
                 scheduled_end: None,
-            };
-            let incident: Incident = Client::new(&server)?.write(&Method::POST, INCIDENTS, &new)?;
-            Ok(written(&incident, "opened"))
-        }
+                notify: !quiet,
+            },
+        ),
         IncidentCommand::Update {
             server,
             id,
@@ -122,6 +123,11 @@ pub fn run(command: IncidentCommand) -> Result<Report, Failure> {
     }
 }
 
+fn open_incident(server: &ServerArgs, new: &NewIncident) -> Result<Report, Failure> {
+    let incident: Incident = Client::new(server)?.write(&Method::POST, INCIDENTS, new)?;
+    Ok(written(&incident, "opened"))
+}
+
 fn edit_incident(server: &ServerArgs, id: i64, edit: &IncidentEdit) -> Result<Report, Failure> {
     if edit.is_empty() {
         return Err(Failure::new(
@@ -175,6 +181,7 @@ pub fn run_maintenance(command: MaintenanceCommand) -> Result<Report, Failure> {
                 message,
                 scheduled_start: Some(start),
                 scheduled_end: Some(end),
+                notify: true,
             };
             let incident: Incident = Client::new(&server)?.write(&Method::POST, INCIDENTS, &new)?;
             Ok(written(&incident, "scheduled"))

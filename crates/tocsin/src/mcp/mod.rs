@@ -439,7 +439,8 @@ impl Server {
     }
 
     /// Open an incident, or announce maintenance with `kind` set to
-    /// `maintenance`. Needs the `incident` scope.
+    /// `maintenance`. Subscribers hear about it unless `notify` is `false`.
+    /// Needs the `incident` scope.
     #[tool(name = "create_incident")]
     async fn create_incident(
         &self,

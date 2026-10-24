@@ -621,6 +621,7 @@ fn incident(component: &str) -> NewIncident {
         message: "Looking.".into(),
         scheduled_start: None,
         scheduled_end: None,
+        notify: true,
     }
 }
 

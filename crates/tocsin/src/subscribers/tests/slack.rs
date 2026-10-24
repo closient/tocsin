@@ -1100,6 +1100,31 @@ impl Permanence for SendError {
 }
 
 impl Site {
+    /// Opens an incident from the admin create form, as a browser would.
+    async fn admin_create(&self, title: &str, extra: &[(&str, &str)]) {
+        let (_, _, page) = self.admin_get("/admin/").await;
+        let token = csrf(&page);
+        let mut fields = vec![
+            ("title", title),
+            ("impact", "minor"),
+            ("status", "investigating"),
+            ("components", "api"),
+            ("message", "Looking into it."),
+            ("csrf", token.as_str()),
+        ];
+        fields.extend_from_slice(extra);
+        let (status, _, page) = self
+            .call(
+                admin(Method::POST, "/admin/incidents")
+                    .header(header::ORIGIN, BASE)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(form(&fields)))
+                    .unwrap(),
+            )
+            .await;
+        assert!(status.is_redirection(), "{status} {page}");
+    }
+
     /// Posts an update to incident `id` from the admin page, as a browser
     /// would: the CSRF token comes from the incident's own page.
     async fn admin_update(&self, id: i64, fields: &[(&str, &str)]) -> StatusCode {
@@ -1232,4 +1257,97 @@ async fn the_mcp_update_tool_can_post_quietly_and_defaults_to_telling_subscriber
     assert_eq!(heard(&site, &fake, "Quiet typo fix."), (0, 0));
     assert_eq!(heard(&site, &fake, "Found the cause."), (1, 1));
     assert_eq!(heard(&site, &fake, "Watching it."), (1, 1));
+}
+
+#[tokio::test]
+async fn opening_an_incident_can_be_quiet_over_the_api_the_admin_form_and_mcp() {
+    let (site, fake) = slack_site("").await;
+    fake.pick("#acme-status");
+    site.connect_subscriber(&fake, &[("components", "api"), ("projects", "api")])
+        .await;
+    site.subscribe("reader@example.com").await;
+    let postman = site.postman();
+
+    let (_, _, page) = site.admin_get("/admin/").await;
+    assert!(page.contains("name=\"notify_shown\""), "{page}");
+    assert!(page.contains(" checked> Notify subscribers"), "{page}");
+
+    let api = |title: &str, extra: Value| {
+        let mut body =
+            json!({"title": title, "message": "Looking into it.", "components": ["api"]});
+        if let Value::Object(extra) = extra {
+            body.as_object_mut().unwrap().extend(extra);
+        }
+        body
+    };
+    let post = |body: Value| async {
+        let (status, _, answer) = site
+            .api(
+                Method::POST,
+                "/api/v1/incidents",
+                Some(super::ONCALL),
+                Some(body),
+                1,
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{answer}");
+    };
+    post(api("Quiet via API", json!({"notify": false}))).await;
+    post(api("Loud via API", json!({"notify": true}))).await;
+    post(api("Default via API", json!({}))).await;
+
+    // The admin form: unchecked, checked, and no field at all.
+    site.admin_create("Quiet via form", &[("notify_shown", "1")])
+        .await;
+    site.admin_create("Loud via form", &[("notify_shown", "1"), ("notify", "1")])
+        .await;
+    site.admin_create("Default via form", &[]).await;
+
+    // MCP.
+    site.mcp_tool(
+        "create_incident",
+        api("Quiet via MCP", json!({"notify": false})),
+    )
+    .await;
+    site.mcp_tool(
+        "create_incident",
+        api("Loud via MCP", json!({"notify": true})),
+    )
+    .await;
+    site.mcp_tool("create_incident", api("Default via MCP", json!({})))
+        .await;
+    site.settled().await;
+    postman.stop().await;
+
+    let titles = |site: &Site, fake: &Fake, title: &str| {
+        let email = site
+            .sent
+            .to("reader@example.com")
+            .iter()
+            .filter(|sent| super::subject(sent).contains(title))
+            .count();
+        let slack = fake
+            .posts_to(1)
+            .iter()
+            .filter(|post| text_of(post).contains(title))
+            .count();
+        (email, slack)
+    };
+    for path in ["API", "form", "MCP"] {
+        assert_eq!(
+            titles(&site, &fake, &format!("Quiet via {path}")),
+            (0, 0),
+            "{path}"
+        );
+        assert_eq!(
+            titles(&site, &fake, &format!("Loud via {path}")),
+            (1, 1),
+            "{path}"
+        );
+        assert_eq!(
+            titles(&site, &fake, &format!("Default via {path}")),
+            (1, 1),
+            "{path}"
+        );
+    }
 }

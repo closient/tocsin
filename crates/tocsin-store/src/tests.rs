@@ -16,6 +16,7 @@ use tocsin_core::incident::{
 
 use crate::checkpoint::{self, Checkpointer, Nudge};
 use crate::rollup;
+use crate::stats::CheckpointEvent;
 use crate::writer::Writer;
 use crate::{DB_FILE, Day, Error, NewCheckResult, Retention, Store, now_ms, schema};
 
@@ -208,6 +209,7 @@ async fn a_result_committed_between_count_and_finalize_is_counted() {
 
     // Park the writer so retention's count runs and its write waits.
     let (parked, parking) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
     let park = {
         let store = std::sync::Arc::clone(&store);
         tokio::spawn(async move {
@@ -215,7 +217,7 @@ async fn a_result_committed_between_count_and_finalize_is_counted() {
                 .writer
                 .run(move |_| {
                     parked.send(()).unwrap();
-                    std::thread::sleep(Duration::from_millis(500));
+                    released.recv().unwrap();
                     Ok(())
                 })
                 .await
@@ -224,6 +226,7 @@ async fn a_result_committed_between_count_and_finalize_is_counted() {
     tokio::task::spawn_blocking(move || parking.recv().unwrap())
         .await
         .unwrap();
+    let queued = store.writer.queued();
     let retention = {
         let store = std::sync::Arc::clone(&store);
         tokio::spawn(async move {
@@ -232,9 +235,17 @@ async fn a_result_committed_between_count_and_finalize_is_counted() {
                 .await
         })
     };
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Retention queues its finalize once it has counted the day.
+    while store.writer.queued() == queued && !retention.is_finished() {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert!(
+        !retention.is_finished(),
+        "retention did not wait for the writer"
+    );
     raw.execute(insert, params![day.start_ms() + 500_000])
         .unwrap();
+    release.send(()).unwrap();
     park.await.unwrap().unwrap();
     let report = retention.await.unwrap().unwrap();
 
@@ -858,10 +869,15 @@ impl Captured {
             use tracing_subscriber::layer::SubscriberExt;
             tracing::subscriber::set_global_default(tracing_subscriber::registry().with(Router))
                 .expect("nothing else sets a global subscriber in these tests");
-            // A line first reached after the subscriber registered, but
-            // before it became the default, cached "never".
-            tracing_core::callsite::rebuild_interest_cache();
         });
+        // A line first reached before the subscriber became the default
+        // cached "never". Tracing registers a line without a lock while one
+        // subscriber exists, so a thread descheduled mid-registration can
+        // store that "never" after a rebuild. Only a line first reached
+        // before the default was set can, so rebuilding on every capture
+        // leaves just the captures that start while such a registration is
+        // still pending, around the first, to miss it.
+        tracing_core::callsite::rebuild_interest_cache();
         let _restore = Restore(CAPTURING.replace(Some(self.clone())));
         f()
     }
@@ -990,10 +1006,9 @@ fn a_lockout_logs_once_and_later_writes_do_not_wait() {
     let stats = nudge.stats();
     assert_eq!(stats.lockouts, 1, "{stats:?}");
     assert_eq!(stats.limit_waits, 1, "{stats:?}");
-    assert!(
-        stats.limit_wait_max + Duration::from_millis(100) >= schema::BUSY_TIMEOUT,
-        "{stats:?}"
-    );
+    // The wait that gave up counts every try it made, so it is the whole
+    // wait whatever the scheduler did meanwhile.
+    assert!(stats.limit_wait_max >= schema::BUSY_TIMEOUT, "{stats:?}");
     assert!(stats.inline_copies >= 1, "{stats:?}");
     assert!(stats.rewinds >= 1, "{stats:?}");
 }
@@ -1184,7 +1199,8 @@ fn results(path: &Path) -> i64 {
 
 /// Retention writes no faster than the checkpointer copies (TOC-62): with
 /// the log past the soft limit and a pass unable to copy it, retention
-/// writes nothing, and once a pass can, it carries on well inside its wait.
+/// writes nothing, and once a pass can, it carries on without waiting out
+/// its cap.
 /// `finalized` rolls the old day up first, so retention's first write is a
 /// delete rather than the rollup.
 async fn retention_waits_for_a_pass_past_the_soft_limit(finalized: bool) {
@@ -1218,7 +1234,15 @@ async fn retention_waits_for_a_pass_past_the_soft_limit(finalized: bool) {
         let store = Arc::clone(&store);
         tokio::spawn(async move { store.apply_retention(policy, now).await })
     };
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let checkpointer = &store.checkpointer;
+    while checkpointer.pacing() == 0 && !retention.is_finished() {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert_eq!(
+        checkpointer.pacing(),
+        1,
+        "retention did not wait for a pass"
+    );
     assert_eq!(
         store.daily_rollups(day).await.unwrap().len(),
         usize::from(finalized),
@@ -1229,37 +1253,45 @@ async fn retention_waits_for_a_pass_past_the_soft_limit(finalized: bool) {
         written,
         "retention deleted past the soft limit before a pass copied the log"
     );
-    assert!(!retention.is_finished());
     // Waiting holds neither the writer nor a transaction: a check result
-    // still commits.
-    tokio::time::timeout(
-        Duration::from_secs(1),
-        store.writer.run(move |conn| {
+    // commits while retention is still waiting.
+    store
+        .writer
+        .run(move |conn| {
             conn.execute(
                 "INSERT INTO check_result (node_id, check_id, started_at, duration_ms, health)
                  VALUES ('node-a', 'web', ?1, 1, 'up')",
                 params![now],
             )?;
             Ok(())
-        }),
-    )
-    .await
-    .expect("a write waited behind retention's wait for the checkpointer")
-    .unwrap();
-    assert!(!retention.is_finished());
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        checkpointer.paced(),
+        0,
+        "a write waited behind retention's wait for the checkpointer"
+    );
     holder.join();
     let released = Instant::now();
-    // The checkpointer tries a busy pass again a second later.
-    let report = tokio::time::timeout(Duration::from_secs(3), retention)
-        .await
-        .expect("retention waited past a pass that copied the log")
-        .unwrap()
-        .unwrap();
-    assert!(released.elapsed() < Duration::from_secs(3));
+    // Each of retention's waits is capped, so this ends either way.
+    let report = retention.await.unwrap().unwrap();
     assert_eq!(report.deleted, usize::try_from(written).unwrap());
+    // The wait under way when the lock was let go ended on a pass that
+    // copied the log, as every later one did, not on the cap.
+    assert_eq!(
+        checkpointer.paced_out(),
+        0,
+        "retention waited out its cap after a pass could copy the log"
+    );
     let stats = store.checkpoint_stats();
-    assert!(stats.paced_writes > 0);
-    assert!(stats.paced_wait_max >= Duration::from_millis(500));
+    assert!(
+        stats.events.iter().any(|event| matches!(
+            *event,
+            CheckpointEvent::Paced { at, waited } if at <= released && released <= at + waited
+        )),
+        "no wait of retention's spanned the lock being let go: {stats:?}"
+    );
     assert_eq!(stats.limit_writes, 0, "retention reached the hard limit");
 }
 

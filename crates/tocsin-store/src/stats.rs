@@ -98,7 +98,8 @@ pub enum CheckpointEvent {
         at: Instant,
         /// Frames in the log then.
         frames: u64,
-        /// Time spent waiting for another checkpoint to let go of the lock.
+        /// Time spent waiting for another checkpoint to let go of the lock,
+        /// from the first try finding it held, the tries since included.
         waited: Duration,
         /// Time the checkpoint that got the lock, or the last try, took.
         copy: Duration,

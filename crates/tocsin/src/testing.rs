@@ -38,10 +38,15 @@ impl Captured {
                     .finish(),
             )
             .expect("nothing else sets a global subscriber in the unit tests");
-            // A line first reached after the subscriber registered, but
-            // before it became the default, cached "never".
-            tracing_core::callsite::rebuild_interest_cache();
         });
+        // A line first reached before the subscriber became the default
+        // cached "never". Tracing registers a line without a lock while one
+        // subscriber exists, so a thread descheduled mid-registration can
+        // store that "never" after a rebuild. Only a line first reached
+        // before the default was set can, so rebuilding on every capture
+        // leaves just the captures that start while such a registration is
+        // still pending, around the first, to miss it.
+        tracing_core::callsite::rebuild_interest_cache();
         Capturing(CAPTURING.replace(Some(self.clone())))
     }
 

@@ -1000,10 +1000,16 @@ mod tests {
             "the drain waited {:?} on an open event stream",
             started.elapsed()
         );
+        let text = log.text();
+        // The shutdown is logged on this thread, as the drain's abort would
+        // be, so the abort's absence means something only if this is there.
         assert!(
-            !log.text().contains("aborting them"),
-            "the event stream was aborted, not ended: {}",
-            log.text()
+            text.contains("shutting down") && text.contains("signal=\"SIGTERM\""),
+            "the shutdown was not captured: {text}"
+        );
+        assert!(
+            !text.contains("aborting them"),
+            "the event stream was aborted, not ended: {text}"
         );
         assert!(closed, "the store was not closed");
         assert!(weak.upgrade().is_none(), "something still holds the store");

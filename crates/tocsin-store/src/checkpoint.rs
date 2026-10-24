@@ -217,6 +217,15 @@ pub(crate) struct Passes {
     /// Passes the checkpointer ran.
     #[cfg(test)]
     ran: AtomicU64,
+    /// Waits of retention's for a pass that started.
+    #[cfg(test)]
+    pacing: AtomicU64,
+    /// Of those, the ones that ended.
+    #[cfg(test)]
+    paced: AtomicU64,
+    /// Of those, the ones that ran out [`PACE_WAIT`].
+    #[cfg(test)]
+    paced_out: AtomicU64,
 }
 
 #[derive(Default)]
@@ -328,11 +337,20 @@ impl Checkpointer {
             return;
         }
         let started = Instant::now();
+        #[cfg(test)]
+        self.passes.pacing.fetch_add(1, Ordering::Relaxed);
         while self.log.behind() && started.elapsed() < PACE_WAIT {
             tokio::time::sleep(CHECKPOINT_POLL).await;
         }
         let waited = started.elapsed();
         self.stats.paced(started, waited);
+        #[cfg(test)]
+        {
+            if waited >= PACE_WAIT {
+                self.passes.paced_out.fetch_add(1, Ordering::Relaxed);
+            }
+            self.passes.paced.fetch_add(1, Ordering::Relaxed);
+        }
         if self.log.behind() {
             tracing::warn!(
                 frames = self.log.frames.load(Ordering::Relaxed),
@@ -363,6 +381,22 @@ impl Checkpointer {
     /// Writes at the limit that found the log locked and waited.
     pub(crate) fn waits(&self) -> u64 {
         self.passes.waits.load(Ordering::Relaxed)
+    }
+
+    /// Waits of [`Checkpointer::make_room`]'s that started.
+    pub(crate) fn pacing(&self) -> u64 {
+        self.passes.pacing.load(Ordering::Relaxed)
+    }
+
+    /// Of those, the ones that ended.
+    pub(crate) fn paced(&self) -> u64 {
+        self.passes.paced.load(Ordering::Relaxed)
+    }
+
+    /// Of those, the ones that ran out [`PACE_WAIT`] rather than end on a
+    /// pass that copied the log.
+    pub(crate) fn paced_out(&self) -> u64 {
+        self.passes.paced_out.load(Ordering::Relaxed)
     }
 }
 
@@ -557,7 +591,10 @@ impl Nudge {
 /// process) in steps of [`CHECKPOINT_POLL`].
 ///
 /// Returns the outcome, the time spent waiting, and the time the last
-/// checkpoint took.
+/// checkpoint took. The wait runs from the first try finding the lock held
+/// to the last try's start, or to giving up: the tries in between count,
+/// since the lock was held through them, so a wait that gives up has
+/// waited at least [`CHECKPOINT_WAIT`].
 ///
 /// This cannot deadlock. The checkpointer never waits on the writer: a pass
 /// is one `PASSIVE` checkpoint, which never waits for a lock or calls a busy
@@ -570,18 +607,21 @@ fn wait_and_checkpoint(
     conn: &Connection,
     passes: &Passes,
 ) -> (rusqlite::Result<Outcome>, Duration, Duration) {
-    let deadline = Instant::now() + CHECKPOINT_WAIT;
     let mut copying = Instant::now();
     let mut outcome = passive(conn);
     let mut copy = copying.elapsed();
-    let mut waited = Duration::ZERO;
-    #[cfg(test)]
-    if locked_out(&outcome) {
-        passes.waits.fetch_add(1, Ordering::Relaxed);
+    if !locked_out(&outcome) {
+        return (outcome, Duration::ZERO, copy);
     }
-    while locked_out(&outcome) {
+    #[cfg(test)]
+    passes.waits.fetch_add(1, Ordering::Relaxed);
+    let locked = Instant::now();
+    let deadline = locked + CHECKPOINT_WAIT;
+    let mut waited;
+    loop {
         let now = Instant::now();
         if now >= deadline {
+            waited = now - locked;
             break;
         }
         if !passes.wait_out(deadline) {
@@ -590,9 +630,12 @@ fn wait_and_checkpoint(
             std::thread::sleep(CHECKPOINT_POLL.min(deadline - now));
         }
         copying = Instant::now();
-        waited += copying - now;
+        waited = copying - locked;
         outcome = passive(conn);
         copy = copying.elapsed();
+        if !locked_out(&outcome) {
+            break;
+        }
     }
     (outcome, waited, copy)
 }

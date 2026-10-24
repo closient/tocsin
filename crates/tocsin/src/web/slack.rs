@@ -715,6 +715,7 @@ fn hears(preferences: &Preferences) -> String {
         preferences.components.is_empty(),
         preferences.projects.is_empty(),
     ) {
+        (true, true) => "nothing".to_owned(),
         (false, false) => format!(
             "incidents ({}) and releases ({})",
             listed(&preferences.components),

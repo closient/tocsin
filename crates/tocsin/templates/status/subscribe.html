@@ -14,7 +14,7 @@
 </div>
 {%- endif %}
 {%- if form.turnstile.is_some() && !form.full %}
-<p>Get an email when an incident is opened or updated{% if !form.projects.is_empty() %}, or a release is published{% endif %}.</p>
+<p>Get an email{% if form.slack %} or a Slack message{% endif %} when an incident is opened or updated{% if !form.projects.is_empty() %}, or a release is published{% endif %}.</p>
 <p class="actions"><a class="button" href="/subscribe">Subscribe by email{% if form.slack %} or Slack{% endif %}</a></p>
 {%- else %}
 <form class="stack subscribe" method="post" action="/subscribe">

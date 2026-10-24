@@ -54,7 +54,7 @@ This file is the decision record from the 2026-10-22 plan review, and it is cano
 * **Email:** the From and Reply-To addresses are required settings, and validation rejects any `noreply` address. Every email tocsin sends must be one a person can answer, matching Closient's own rule.
 * **Federation groundwork, from day one:** every result carries a `node_id`, and results are append-only.
 * **Operator alerts:** Slack, Pushover, email, ntfy, Discord, Telegram and a generic webhook, plus posting to Alertmanager. Every alert has a matching "resolved" message with the same identity, so no alert is fire-only.
-* **Subscriber channels (v0.2):** email with double opt-in, plus RSS/Atom feeds for incidents and releases.
+* **Subscriber channels (v0.2):** email with double opt-in, Slack by signing in (below), plus RSS/Atom feeds for incidents and releases.
 * **Agent surfaces:**
   * `--json` and stable exit codes on every command
   * `tocsin probe run <check>`
@@ -97,6 +97,18 @@ Every write goes through the store's one writer thread, which commits in batches
 **A refused result is logged and counted.** If the database refuses a result that was already acknowledged (a full disk, a constraint), the writer logs it at `error` with its check, node and start time, and counts it in `CheckpointStats::rejected`. The engine has moved on by then: the result still counts towards confirming a change, but the change itself is committed before it moves any state, so a change the database refuses is retried by the next result that confirms it.
 
 **Why early acknowledgement, not a faster commit.** SQLite syncs the log's header when a commit rewinds the log to its start (`sqlite3WalFrames`: `if( pWal->syncHeader ){ rc = sqlite3OsSync(pWal->pWalFd, CKPT_SYNC_FLAGS(sync_flags)); }`, bundled SQLite 3.53.2). That sync runs inside the commit, on the writer, holding the write lock, at any `synchronous` level above OFF. Only a VFS reporting `SQLITE_IOCAP_SEQUENTIAL` skips it. On a slow disk it took hundreds of milliseconds, and every check result queued behind it waited too. The ways to keep it off a commit (`synchronous = OFF`, a VFS lying about the device, a VFS written in Rust) give up durability or `unsafe`-free code. So the sync stays and the caller stops waiting for it, for the one write whose loss is cheap. The write-latency bench still reports how long every insert waits from queue to commit, so a slow disk stays visible.
+
+## Slack by signing in (TOC-68)
+
+**Each operator registers their own Slack app.** There is no shared tocsin (or Closient) app on Slack and no relay between a tocsin server and Slack. `tocsin slack setup` prints Slack's create-app link with a manifest filled in from the configuration: the redirect URL from `public_url`, and the one scope `incoming-webhook`. The app's Client ID and Secret go in `[slack]` as `${ENV:...}` references, never in a file.
+
+Why not one shared app: a shared app needs a server that every tocsin's sign-in passes through, since Slack allows only registered redirect URLs. That relay would see every workspace's webhook, would be a service someone must run for every self-hoster, and would put Closient between other people's status pages and their users. A per-operator app costs each operator one link and two environment variables, and keeps every webhook on the server that uses it.
+
+* **Connections are data.** A connected channel is a row in SQLite, made on `/admin/slack` with "Connect Slack" (operators) or "Add to Slack" on the subscribe page (visitors), never written in configuration. A notifier names one with `[notifier.slack] connection = "..."`.
+* **The OAuth `state` is session-bound, short-lived and single-use**: a random value tied to the starting browser by a `__Host-` cookie, valid for 10 minutes, removed on first use.
+* **The webhook URL is a secret**: never logged, never shown after connect, never in the API, `/metrics` or an error.
+* **Nothing fails quietly.** A connection named in config but not connected is a warning from `config check` (it can only be made on a running server) and, at send time, an abandoned delivery, an `error` log and `tocsin_slack_connection_up` at 0. A connection Slack revokes is marked dead, on the admin page and in `/metrics`, and is not retried.
+* **Subscribers get Slack beside email**, with the same preferences. There is no double opt-in: Slack's own consent screen proves the visitor may post to the channel. Every message carries the manage and remove links and the contact address.
 
 ## Milestones
 

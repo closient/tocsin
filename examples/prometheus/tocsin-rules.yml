@@ -39,6 +39,16 @@ groups:
         annotations:
           summary: "tocsin gave up delivering alerts through {{ $labels.notifier }}"
 
+      # A notifier names a Slack channel nobody connected, or one Slack
+      # revoked: every alert sent to it fails until it is connected again
+      # on /admin/slack.
+      - alert: TocsinSlackConnectionDown
+        expr: tocsin_slack_connection_up == 0
+        labels:
+          severity: page
+        annotations:
+          summary: "Notifier {{ $labels.notifier }} cannot post: Slack connection {{ $labels.connection }} is missing or revoked"
+
       # The last good configuration is still running; the change is not.
       - alert: TocsinConfigReloadFailed
         expr: tocsin_config_reload_success == 0

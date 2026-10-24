@@ -178,6 +178,90 @@ annotation: `summary`, `description`, `health`, `name`, `component` and
 check that moves to another component, or from degraded to down, is
 therefore still one alert in Alertmanager.
 
+## Slack
+
+A `slack` notifier posts to one channel, named one of two ways:
+
+```toml
+[[notifier]]
+id = "ops-slack"
+type = "slack"
+
+[notifier.slack]
+connection = "ops-alerts"   # a channel connected on /admin/slack
+# or: webhook_url = "${ENV:TOCSIN_SLACK_WEBHOOK_URL}", one you made yourself
+```
+
+`webhook_url` is an incoming webhook you created in Slack and keep in the
+environment. `connection` names a channel someone connected by signing in
+to Slack from the admin page; the webhook Slack handed over is kept in the
+database and never in the configuration. Give one or the other.
+
+### Connecting a channel by signing in
+
+There is no shared tocsin app on Slack, and nothing between your server
+and Slack. Each operator registers their own app once, in their own
+workspace:
+
+1. Run `tocsin slack setup --config <dir>`. It prints a link that opens
+   Slack's create-app page with the manifest filled in from the
+   configuration: the app's name (`[slack] app_name`, or the page's
+   title), one redirect URL, `<public_url>/slack/callback`, and one scope,
+   `incoming-webhook`. `--json` prints the link and the manifest. It needs
+   an `https` `[server] public_url`, because Slack sends people back only
+   to https addresses.
+2. Create the app. On its Basic Information page, copy the Client ID and
+   Client Secret into the environment tocsin runs with.
+3. Add the app to the configuration and restart `tocsin serve`; like
+   `[server]`, `[slack]` is read only at startup:
+
+   ```toml
+   [slack]
+   client_id = "${ENV:TOCSIN_SLACK_CLIENT_ID}"
+   client_secret = "${ENV:TOCSIN_SLACK_CLIENT_SECRET}"
+   ```
+
+   Both are secret fields, so they take only an `${ENV:...}` reference.
+   `tocsin config check` also requires the https `public_url`, and someone
+   to connect a channel: the admin page (`[server.auth]`) or
+   [`[subscribers]`](subscribers.md#slack).
+4. On `/admin/slack`, type the name a notifier will use, such as
+   `ops-alerts`, and press **Connect Slack**. Slack asks which channel to
+   post to; approving it brings you back to the admin page with the channel
+   connected under that name. Connecting a name again replaces its channel,
+   which is also how a dead one is mended.
+
+The sign-in is OAuth 2 (`oauth.v2.access`). Its `state` is a random value
+bound to the browser that started it by a `__Host-` cookie, expires after
+10 minutes, and is used once: a replayed, forged, expired or other-browser
+callback is refused with a 400 and connects nothing. The webhook URL Slack
+returns is a secret. It is never logged, never in an error, never shown on
+the admin page, in the API or in `/metrics`, and never sent back to a
+browser once the channel is connected. The admin page shows the channel,
+workspace, who connected it and when.
+
+### When a channel stops working
+
+A post Slack answers with an error meaning the webhook will never work
+again (`channel_not_found`, `channel_is_archived`, `invalid_token`,
+`no_service`, `team_disabled` and the like, or a bare 404 or 410) marks
+the connection **dead**. The alert is given up at once rather than retried,
+logged at `error`, and counted in `tocsin_notifications_abandoned_total`;
+the admin page shows the connection as dead with Slack's reason, and
+`tocsin_slack_connection_up{notifier,connection}` goes to 0. Every later
+alert to it fails the same way until it is connected again. Any other
+failure (`invalid_payload`, a 429, a 5xx) is retried like any other
+notifier's.
+
+A notifier naming a connection that does not exist fails the same way at
+send time, never quietly: an `error` log naming the connection, an
+abandoned delivery, and `tocsin_slack_connection_up` at 0.
+`tocsin config check` warns about it beforehand, reading the database in
+`[server] data_dir` (or `--data <dir>`) without writing to it; it is a
+warning rather than an error because a channel can only be connected once
+the server is running. Alerts keep their resolve: a fire and its resolve go
+to the same connection under the same identity, as with every notifier.
+
 ## The webhook
 
 **Breaking change:** `signing_secret` is required. A `webhook` notifier
@@ -267,3 +351,8 @@ resolve, directly rather than through the outbox, and reports whether each
 was accepted (exit 0 only if both were). Test alerts are titled `[TEST]`,
 and carry `"test": true` in the webhook payload and `tocsin_test="true"` in
 Alertmanager.
+
+For a notifier naming a Slack `connection`, the test reads the connection
+from the database in `[server] data_dir` without writing to it. If Slack
+says the connection is revoked, the test reports it and leaves marking it
+dead to the server's next post.

@@ -15,6 +15,10 @@ tests:
         values: "1 0"
       - series: 'tocsin_notifications_abandoned_total{notifier="pager"}'
         values: "0 0 1"
+      - series: 'tocsin_slack_connection_up{notifier="ops-slack",connection="ops-alerts"}'
+        values: "1 0"
+      - series: 'tocsin_slack_connection_up{notifier="team-slack",connection="team"}'
+        values: "1 1"
       - series: "tocsin_config_reload_success"
         values: "1 0x10"
       - series: 'up{job="tocsin",instance="tocsin:8080"}'
@@ -69,6 +73,18 @@ tests:
               notifier: pager
             exp_annotations:
               summary: "tocsin gave up delivering alerts through pager"
+      - eval_time: 0m
+        alertname: TocsinSlackConnectionDown
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: TocsinSlackConnectionDown
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              notifier: ops-slack
+              connection: ops-alerts
+            exp_annotations:
+              summary: "Notifier ops-slack cannot post: Slack connection ops-alerts is missing or revoked"
       - eval_time: 5m
         alertname: TocsinConfigReloadFailed
         exp_alerts: []

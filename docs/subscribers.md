@@ -1,10 +1,12 @@
-# Email subscribers
+# Subscribers
 
-People can ask the status page to email them when an incident opens or is
-updated on the components they choose, and when a public project they
-follow publishes a release. Every address is confirmed before it receives
-anything but the confirmation, every email can be answered, and every
-email can be left in one click.
+People can ask the status page to email them, or to post to a Slack
+channel of theirs, when an incident opens or is updated on the components
+they choose, and when a public project they follow publishes a release.
+Every address is confirmed before it receives anything but the
+confirmation, every email can be answered, and every email can be left in
+one click. A Slack channel is added by signing in to Slack, and every
+message posted there links to change or remove it.
 
 The feature is off until `[subscribers]` is in the configuration. Off, `/`
 shows no form, `/subscribe/…` and `/admin/subscribers` are 404 like any
@@ -133,6 +135,50 @@ A manage token is the subscriber's id and a 256-bit random secret,
 compared in constant time. A wrong secret is a 404 that says nothing about
 the subscriber.
 
+## Slack
+
+With [`[slack]`](alerting.md#connecting-a-channel-by-signing-in) set as
+well, the signup form has **Add to Slack** beside the email button. It
+takes the same choices of components and projects and no address: it
+sends the visitor to Slack's consent screen, where they pick a workspace
+and a channel, and Slack sends them back to `/slack/callback`. The
+channel is connected at once. There is no confirmation step, because
+Slack's own sign-in already proves the visitor may post to that channel,
+and the channel receives a welcome message saying what it will hear
+about.
+
+The sign-in is the one operators use on the admin page: its `state` is
+bound to the browser that started it, expires after 10 minutes and is
+used once, and the incoming webhook URL Slack returns is kept as a secret
+in the database, never logged and never shown again. Starting a sign-in
+counts against `signups_per_ip`, like an email signup, and needs a
+same-site request. A visitor who cancels on Slack's page gets a page
+saying nothing was added.
+
+Every message to a channel is the incident's or release's subject and
+text, with a link to its page, followed by three links:
+
+- **Choose what this channel hears**: `/subscribe/slack/manage/<token>`,
+  the same preferences page as for an address.
+- **Remove this channel**: `/subscribe/slack/unsubscribe/<token>`, which
+  asks once, then deletes the channel, its choices and every post still
+  queued for it.
+- **Questions?**: a `mailto:` link to `[server.email] reply_to`, so
+  anyone in the channel can write to a person.
+
+The token works as an email subscriber's does: the connection's id and a
+256-bit random secret, compared in constant time. Adding the same channel
+again replaces the earlier connection, so the channel hears each
+announcement once.
+
+Slack posts are queued and retried exactly as emails are (below). A post
+Slack answers with an error meaning the webhook is gone for good (the
+channel archived or deleted, the app removed from the workspace, a 404 or
+410) marks the channel **dead**: that post and every one still queued for
+it are failed, nothing is posted to it again, and it is shown as dead on
+`/admin/slack` and counted in `tocsin_slack_connections{purpose="subscriber",state="dead"}`.
+To hear updates again, the visitor adds the channel again.
+
 ## What is sent
 
 | Event | Who | Suppressed by |
@@ -146,7 +192,8 @@ second environment is not announced again.
 
 Each email is plain text from `[server.email] from`, with Reply-To set to
 `reply_to`, so a reply reaches a person. It names the incident or release,
-links its page, and ends with the manage and unsubscribe links.
+links its page, and ends with the manage and unsubscribe links. A Slack
+channel hears the same events, as described [above](#slack).
 
 ## Delivery
 
@@ -170,7 +217,8 @@ are in [storage.md](storage.md#subscriber-subscription-subscriber_event-and-subs
 
 `/admin/subscribers`, linked from the admin page, lists every address with
 its choices and whether it has confirmed, the totals, and a button to
-remove each one. See [admin.md](admin.md).
+remove each one. `/admin/slack` lists the Slack channels visitors added,
+live or dead, with a button to remove each. See [admin.md](admin.md).
 
 The same is in the API, with a token that has the `subscribers:admin`
 scope:

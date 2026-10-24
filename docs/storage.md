@@ -445,6 +445,36 @@ committed transaction before the SMTP server sees it, and one found
 after 30 days. Deleting a subscriber deletes its subscriptions and every
 delivery still queued for it.
 
+### `slack_connection`, `slack_subscription` and `slack_delivery`
+
+Slack channels connected by signing in to Slack, added by 0010 (see
+[alerting.md](alerting.md#slack) and [subscribers.md](subscribers.md#slack)).
+
+A `slack_connection` is one incoming webhook Slack handed over.
+`purpose` is `operator`, for a channel notifiers name with `name`
+(unique), or `subscriber`, for a channel a visitor added, with
+`manage_secret`, the random half of its manage and remove links. `CHECK`s
+tie `name` to `operator` and `manage_secret` to `subscriber`.
+`webhook_url` is a secret: anyone holding it can post to the channel, so
+it is read only to post and never leaves the store in a page, an API
+answer or a log. `channel`, `channel_id`, `team`, `team_id` and
+`configuration_url` are what Slack said about it, with `created_by` (the
+admin, for an operator connection) and `created_at`. `dead_at` and
+`dead_reason` are set together when Slack answers that the webhook is
+gone; connecting the same name, or the same subscriber channel, again
+replaces the row and clears them.
+
+A `slack_subscription` is one `(connection_id, kind, target)`, as
+`subscription` is for an address.
+
+A `slack_delivery` is one `(connection_id, event_id)`, unique, with the
+same `status`, `attempts`, `next_attempt_at`, `last_error` and
+`finished_at` as `subscriber_delivery`, and the same rules: `sending` is
+committed before the post, a delivery found `sending` at startup is
+failed, and finished rows are deleted after 30 days. Marking a connection
+dead fails every delivery still queued for it in the same transaction.
+Deleting a connection deletes its subscriptions and deliveries.
+
 ## Rollups
 
 Rollups are recomputed from raw results, never incremented, so recomputing

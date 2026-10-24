@@ -434,7 +434,7 @@ pub(crate) fn outages(
 mod tests {
     use rusqlite::{Connection, named_params};
 
-    use super::{OUTAGES, RESULTS};
+    use super::{OUTAGES, RESULTS, SHOWN};
 
     /// A migrated, empty database.
     async fn migrated() -> (tempfile::TempDir, Connection) {
@@ -454,6 +454,14 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         plan.join("\n")
+    }
+
+    /// `OUTAGES` is a const, so it spells [`SHOWN`] out in each arm; an
+    /// arm that drifted would show the public what the others hide.
+    #[test]
+    fn every_outage_arm_narrows_to_what_is_shown() {
+        let words = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(words(OUTAGES).matches(&words(SHOWN)).count(), 3);
     }
 
     #[tokio::test]

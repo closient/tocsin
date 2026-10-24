@@ -1099,6 +1099,17 @@ fn the_writer_waits_out_the_checkpointers_pass_without_polling() {
         move || {
             let _pass = passes.begin().expect("nothing to stand aside for");
             begun.send(Instant::now()).unwrap();
+            // Runs on until the writer has found the lock held, however
+            // long its commit's sync took on a busy disk, then for PASS:
+            // a pass that ended first would leave it nothing to wait out.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while passes.waits() == 0 {
+                assert!(
+                    Instant::now() < deadline,
+                    "the writer never found the lock held"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
             std::thread::sleep(PASS);
             // A pass lets go of the lock, then ends.
             holder.join();

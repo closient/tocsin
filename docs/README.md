@@ -43,3 +43,4 @@
 
 - [The engine](engine.md): scheduling, confirmation and component state.
 - [Storage](storage.md): the SQLite schema and retention.
+- [Federation](design/federation.md): proposed design for several nodes sharing history, quorum checks and nodes watching each other.

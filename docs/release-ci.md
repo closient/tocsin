@@ -51,7 +51,7 @@ jobs:
     steps:
       - name: Install tocsin
         env:
-          TOCSIN_VERSION: v0.1.0     # pin the client like any other tool
+          TOCSIN_VERSION: v0.2.0     # pin the client like any other tool
         run: |
           name=tocsin-x86_64-unknown-linux-musl
           base=https://github.com/closient/tocsin/releases/download/$TOCSIN_VERSION

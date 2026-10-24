@@ -1,0 +1,36 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{#- /admin/subscribers (web/subscribe.rs `AdminPage`). -#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Subscribers</h1>
+<p><a href="/admin/">Incidents</a> · <a href="/admin/timeline">Timeline</a></p>
+<p>{{ confirmed }} confirmed · {{ unconfirmed }} waiting for confirmation</p>
+{%- if rows.is_empty() %}
+<p class="muted">Nobody yet.</p>
+{%- else %}
+<ul class="items">
+  {%- for row in rows %}
+  <li class="subscriber">
+    <div>
+      <span class="item-title">{{ row.email }}</span>
+      <div class="meta">
+        {%- if row.confirmed %}
+        <span class="badge resolved">confirmed</span>
+        {%- else %}
+        <span class="badge scheduled">unconfirmed</span>
+        {%- endif %}
+        <span class="muted">#{{ row.id }} · since {{ row.created_at }} · incidents: {{ row.components }} · releases: {{ row.projects }}</span>
+      </div>
+    </div>
+    <form class="inline" method="post" action="/admin/subscribers/{{ row.id }}/remove">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit" class="secondary" aria-label="Remove {{ row.email }}">Remove</button>
+    </form>
+  </li>
+  {%- endfor %}
+</ul>
+{%- endif %}
+{%- if let Some(after) = next_after %}
+<p class="pager"><a href="/admin/subscribers?after={{ after }}">Next</a></p>
+{%- endif %}
+{% endblock %}

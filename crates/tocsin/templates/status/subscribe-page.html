@@ -1,0 +1,10 @@
+{#- SPDX-License-Identifier: AGPL-3.0-only -#}
+{#- /subscribe: the full sign-up form (web/subscribe.rs). -#}
+{% extends "status/layout.html" %}
+{% block content %}
+<div class="intro">
+<h1>Subscribe to {{ chrome.site }}</h1>
+<p class="lede">Get an email when an incident is opened or updated{% if !form.projects.is_empty() %}, or a release is published{% endif %}.</p>
+</div>
+{%- include "status/subscribe.html" %}
+{% endblock %}

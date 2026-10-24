@@ -165,6 +165,7 @@ fn site_from(text: &str) -> Site {
         heartbeats: HeartbeatHandle::default(),
         config_status: crate::reload::steady_status(),
         metrics: Arc::new(crate::metrics::Metrics::new()),
+        subscribers: None,
     };
     Site {
         _dir: dir,
@@ -239,6 +240,7 @@ impl Site {
             NewUpdate {
                 status: IncidentStatus::Resolved,
                 message: "Fixed.".to_owned(),
+                notify: true,
             },
             Actor::person("alice@example.com"),
         )
@@ -684,7 +686,7 @@ fn elements(html: &str) -> Vec<Element> {
 }
 
 /// What a structural accessibility audit finds wrong with `html`.
-pub(super) fn audit(html: &str) -> Vec<String> {
+pub(crate) fn audit(html: &str) -> Vec<String> {
     let elements = elements(html);
     let mut problems = Vec::new();
     audit_landmarks(&elements, &mut problems);

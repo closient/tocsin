@@ -18,7 +18,8 @@
 //!   [`identity::Operator`]: the same proof, refused with a 403.
 //! - **Headers**: every response from these routes gets
 //!   [`page::security_headers`]: a strict CSP, `nosniff`, no framing, and
-//!   `no-store` unless it sets its own caching.
+//!   `no-store` unless it sets its own caching. Only `/subscribe` with
+//!   Turnstile on sets its own CSP, adding Cloudflare's script and frame.
 
 pub mod access;
 pub mod admin;
@@ -32,6 +33,7 @@ pub mod markdown;
 pub mod page;
 pub mod releases;
 pub mod status;
+pub mod subscribe;
 pub mod theme;
 pub mod timeline;
 pub mod uptime;
@@ -43,7 +45,7 @@ mod internal_tests;
 #[cfg(test)]
 mod public_tests;
 #[cfg(test)]
-mod status_tests;
+pub(crate) mod status_tests;
 #[cfg(test)]
 mod tests;
 
@@ -53,8 +55,9 @@ use axum::routing::get;
 use crate::http::AppState;
 
 /// The HTML routes: assets, the status page, the release log and their feeds always, the admin pages
-/// when `[server.auth]` turns them on. Without it, `/admin/` is the same 404 as any unknown
-/// path. The internal board is always routed, and refuses everyone with a 403 until auth is on.
+/// when `[server.auth]` turns them on, and the subscription pages when `[subscribers]` does.
+/// Without them, `/admin/` and `/subscribe` are the same 404 as any unknown path. The internal
+/// board is always routed, and refuses everyone with a 403 until auth is on.
 pub fn router(state: &AppState) -> Router<AppState> {
     let mut router = Router::new()
         .route(
@@ -71,6 +74,12 @@ pub fn router(state: &AppState) -> Router<AppState> {
         .merge(internal::router());
     if state.admin.is_some() {
         router = router.merge(admin::router()).merge(timeline::router());
+    }
+    if state.subscribers.is_some() {
+        router = router.merge(subscribe::router());
+        if state.admin.is_some() {
+            router = router.merge(subscribe::admin_router());
+        }
     }
     router.layer(axum::middleware::map_response(page::security_headers))
 }

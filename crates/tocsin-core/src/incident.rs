@@ -395,6 +395,23 @@ pub struct NewUpdate {
     pub status: IncidentStatus,
     /// Markdown. Not empty.
     pub message: String,
+    /// Whether email subscribers hear about it. `false` posts it quietly,
+    /// for a typo fix or a minor note. It changes nothing else.
+    #[serde(
+        default = "notify_by_default",
+        skip_serializing_if = "is_notify_default"
+    )]
+    #[schema(default = true)]
+    pub notify: bool,
+}
+
+fn notify_by_default() -> bool {
+    true
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde passes a reference
+fn is_notify_default(notify: &bool) -> bool {
+    *notify
 }
 
 /// `PATCH /api/v1/incidents/{id}`: change what an incident says. Only the
@@ -1016,6 +1033,7 @@ mod tests {
         let update = NewUpdate {
             status: IncidentStatus::Completed,
             message: "done".into(),
+            notify: true,
         };
         assert_eq!(
             paths(incident.check_update(&update).unwrap_err()),

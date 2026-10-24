@@ -85,6 +85,7 @@ fn site(config: Config, admin: Option<AdminAuth>) -> Site {
         heartbeats: tocsin_engine::HeartbeatHandle::default(),
         config_status: crate::reload::steady_status(),
         metrics: Arc::new(crate::metrics::Metrics::new()),
+        subscribers: None,
     };
     Site {
         _dir: dir,

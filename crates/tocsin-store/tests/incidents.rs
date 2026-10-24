@@ -102,6 +102,7 @@ async fn updates_append_move_the_status_and_record_each_author() {
     let resolve = NewUpdate {
         status: IncidentStatus::Resolved,
         message: "Fixed.".into(),
+        notify: true,
     };
     let resolved = fixture
         .store
@@ -133,6 +134,7 @@ async fn updates_append_move_the_status_and_record_each_author() {
             NewUpdate {
                 status: IncidentStatus::Monitoring,
                 message: "Errors are back.".into(),
+                notify: true,
             },
             oncall,
             at(7000),
@@ -160,6 +162,7 @@ async fn an_update_status_must_suit_the_kind() {
             NewUpdate {
                 status: IncidentStatus::Resolved,
                 message: "Done.".into(),
+                notify: true,
             },
             Actor::token("ci"),
             at(2000),
@@ -231,6 +234,7 @@ async fn unknown_ids_are_none() {
     let update = NewUpdate {
         status: IncidentStatus::Resolved,
         message: "x".into(),
+        notify: true,
     };
     assert_eq!(
         fixture
@@ -276,6 +280,7 @@ async fn open_incidents_leave_out_resolved_and_completed_ones() {
         let update = NewUpdate {
             status,
             message: "Over.".into(),
+            notify: true,
         };
         store
             .add_incident_update(id, update, ci.clone(), at(2000))

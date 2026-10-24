@@ -29,6 +29,7 @@ mod query;
 mod release;
 mod reload;
 mod serve;
+mod subscribers;
 #[cfg(test)]
 mod testing;
 mod web;

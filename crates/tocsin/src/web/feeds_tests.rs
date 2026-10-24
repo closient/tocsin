@@ -416,6 +416,7 @@ async fn an_entry_keeps_its_id_through_updates_edits_and_new_configuration() {
         NewUpdate {
             status: IncidentStatus::Identified,
             message: "Found the bad deploy.".to_owned(),
+            notify: true,
         },
         Actor::person("alice@example.com"),
     )

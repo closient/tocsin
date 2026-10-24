@@ -183,6 +183,18 @@ const ROUTES: &[(&str, Class, &[&str])] = &[
         Class::Refused,
         &["/api/v1/releases/app/1.0.0/deployed"],
     ),
+    // Subscribers: 404 without `[subscribers]`, and the list and removal
+    // need `subscribers:admin`.
+    (
+        "/api/v1/subscribers",
+        Class::Refused,
+        &["/api/v1/subscribers"],
+    ),
+    (
+        "/api/v1/subscribers/{id}",
+        Class::Refused,
+        &["/api/v1/subscribers/1"],
+    ),
     // Behind proxy auth.
     ("/admin", Class::Redirect, &["/admin"]),
     ("/admin/", Class::Refused, &["/admin/"]),

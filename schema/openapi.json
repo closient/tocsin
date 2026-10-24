@@ -1288,6 +1288,225 @@
         ]
       }
     },
+    "/api/v1/subscribers": {
+      "get": {
+        "tags": [
+          "subscribers"
+        ],
+        "summary": "List subscribers, oldest first, with the totals.",
+        "operationId": "list_subscribers",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Only subscribers with a larger id: the previous page's `next_after`.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, 1 to 200; default 50.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page, in id order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriberList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks the `subscribers:admin` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Subscriptions are off on this server",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A bad `after` or `limit`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "subscribers"
+        ],
+        "summary": "Sign up for email about incidents and releases. The answer is the same\nwhether the address is new, waiting for confirmation or already\nsubscribed; only the email it then receives differs.",
+        "operationId": "create_subscriber",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewSubscriber"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted; a confirmation email follows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignupAccepted"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Subscriptions are off on this server",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid fields, by path, or a failed Turnstile check",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many sign-ups from this client or for this address; `Retry-After` says when to try again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Turnstile answer could not be checked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/subscribers/{id}": {
+      "delete": {
+        "tags": [
+          "subscribers"
+        ],
+        "summary": "Remove a subscriber at once, with every delivery still queued for them.",
+        "operationId": "delete_subscriber",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Subscriber id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed"
+          },
+          "401": {
+            "description": "No token, or an unknown one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks the `subscribers:admin` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No subscriber has that id, or subscriptions are off",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/timeline": {
       "get": {
         "tags": [
@@ -1819,7 +2038,7 @@
         "properties": {
           "error": {
             "type": "string",
-            "description": "Stable machine-readable code: `unauthorized`, `forbidden`,\n`not_found`, `method_not_allowed`, `bad_request`, `too_large`, `invalid`,\n`unavailable` or `internal`."
+            "description": "Stable machine-readable code: `unauthorized`, `forbidden`,\n`not_found`, `method_not_allowed`, `bad_request`, `too_large`, `invalid`,\n`too_many_requests`, `unavailable` or `internal`."
           },
           "fields": {
             "type": "array",
@@ -2250,6 +2469,41 @@
         },
         "additionalProperties": false
       },
+      "NewSubscriber": {
+        "type": "object",
+        "description": "A sign-up.",
+        "required": [
+          "email"
+        ],
+        "properties": {
+          "components": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Components whose incidents to hear about, or `[\"*\"]` for every one.\nDefault `[\"*\"]`."
+          },
+          "email": {
+            "type": "string",
+            "description": "The address to send to. It receives only a confirmation until its\nowner follows the link in it."
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Public projects whose releases to hear about, or `[\"*\"]` for every\none. Default none."
+          },
+          "turnstile": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The Cloudflare Turnstile answer, required when the server has\nTurnstile on."
+          }
+        },
+        "additionalProperties": false
+      },
       "NewUpdate": {
         "type": "object",
         "description": "`POST /api/v1/incidents/{id}/updates`: append an update.",
@@ -2261,6 +2515,11 @@
           "message": {
             "type": "string",
             "description": "Markdown. Not empty."
+          },
+          "notify": {
+            "type": "boolean",
+            "description": "Whether email subscribers hear about it. `false` posts it quietly,\nfor a typo fix or a minor note. It changes nothing else.",
+            "default": true
           },
           "status": {
             "$ref": "#/components/schemas/IncidentStatus",
@@ -2521,6 +2780,19 @@
           }
         }
       },
+      "SignupAccepted": {
+        "type": "object",
+        "description": "The answer to a sign-up, the same for every address.",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "What happens next."
+          }
+        }
+      },
       "StatusDocument": {
         "type": "object",
         "description": "`GET /api/v1/status.json`: everything a status page shows right now.",
@@ -2557,6 +2829,106 @@
           "title": {
             "type": "string",
             "description": "The `[page]` title."
+          }
+        }
+      },
+      "SubscriberEntry": {
+        "type": "object",
+        "description": "One subscriber, as an operator sees them.",
+        "required": [
+          "id",
+          "email",
+          "created_at",
+          "components",
+          "projects"
+        ],
+        "properties": {
+          "components": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Components whose incidents they hear about; `*` is every one."
+          },
+          "confirmed_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When they confirmed; absent while they have not."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When they signed up."
+          },
+          "email": {
+            "type": "string",
+            "description": "Their address."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The subscriber's id."
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Projects whose releases they hear about; `*` is every public one."
+          }
+        }
+      },
+      "SubscriberList": {
+        "type": "object",
+        "description": "One page of subscribers, in id order, with the totals.",
+        "required": [
+          "subscribers",
+          "totals"
+        ],
+        "properties": {
+          "next_after": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Pass as `after` for the next page; absent on the last."
+          },
+          "subscribers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SubscriberEntry"
+            },
+            "description": "This page."
+          },
+          "totals": {
+            "$ref": "#/components/schemas/SubscriberTotals",
+            "description": "Totals across every page."
+          }
+        }
+      },
+      "SubscriberTotals": {
+        "type": "object",
+        "description": "How many subscribers there are.",
+        "required": [
+          "confirmed",
+          "unconfirmed"
+        ],
+        "properties": {
+          "confirmed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Confirmed, and so receiving mail."
+          },
+          "unconfirmed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Waiting for confirmation."
           }
         }
       },
@@ -2838,6 +3210,10 @@
     {
       "name": "events",
       "description": "Changes as they happen, as server-sent events"
+    },
+    {
+      "name": "subscribers",
+      "description": "Email subscriptions to incidents and releases"
     }
   ]
 }

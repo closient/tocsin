@@ -32,4 +32,10 @@
 </section>
 {%- endif %}
 </div>
+{%- if let Some(form) = subscribe %}
+<section id="subscribe" aria-labelledby="subscribe-heading">
+<h2 id="subscribe-heading">Get updates by email</h2>
+{%- include "status/subscribe.html" %}
+</section>
+{%- endif %}
 {% endblock %}

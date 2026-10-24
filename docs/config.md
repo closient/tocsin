@@ -117,7 +117,7 @@ Fields marked **may be secret** take either a value written in the file or an en
 
 ### `[server.email]`
 
-Required, with all three keys, once any notifier has `type = "email"`.
+Required, with all three keys, once any notifier has `type = "email"` or `[subscribers]` is present. Subscriber email uses the same sender and server.
 
 | Key | Type | |
 |-----|------|-|
@@ -402,6 +402,30 @@ Sends alerts matching its filters to its notifiers. An empty filter matches ever
 
 When several routes send one alert to the same notifier, it is sent once and repeats on the shortest of their intervals. Every alert is resolved; there is no `resolve` key, and a route that sets one is an error.
 
+## `[subscribers]`
+
+Turns on email subscriptions from the public page: a sign-up form, double
+opt-in, and an email for each incident, update and release a subscriber
+chose. Without the table, `/` shows no form and every subscriber page and
+API route is a 404. It requires `[server] public_url` and a complete
+`[server.email]`. How it works is in [subscribers.md](subscribers.md).
+
+| Key | Type | Default | |
+|-----|------|---------|-|
+| `signups_per_ip` | integer | `10` | Sign-ups one client address may make per `rate_window`; past it, 429 with `Retry-After`. At least 1. |
+| `signups_per_email` | integer | `3` | Sign-ups for one email address per `rate_window`, from anywhere. At least 1. |
+| `rate_window` | duration | `"1h"` | The window both limits count over. At least `"1m"`. |
+| `confirm_within` | duration | `"2d"` | How long a confirmation link works, from `"10m"` to `"30d"`. |
+| `client_ip_header` | header name | none | The header a proxy puts the client's address in, such as `CF-Connecting-IP`. Believed only from `trusted_proxies`. |
+| `trusted_proxies` | list of CIDRs | `[]` | The networks the proxy connects from. Required with `client_ip_header`. |
+
+`[subscribers.turnstile]`, optional, puts a Cloudflare Turnstile challenge
+on sign-up: `site_key` and `secret_key` (secret), both required. See
+[subscribers.md](subscribers.md#cloudflare-turnstile).
+
+The table is read at startup; a reload that changes it keeps the running
+one and logs a warning.
+
 ## `[[token]]`
 
 A bearer token for the API: writing incidents, releases and heartbeats, and reading what is not public.
@@ -410,5 +434,5 @@ A bearer token for the API: writing incidents, releases and heartbeats, and read
 |-----|------|-|
 | `id` | id | Required. Logged with each write. |
 | `secret` | secret | Required. Two tokens may not resolve to the same value; the error names both tokens, never the value. |
-| `scopes` | list of `heartbeat`, `incident`, `release`, `status:read` | Required, at least one. `release` publishes releases and stamps deploys; `status:read` reads what the public cannot: checks and heartbeats on no component, non-public projects' releases and deploys, check targets, raw check results, and [the reload status](#reloading). See [api.md](api.md#who-sees-what). |
+| `scopes` | list of `heartbeat`, `incident`, `release`, `status:read`, `subscribers:admin` | Required, at least one. `release` publishes releases and stamps deploys; `subscribers:admin` lists and removes [subscribers](subscribers.md#for-operators); `status:read` reads what the public cannot: checks and heartbeats on no component, non-public projects' releases and deploys, check targets, raw check results, and [the reload status](#reloading). See [api.md](api.md#who-sees-what). |
 | `description` | string | Optional. Who or what uses the token. |

@@ -55,6 +55,8 @@ pub mod scope {
 
     /// `status:read`: reading what is not public.
     pub struct StatusRead;
+    /// `subscribers:admin`: listing and removing email subscribers.
+    pub struct SubscribersAdmin;
 
     impl super::Scope for Incident {
         const SCOPE: TokenScope = TokenScope::Incident;
@@ -72,6 +74,10 @@ pub mod scope {
     impl super::Scope for StatusRead {
         const SCOPE: TokenScope = TokenScope::StatusRead;
         const NAME: &'static str = "status:read";
+    }
+    impl super::Scope for SubscribersAdmin {
+        const SCOPE: TokenScope = TokenScope::SubscribersAdmin;
+        const NAME: &'static str = "subscribers:admin";
     }
 }
 

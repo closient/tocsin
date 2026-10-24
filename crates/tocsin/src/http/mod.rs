@@ -24,6 +24,7 @@ pub mod openapi;
 pub mod public;
 pub mod releases;
 pub mod status;
+pub mod subscribers;
 pub mod timeline;
 
 #[cfg(test)]
@@ -48,10 +49,11 @@ use tocsin_engine::{HeartbeatHandle, Snapshot, StatusHandle};
 use tocsin_store::Store;
 use tokio::sync::watch;
 
-use self::error::ApiError;
+pub use self::error::ApiError;
 use self::events::EventBus;
 use crate::metrics::Metrics;
 use crate::reload::ConfigStatus;
+use crate::subscribers::Subscriptions;
 use crate::web::{self, identity::AdminAuth};
 
 /// What every handler can reach.
@@ -74,6 +76,9 @@ pub struct AppState {
     pub config_status: watch::Receiver<ConfigStatus>,
     /// Every metric, served at `/metrics`.
     pub metrics: Arc<Metrics>,
+    /// Email subscriptions; `None` without `[subscribers]`, which leaves
+    /// the form off the page and the subscriber API answering 404.
+    pub subscribers: Option<Arc<Subscriptions>>,
 }
 
 /// Where the read API gets the current state of every check and

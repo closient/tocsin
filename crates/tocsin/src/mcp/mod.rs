@@ -460,6 +460,7 @@ impl Server {
         let update = NewUpdate {
             status: input.status,
             message: input.message,
+            notify: true,
         };
         match &self.backend {
             Backend::Local(state) => local(

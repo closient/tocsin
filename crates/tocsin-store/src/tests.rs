@@ -360,6 +360,7 @@ async fn an_incident_is_read_from_one_snapshot() {
             NewUpdate {
                 status: IncidentStatus::Identified,
                 message: "Found it.".into(),
+                notify: true,
             },
             Actor::token("oncall"),
             Timestamp::from_millis(1500),

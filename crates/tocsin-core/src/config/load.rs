@@ -24,7 +24,7 @@ use super::notifier::NotifierType;
 use super::values::{Id, Secret, Text, email_address, is_unanswerable};
 use super::{
     Auth, AuthMode, Check, Component, Config, Group, Heartbeat, Link, Notifier, Page, Project,
-    Route, Server, Token,
+    Route, Server, Subscribers, Token,
 };
 use crate::link::{http_url, site_path};
 
@@ -59,6 +59,7 @@ pub(crate) const TOP_LEVEL_KEYS: &[&str] = &[
     "notifier",
     "route",
     "token",
+    "subscribers",
 ];
 
 /// Parses, merges and validates configuration files, given in merge order.
@@ -168,6 +169,7 @@ struct Items {
     notifiers: Vec<Item<Notifier>>,
     routes: Vec<Item<Route>>,
     tokens: Vec<Item<Token>>,
+    subscribers: Option<Item<Subscribers>>,
 }
 
 struct ParsedFile<'a> {
@@ -341,6 +343,10 @@ impl<'a> Loader<'a> {
                     "notifier" => items.notifiers.extend(self.array(&origin, "notifier")),
                     "route" => items.routes.extend(self.array(&origin, "route")),
                     "token" => items.tokens.extend(self.array(&origin, "token")),
+                    "subscribers" => {
+                        items.subscribers =
+                            self.singleton(&origin, "subscribers", items.subscribers.take());
+                    }
                     _ => {
                         let hint = closest(&key, TOP_LEVEL_KEYS.iter().copied()).map_or_else(
                             || format!("top-level tables are {}", list(TOP_LEVEL_KEYS)),
@@ -585,6 +591,9 @@ impl<'a> Loader<'a> {
             self.validate_server(server);
         }
         self.validate_email_senders(items);
+        if let Some(subscribers) = &items.subscribers {
+            self.validate_subscribers(subscribers, items.server.as_ref());
+        }
         if let Some(page) = &items.page {
             self.validate_page(page);
         }
@@ -633,7 +642,7 @@ impl<'a> Loader<'a> {
                 self.report(
                     &token.origin.key("scopes"),
                     "a token needs at least one scope",
-                    Some("scopes are heartbeat, incident and release".to_owned()),
+                    Some("scopes are heartbeat, incident, release, status:read and subscribers:admin".to_owned()),
                 );
             }
         }
@@ -897,15 +906,28 @@ impl<'a> Loader<'a> {
     }
 
     /// `[server.email]` is required, complete, once any notifier sends email.
+    /// Every sender of email, an email notifier or `[subscribers]`, needs
+    /// a complete `[server.email]`; the first one found is named.
     fn validate_email_senders(&mut self, items: &Items) {
-        let Some(first) = items
+        let sender = items
             .notifiers
             .iter()
             .find(|notifier| notifier.value.notifier_type == NotifierType::Email)
-        else {
+            .map(|first| {
+                (
+                    first.origin.key("type"),
+                    format!("notifier `{}`", first.value.id),
+                )
+            })
+            .or_else(|| {
+                items
+                    .subscribers
+                    .as_ref()
+                    .map(|subscribers| (subscribers.origin.clone(), "`[subscribers]`".to_owned()))
+            });
+        let Some((origin, sender)) = sender else {
             return;
         };
-        let id = first.value.id.clone();
         let email = items
             .server
             .as_ref()
@@ -918,8 +940,8 @@ impl<'a> Loader<'a> {
                 return;
             }
             self.report(
-                &first.origin.key("type"),
-                format!("notifier `{id}` sends email, but no file sets `[server.email]`"),
+                &origin,
+                format!("{sender} sends email, but no file sets `[server.email]`"),
                 Some("add `[server.email]` with `from`, `reply_to` and `smtp_url`".to_owned()),
             );
             return;
@@ -933,10 +955,100 @@ impl<'a> Loader<'a> {
             if absent {
                 self.report(
                     &server.origin.key("email"),
-                    format!("`[server.email]` needs `{key}` because notifier `{id}` sends email"),
+                    format!("`[server.email]` needs `{key}` because {sender} sends email"),
                     None,
                 );
             }
+        }
+    }
+
+    /// `[subscribers]`: its emails link back to the page, and its limits
+    /// must let at least one sign-up through.
+    fn validate_subscribers(
+        &mut self,
+        subscribers: &Item<Subscribers>,
+        server: Option<&Item<Server>>,
+    ) {
+        let origin = &subscribers.origin;
+        let value = &subscribers.value;
+        let public_url = server.and_then(|server| server.value.public_url.as_ref());
+        let server_unknown =
+            server.is_none() && (self.singletons.contains_key("server") || self.incomplete);
+        if public_url.is_none() && !server_unknown {
+            self.report(
+                origin,
+                "`[subscribers]` needs `[server] public_url`: every email links back to the page",
+                Some("add `public_url = \"https://status.example.com\"` under `[server]`, the address people open".to_owned()),
+            );
+        }
+        for (key, limit) in [
+            ("signups_per_ip", value.signups_per_ip),
+            ("signups_per_email", value.signups_per_email),
+        ] {
+            if limit == 0 {
+                self.report(
+                    &origin.key(key),
+                    format!("`{key}` must be at least 1"),
+                    None,
+                );
+            }
+        }
+        if value.rate_window.get() < std::time::Duration::from_mins(1) {
+            self.report(
+                &origin.key("rate_window"),
+                "`rate_window` must be at least 1m",
+                None,
+            );
+        }
+        let confirm = value.confirm_within.get();
+        if confirm < std::time::Duration::from_mins(10)
+            || confirm > std::time::Duration::from_hours(30 * 24)
+        {
+            self.report(
+                &origin.key("confirm_within"),
+                "`confirm_within` must be between 10m and 30d",
+                None,
+            );
+        }
+        match &value.client_ip_header {
+            Some(header) => {
+                if header.is_empty()
+                    || !header
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+                {
+                    self.report(
+                        &origin.key("client_ip_header"),
+                        format!("`client_ip_header` must be an HTTP header name, not `{header}`"),
+                        None,
+                    );
+                }
+                if value.trusted_proxies.is_empty() {
+                    self.report(
+                        &origin.key("client_ip_header"),
+                        "`client_ip_header` needs `trusted_proxies`: without them anyone could set it",
+                        Some("list the networks your proxy connects from, such as `trusted_proxies = [\"10.0.0.0/8\"]`".to_owned()),
+                    );
+                }
+            }
+            None => {
+                if !value.trusted_proxies.is_empty() {
+                    self.report(
+                        &origin.key("trusted_proxies"),
+                        "`trusted_proxies` does nothing without `client_ip_header`",
+                        None,
+                    );
+                }
+            }
+        }
+        if let Some(turnstile) = &value.turnstile
+            && turnstile.site_key.trim().is_empty()
+        {
+            self.report(
+                &origin.keys(&["turnstile", "site_key"]),
+                "`site_key` must not be empty",
+                None,
+            );
         }
     }
 
@@ -1415,6 +1527,14 @@ impl<'a> Loader<'a> {
         {
             secrets.push((server.origin.keys(&["email", "smtp_url"]), smtp));
         }
+        if let Some(subscribers) = &mut items.subscribers
+            && let Some(turnstile) = &mut subscribers.value.turnstile
+        {
+            secrets.push((
+                subscribers.origin.keys(&["turnstile", "secret_key"]),
+                &mut turnstile.secret_key,
+            ));
+        }
         for notifier in &mut items.notifiers {
             for (path, secret) in notifier.value.secrets_mut() {
                 secrets.push((notifier.origin.keys(&path), secret));
@@ -1590,6 +1710,7 @@ impl<'a> Loader<'a> {
             routes: values(items.routes),
             tokens: values(items.tokens),
             page: items.page.map(|item| item.value).unwrap_or_default(),
+            subscribers: items.subscribers.map(|item| item.value),
         })
     }
 }
@@ -1885,6 +2006,7 @@ mod tests {
                 "token",
                 "[[token]]\nid = \"sample\"\nsecret = \"${ENV:SAMPLE}\"\nscopes = [\"release\"]\n",
             ),
+            ("subscribers", "[subscribers]\n"),
         ];
         let kinds: BTreeSet<&str> = TOP_LEVEL_KEYS.iter().copied().collect();
         let covered: BTreeSet<&str> = samples.iter().map(|(kind, _)| *kind).collect();
@@ -1899,7 +2021,13 @@ mod tests {
             .collect();
         assert_eq!(published, expected, "ConfigFile");
 
-        let variable = |_: &str| Some("sample-secret".to_owned());
+        let variable = |name: &str| {
+            Some(if name == "SMTP_URL" {
+                "smtp://mail.example.com".to_owned()
+            } else {
+                "sample-secret".to_owned()
+            })
+        };
         let environment = Environment {
             hostname: "host".to_owned(),
             variable: &variable,
@@ -1919,12 +2047,14 @@ mod tests {
         assert_eq!(returned, expected, "Config");
 
         let notifier = samples[7].1;
+        let sender = "[server]\npublic_url = \"https://status.example.com\"\n[server.email]\nfrom = \"status@example.com\"\nreply_to = \"support@example.com\"\nsmtp_url = \"${ENV:SMTP_URL}\"\n";
         for (kind, text) in samples {
-            // A route needs the notifier it names.
-            let texts: &[&str] = if kind == "route" {
-                &[text, notifier]
-            } else {
-                &[text]
+            // A route needs the notifier it names; subscribers need a
+            // sender and a page to link to.
+            let texts: &[&str] = match kind {
+                "route" => &[text, notifier],
+                "subscribers" => &[text, sender],
+                _ => &[text],
             };
             assert_ne!(render(texts)[kind], empty[kind], "{kind} was not collected");
         }

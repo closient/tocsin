@@ -48,8 +48,13 @@ pub fn run(command: IncidentCommand) -> Result<Report, Failure> {
             id,
             status,
             message,
+            quiet,
         } => {
-            let update = NewUpdate { status, message };
+            let update = NewUpdate {
+                status,
+                message,
+                notify: !quiet,
+            };
             let incident: Incident = Client::new(&server)?.write(
                 &Method::POST,
                 &format!("{INCIDENTS}/{id}/updates"),

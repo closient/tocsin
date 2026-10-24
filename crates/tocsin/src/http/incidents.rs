@@ -195,9 +195,9 @@ pub async fn add_update(
     Ok((StatusCode::CREATED, Json(incident)))
 }
 
-/// Opens an incident as `actor`: validates, stores, logs and emits
-/// [`Event::IncidentCreated`]. The JSON API and the admin page both write
-/// through here.
+/// Opens an incident as `actor`: validates, stores, logs, emits
+/// [`Event::IncidentCreated`] and announces it to subscribers. The JSON API
+/// and the admin page both write through here.
 ///
 /// # Errors
 ///
@@ -218,12 +218,16 @@ pub async fn open(
     state.events.emit(Event::IncidentCreated {
         incident: Arc::clone(&incident),
     });
+    if let Some(subscribers) = &state.subscribers {
+        subscribers.incident_opened(state, &incident).await;
+    }
     Ok(incident)
 }
 
-/// Appends an update to incident `id` as `actor`: validates, stores, logs
-/// and emits [`Event::IncidentUpdated`]. The JSON API and the admin page
-/// both write through here.
+/// Appends an update to incident `id` as `actor`: validates, stores, logs,
+/// emits [`Event::IncidentUpdated`] and, unless the update says
+/// `notify: false`, announces it to subscribers. The JSON API and the admin
+/// page both write through here.
 ///
 /// # Errors
 ///
@@ -237,6 +241,7 @@ pub async fn append(
 ) -> Result<Arc<Incident>, ApiError> {
     update.validate().map_err(ApiError::invalid)?;
     let status = update.status;
+    let notify = update.notify;
     let incident = state
         .store
         .add_incident_update(id, update, actor.clone(), now())
@@ -247,6 +252,9 @@ pub async fn append(
     state.events.emit(Event::IncidentUpdated {
         incident: Arc::clone(&incident),
     });
+    if let Some(subscribers) = state.subscribers.as_ref().filter(|_| notify) {
+        subscribers.incident_updated(state, &incident).await;
+    }
     Ok(incident)
 }
 

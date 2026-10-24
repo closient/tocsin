@@ -89,6 +89,8 @@ struct IndexPage {
     impacts: Vec<Choice>,
     statuses: Vec<Choice>,
     components: Vec<Choice>,
+    /// Whether `[subscribers]` is on, to link its list.
+    subscribers: bool,
 }
 
 /// One update in an incident's timeline.
@@ -213,6 +215,7 @@ async fn index_page(
                 )
             })
             .collect(),
+        subscribers: state.subscribers.is_some(),
     };
     Ok(render(status, &page))
 }
@@ -301,6 +304,7 @@ async fn update(
         let update = NewUpdate {
             status,
             message: message.clone(),
+            notify: true,
         };
         match incidents::append(&state, id, update, admin.actor()).await {
             Ok(_) => return Ok(Redirect::to(&format!("/admin/incidents/{id}")).into_response()),

@@ -162,6 +162,8 @@ pub(crate) struct Nudge {
     write_started: Option<Instant>,
     /// The rewinds the last write had seen.
     rewinds: u64,
+    /// The write now running is counted already ([`Nudge::wrote`]).
+    counted: bool,
 }
 
 struct Link {
@@ -413,6 +415,7 @@ impl Nudge {
             stats,
             write_started: None,
             rewinds: 0,
+            counted: false,
         }
     }
 
@@ -426,26 +429,21 @@ impl Nudge {
         self.write_started = Some(Instant::now());
     }
 
-    /// Called by the writer after each job, before it replies: tells the
-    /// checkpointer how long the log is now, so a caller that paces on it
-    /// never reads the length from before its own write.
-    pub(crate) fn publish(&self) {
-        let Some(link) = &self.link else {
-            return;
-        };
-        let (frames, appended, _) = LOG.get();
-        link.log.appended.store(appended, Ordering::Relaxed);
-        link.log
-            .frames
-            .store(u64::from(frames.unsigned_abs()), Ordering::Relaxed);
+    /// Called by the writer once a write has committed, before it replies:
+    /// counts the write in the stats (its time, the log's length, whether it
+    /// rewound the log) and tells the checkpointer how long the log is now.
+    /// A caller answered after its write never reads either from before it:
+    /// retention paces on the length, and a reader of
+    /// [`crate::Store::checkpoint_stats`] expects its own rewind counted.
+    pub(crate) fn wrote(&mut self) {
+        self.count();
+        self.counted = true;
     }
 
-    /// Called by the writer after each write and its replies. Publishes the
-    /// log's length again, for callers that skip [`Nudge::publish`], and
-    /// checkpoints only once the log has reached [`HARD_LIMIT_FRAMES`],
-    /// waiting only if another checkpoint is running then and no lockout is.
-    pub(crate) fn after_write(&mut self, conn: &Connection) {
-        let (frames, _, rewinds) = LOG.get();
+    /// Records the write that just committed in the stats, and tells the
+    /// checkpointer how long the log is now.
+    fn count(&mut self) {
+        let (frames, appended, rewinds) = LOG.get();
         let rewound = rewinds > self.rewinds;
         self.rewinds = rewinds;
         let wrote = self.write_started.take();
@@ -455,7 +453,24 @@ impl Nudge {
             u64::from(frames.unsigned_abs()),
             rewound,
         );
-        self.publish();
+        let Some(link) = &self.link else {
+            return;
+        };
+        link.log.appended.store(appended, Ordering::Relaxed);
+        link.log
+            .frames
+            .store(u64::from(frames.unsigned_abs()), Ordering::Relaxed);
+    }
+
+    /// Called by the writer after each write and its replies. Counts the
+    /// write, for callers that skip [`Nudge::wrote`], and checkpoints only
+    /// once the log has reached [`HARD_LIMIT_FRAMES`], waiting only if
+    /// another checkpoint is running then and no lockout is.
+    pub(crate) fn after_write(&mut self, conn: &Connection) {
+        if !std::mem::take(&mut self.counted) {
+            self.count();
+        }
+        let (frames, _, _) = LOG.get();
         let Some(link) = &self.link else {
             return;
         };

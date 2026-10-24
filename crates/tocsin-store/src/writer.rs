@@ -189,7 +189,7 @@ fn run(mut session: Session, mut receiver: mpsc::Receiver<Command>) {
                 // Retention acts on the log's length as soon as its job
                 // replies, so the checkpointer learns the length first.
                 let reply = job(conn);
-                nudge.publish();
+                nudge.wrote();
                 reply();
             }
             Command::Insert(queued) => {
@@ -209,6 +209,9 @@ fn run(mut session: Session, mut receiver: mpsc::Receiver<Command>) {
                     .map(|queued| (queued.insert, (queued.at, queued.reply)))
                     .unzip();
                 let outcomes = commit_batch(conn, &inserts);
+                // Counted before anyone is answered, so a caller sees its own
+                // write's rewind in the stats (TOC-70).
+                nudge.wrote();
                 nudge
                     .counters()
                     .committed(answers.iter().map(|&(at, _)| at), Instant::now());

@@ -186,11 +186,12 @@ fn authenticate<'a>(parts: &Parts, state: &'a AppState) -> Result<&'a Token, Api
 /// a quietly smaller answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Viewer {
-    /// Anyone: sees public projects only.
+    /// Anyone: sees public projects, and the checks and heartbeats on a
+    /// public component, only.
     Public,
-    /// A token with `status:read`: sees every project and check targets.
-    // TODO(TOC-56): the internal check board behind proxy auth admits the
-    // same viewer.
+    /// A token with `status:read`, or the internal board's operator: sees
+    /// every project, every check and heartbeat ([`super::public`]), and
+    /// check targets.
     Trusted,
 }
 

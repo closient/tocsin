@@ -20,7 +20,7 @@ use tocsin_core::release::{
 
 use crate::FUTURE_TOLERANCE;
 use crate::error::{Error, Result};
-use crate::history::{ending, subject_kind};
+use crate::history::{Checks, SHOWN, ending, subject_kind};
 use crate::incident::{actor, snapshot, text};
 use crate::rollup::parse_column;
 
@@ -84,6 +84,8 @@ pub enum Order {
 pub struct TimelineQuery {
     /// The projects whose deploys and releases the reader may see.
     pub visible: Projects,
+    /// The checks and heartbeats whose outages the reader may see.
+    pub shown: Checks,
     /// Events at or after this.
     pub since: Timestamp,
     /// Only events strictly past this one, in `order`: the previous
@@ -476,6 +478,7 @@ fn outage_events(
              subject_kind, ending FROM outage WHERE started_at >= :since AND {} \
              AND (:component IS NULL OR component_id = :component \
                   OR check_id IN (SELECT value FROM json_each(:checks))) \
+             AND {SHOWN} \
              ORDER BY started_at {direction}, id {direction} LIMIT :limit",
             window.after("started_at", "0"),
         ))?
@@ -487,6 +490,7 @@ fn outage_events(
                 ":after_id": after_id,
                 ":component": scope.map(|scope| scope.id.as_str()),
                 ":checks": scope.map(|scope| serde_json::Value::from(scope.checks.clone()).to_string()),
+                ":shown": query.shown.bind(),
                 ":limit": window.limit,
             },
             |row| {

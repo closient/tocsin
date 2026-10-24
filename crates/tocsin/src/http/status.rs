@@ -3,9 +3,10 @@
 //! `/api/v1/status.json`, `/api/v1/components/{id}` and `/api/v1/checks`:
 //! what is up right now.
 //!
-//! Components, checks and their health are public, as the status page
-//! shows them. A check's `target` can name an internal host, so only a
-//! `status:read` token sees it.
+//! Components are public, as the status page shows them, and so are the
+//! checks and heartbeats that belong to one ([`public`]). One on no
+//! component, and any check's `target`, which can name an internal host,
+//! only a `status:read` token sees.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -21,6 +22,7 @@ use utoipa_axum::routes;
 
 use super::auth::Viewer;
 use super::error::{ApiError, ErrorBody};
+use super::public;
 use super::{AppState, now};
 
 /// The OpenAPI tag for these routes.
@@ -109,7 +111,8 @@ pub async fn component_detail(
     })
 }
 
-/// Every check and heartbeat with its current state.
+/// Every check and heartbeat on a public component with its current
+/// state; with a `status:read` token, those on no component too.
 #[utoipa::path(
     get,
     path = "/api/v1/checks",
@@ -172,7 +175,8 @@ fn component_state(component: &Component, snapshot: &Snapshot) -> ComponentState
 }
 
 /// Every check, then every heartbeat, in configuration order, with what
-/// the snapshot knows of each. Only a [`Viewer::Trusted`] sees targets.
+/// the snapshot knows of each. Only a [`Viewer::Trusted`] sees targets,
+/// and those on no component ([`public::may_see`]).
 pub(crate) fn checks(config: &Config, snapshot: &Snapshot, viewer: Viewer) -> Vec<CheckState> {
     let trusted = viewer == Viewer::Trusted;
     let probed = config.checks.iter().map(|check| Member {
@@ -195,6 +199,7 @@ pub(crate) fn checks(config: &Config, snapshot: &Snapshot, viewer: Viewer) -> Ve
     });
     probed
         .chain(pinged)
+        .filter(|member| public::may_see(viewer, member.component.map(Id::as_str)))
         .map(|member| member.state(snapshot))
         .collect()
 }

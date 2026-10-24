@@ -8,7 +8,7 @@ use tocsin_core::incident::Timestamp;
 use tocsin_core::release::TimelineEvent;
 use tocsin_core::status::{CheckKind, OutageEnding};
 use tocsin_store::{
-    HistoryPage, NewCheckResult, NewOutage, Newest, Order, Projects, ResultFilter, Store,
+    Checks, HistoryPage, NewCheckResult, NewOutage, Newest, Order, Projects, ResultFilter, Store,
     SubjectKind, TimelineQuery,
 };
 
@@ -131,7 +131,10 @@ async fn outages_overlapping_the_window_page_newest_first() {
     let ids = |rows: &[tocsin_core::status::OutageRecord]| -> Vec<i64> {
         rows.iter().map(|row| row.id).collect()
     };
-    let all = store.outages(page(1_000, None, 10)).await.unwrap();
+    let all = store
+        .outages(page(1_000, None, 10), Checks::All)
+        .await
+        .unwrap();
     assert_eq!(
         ids(&all),
         [open, inside, straddles],
@@ -150,10 +153,105 @@ async fn outages_overlapping_the_window_page_newest_first() {
     );
     assert_eq!(all[0].subject_kind, CheckKind::Check);
 
-    let one = store.outages(page(1_000, None, 2)).await.unwrap();
+    let one = store
+        .outages(page(1_000, None, 2), Checks::All)
+        .await
+        .unwrap();
     assert_eq!(ids(&one), [open, inside]);
-    let two = store.outages(page(1_000, Some(inside), 2)).await.unwrap();
+    let two = store
+        .outages(page(1_000, Some(inside), 2), Checks::All)
+        .await
+        .unwrap();
     assert_eq!(ids(&two), [straddles]);
+}
+
+/// `Checks::Public` narrows the outage page and the timeline alike, pages
+/// through only what it shows, and treats a hidden outage's id as a lost
+/// cursor, so a reader cannot learn that one exists.
+#[tokio::test]
+async fn outages_narrow_to_the_checks_shown() {
+    let (_dir, store) = open();
+    let mut shown_ids = Vec::new();
+    let mut hidden = 0;
+    for at in [1_000, 2_000, 3_000] {
+        let a = store.open_outage(outage("a", at, Down)).await.unwrap();
+        store.end_outage(a, at + 500).await.unwrap();
+        shown_ids.push(a);
+        hidden = store.open_outage(outage("b", at + 1, Down)).await.unwrap();
+        store.end_outage(hidden, at + 500).await.unwrap();
+    }
+    let shown = || Checks::Public {
+        public: vec!["a".to_owned()],
+        internal: vec!["b".to_owned()],
+    };
+    let read = |rows: Vec<tocsin_core::status::OutageRecord>| -> Vec<(i64, String)> {
+        rows.into_iter().map(|row| (row.id, row.check_id)).collect()
+    };
+    let first = store.outages(page(0, None, 2), shown()).await.unwrap();
+    assert_eq!(
+        read(first),
+        [
+            (shown_ids[2], "a".to_owned()),
+            (shown_ids[1], "a".to_owned())
+        ]
+    );
+    let rest = store
+        .outages(page(0, Some(shown_ids[1]), 2), shown())
+        .await
+        .unwrap();
+    assert_eq!(read(rest), [(shown_ids[0], "a".to_owned())]);
+    let error = store
+        .outages(page(0, Some(hidden), 2), shown())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, tocsin_store::Error::Invalid(fields) if fields[0].path == "before"),
+        "{error}"
+    );
+    // Every check's, unnarrowed.
+    assert_eq!(
+        store
+            .outages(page(0, None, 10), Checks::All)
+            .await
+            .unwrap()
+            .len(),
+        6
+    );
+    assert_eq!(
+        store
+            .outages(
+                page(0, None, 10),
+                Checks::Public {
+                    public: Vec::new(),
+                    internal: vec!["a".to_owned(), "b".to_owned()],
+                }
+            )
+            .await
+            .unwrap(),
+        []
+    );
+
+    let timeline = store
+        .timeline(TimelineQuery {
+            visible: Projects::All,
+            shown: shown(),
+            since: Timestamp::from_millis(0),
+            after: None,
+            order: Order::OldestFirst,
+            limit: 10,
+            component: None,
+        })
+        .await
+        .unwrap();
+    let checks: Vec<_> = timeline
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            TimelineEvent::Outage { check_id, .. } => Some(check_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(checks, ["a", "a", "a"]);
 }
 
 /// A recovery and a withdrawal both end an outage, and every read says
@@ -168,7 +266,7 @@ async fn an_outage_reads_back_how_it_ended() {
     let open = store.open_outage(outage("d", 1_200, Down)).await.unwrap();
 
     let endings: Vec<_> = store
-        .outages(page(0, None, 10))
+        .outages(page(0, None, 10), Checks::All)
         .await
         .unwrap()
         .into_iter()
@@ -192,6 +290,7 @@ async fn an_outage_reads_back_how_it_ended() {
     let timeline = store
         .timeline(TimelineQuery {
             visible: Projects::All,
+            shown: Checks::All,
             since: Timestamp::from_millis(0),
             after: None,
             order: Order::OldestFirst,
@@ -233,7 +332,10 @@ async fn outages_page_through_ties_and_both_kinds_of_straddler() {
     let mut seen = Vec::new();
     let mut before = None;
     loop {
-        let rows = store.outages(page(1_000, before, 2)).await.unwrap();
+        let rows = store
+            .outages(page(1_000, before, 2), Checks::All)
+            .await
+            .unwrap();
         if rows.is_empty() {
             break;
         }
@@ -269,7 +371,7 @@ async fn a_cursor_that_names_no_row_of_the_read_is_invalid() {
         );
     }
     let error = store
-        .outages(page(0, Some(outage + 100), 10))
+        .outages(page(0, Some(outage + 100), 10), Checks::All)
         .await
         .unwrap_err();
     assert!(
@@ -282,7 +384,10 @@ async fn a_cursor_that_names_no_row_of_the_read_is_invalid() {
         .await
         .unwrap();
     assert_eq!(after_own, []);
-    let after_own = store.outages(page(0, Some(outage), 10)).await.unwrap();
+    let after_own = store
+        .outages(page(0, Some(outage), 10), Checks::All)
+        .await
+        .unwrap();
     assert_eq!(after_own, []);
 }
 
@@ -419,4 +524,70 @@ async fn results_slice_into_latency_and_failure_counts() {
         .await
         .unwrap();
     assert_eq!(only.iter().collect::<Vec<_>>(), api);
+}
+
+/// A check no longer configured has only its outages to say where it was:
+/// one recorded on a component stays public, one recorded on none does
+/// not. A configured check follows where it is now, whatever its outages
+/// recorded.
+#[tokio::test]
+async fn outages_of_removed_checks_follow_the_component_they_recorded() {
+    let (_dir, store) = open();
+    let on = |check: &str, component: Option<&str>, at| NewOutage {
+        component_id: component.map(Into::into),
+        ..outage(check, at, Down)
+    };
+    // Removed from the status page, and removed while internal.
+    let removed_public = store
+        .open_outage(on("gone", Some("api"), 1_000))
+        .await
+        .unwrap();
+    store
+        .open_outage(on("gone-internal", None, 1_001))
+        .await
+        .unwrap();
+    // Moved off its component: recorded on one, internal now.
+    store
+        .open_outage(on("moved-off", Some("api"), 1_002))
+        .await
+        .unwrap();
+    // Moved onto one: recorded on none, public now.
+    let moved_on = store
+        .open_outage(on("moved-on", None, 1_003))
+        .await
+        .unwrap();
+    let shown = Checks::Public {
+        public: vec!["moved-on".to_owned()],
+        internal: vec!["moved-off".to_owned()],
+    };
+    let ids: Vec<i64> = store
+        .outages(page(0, None, 10), shown.clone())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(ids, [moved_on, removed_public]);
+
+    let timeline = store
+        .timeline(TimelineQuery {
+            visible: Projects::All,
+            shown,
+            since: Timestamp::from_millis(0),
+            after: None,
+            order: Order::OldestFirst,
+            limit: 10,
+            component: None,
+        })
+        .await
+        .unwrap();
+    let checks: Vec<_> = timeline
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            TimelineEvent::Outage { check_id, .. } => Some(check_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(checks, ["gone", "moved-on"]);
 }

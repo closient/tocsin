@@ -32,7 +32,7 @@ use crate::http::{self, AppState, OPENAPI_PATH, now};
 
 /// Beside [`CONFIG`]'s `api-https` on the API component: a TCP check and
 /// a heartbeat on no component, each with a link.
-const INTERNAL: &str = r#"
+pub(super) const INTERNAL: &str = r#"
 [[check]]
 id = "backup-disk"
 name = "Backup disk"
@@ -56,14 +56,22 @@ url = "https://logs.example.com/nightly-dump"
 
 /// `[server.auth]` in `trusted_header` mode, trusting 10.0.0.0/8 and
 /// admitting only Alice.
-const TRUSTED_HEADER: &str = r#"
+pub(super) const TRUSTED_HEADER: &str = r#"
 [server.auth]
 mode = "trusted_header"
 trusted_proxies = ["10.0.0.0/8"]
 allowed_emails = ["alice@example.com"]
 "#;
 
-const EMAIL_HEADER: &str = "x-forwarded-email";
+pub(super) const EMAIL_HEADER: &str = "x-forwarded-email";
+
+/// The secret of [`CONFIG`]'s `oncall` token, which may write incidents
+/// and reads only what the public does.
+pub(super) const ONCALL: &str = "oncall-0123456789";
+
+/// The secret of a `status:read` token, for a config that declares one
+/// with `${ENV:READER_TOKEN}`.
+pub(super) const READER: &str = "reader-0123456789";
 
 /// Every route the board serves, for a check with no component.
 const ROUTES: [&str; 4] = [
@@ -74,14 +82,18 @@ const ROUTES: [&str; 4] = [
 ];
 
 /// A store, the state around it, and the router serving it.
-struct Board {
+pub(super) struct Board {
     _dir: tempfile::TempDir,
-    state: AppState,
-    router: axum::Router,
+    pub(super) state: AppState,
+    pub(super) router: axum::Router,
 }
 
-fn config(auth: &str) -> Config {
-    let variable = |name: &str| (name == "ONCALL_TOKEN").then(|| "oncall-0123456789".to_owned());
+pub(super) fn config(auth: &str) -> Config {
+    let variable = |name: &str| match name {
+        "ONCALL_TOKEN" => Some(ONCALL.to_owned()),
+        "READER_TOKEN" => Some(READER.to_owned()),
+        _ => None,
+    };
     tocsin_core::config::load(
         &[Source {
             name: "tocsin.toml".into(),
@@ -145,7 +157,7 @@ fn snapshot() -> Snapshot {
     }
 }
 
-fn serve(config: Config, admin: Option<AdminAuth>) -> Board {
+pub(super) fn serve(config: Config, admin: Option<AdminAuth>) -> Board {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join(tocsin_store::DB_FILE)).unwrap();
     let state = AppState {
@@ -166,7 +178,7 @@ fn serve(config: Config, admin: Option<AdminAuth>) -> Board {
 }
 
 /// A board behind a trusted proxy that admits Alice.
-fn header_board() -> Board {
+pub(super) fn header_board() -> Board {
     let config = config(TRUSTED_HEADER);
     let admin = AdminAuth::from_config(&config).unwrap();
     serve(config, admin)
@@ -183,7 +195,7 @@ fn access_board(server: &KeyServer) -> Board {
 
 impl Board {
     /// `GET uri` as `email` through the trusted proxy.
-    async fn get_as(&self, email: &str, uri: &str) -> (StatusCode, HeaderMap, String) {
+    pub(super) async fn get_as(&self, email: &str, uri: &str) -> (StatusCode, HeaderMap, String) {
         let request = from(PROXY, Method::GET, uri)
             .header(EMAIL_HEADER, email)
             .body(Body::empty())
@@ -192,14 +204,14 @@ impl Board {
     }
 
     /// The page at `uri` as Alice, which must be there.
-    async fn page(&self, uri: &str) -> String {
+    pub(super) async fn page(&self, uri: &str) -> String {
         let (status, _, body) = self.get_as(ALICE, uri).await;
         assert_eq!(status, StatusCode::OK, "{uri}: {body}");
         body
     }
 
     /// `GET uri` with no identity at all, as the public would.
-    async fn anonymous(&self, uri: &str) -> (StatusCode, String) {
+    pub(super) async fn anonymous(&self, uri: &str) -> (StatusCode, String) {
         let request = from(OUTSIDER, Method::GET, uri)
             .body(Body::empty())
             .unwrap();
@@ -227,7 +239,7 @@ impl Board {
     /// Results for every check: the backup disk failing its connection
     /// five minutes ago after an hour of answering, the API passing its
     /// assertion, the dump's last ping with a message.
-    async fn furnish(&self) {
+    pub(super) async fn furnish(&self) {
         for minutes in [65, 35, 10] {
             self.result("backup-disk", minutes * 60_000, Up, Extra::took(12))
                 .await;
@@ -289,7 +301,7 @@ impl Extra {
     }
 }
 
-async fn parts(response: Response) -> (StatusCode, HeaderMap, String) {
+pub(super) async fn parts(response: Response) -> (StatusCode, HeaderMap, String) {
     let status = response.status();
     let headers = response.headers().clone();
     (status, headers, text(response).await)
@@ -507,7 +519,7 @@ async fn the_board_reads_without_javascript_and_updates_over_the_event_stream() 
     let page = board.page("/internal/").await;
     // Everything is in the HTML as served; the scripts only refresh it.
     assert!(page.contains("Backup disk") && page.contains("connection refused"));
-    assert!(page.contains("sse-connect=\"/api/v1/events\""));
+    assert!(page.contains("sse-connect=\"/internal/events\""));
     assert!(page.contains("hx-get=\"/internal/fragments/board\""));
     assert!(page.contains("sse:check_changed"));
     let detail = board.page("/internal/checks/backup-disk").await;

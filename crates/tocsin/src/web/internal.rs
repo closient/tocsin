@@ -12,9 +12,11 @@
 //!   the sparklines, the daily rollups for the 90-day bars, and for one
 //!   check its results, outages and its projects' releases.
 //! - **Live updates**: the page loads htmx and its SSE extension, as `/`
-//!   does, and re-fetches its live part when the stream names a check
-//!   change, and every 60 seconds besides. Without JavaScript the page is
-//!   complete as served.
+//!   does, and re-fetches its live part when its own stream,
+//!   `/internal/events`, names a check change, and every 60 seconds
+//!   besides. That stream is the API's as a trusted reader sees it: the
+//!   public `/api/v1/events` leaves out checks on no component. Without
+//!   JavaScript the page is complete as served.
 //! - **Headers**: `Cache-Control: private, no-store` and
 //!   `X-Robots-Tag: noindex` on every response, refusals included. Nothing
 //!   here appears in a feed, `/llms.txt` or the API description.
@@ -37,7 +39,8 @@ use tocsin_core::probe::AssertionVerdict;
 use tocsin_core::status::{CheckKind, CheckResult, CheckState};
 use tocsin_engine::MISSED_PING;
 use tocsin_store::{
-    ComponentScope, HistoryPage, Newest, Order, Projects, ResultFilter, ResultSlice, TimelineQuery,
+    Checks, ComponentScope, HistoryPage, Newest, Order, Projects, ResultFilter, ResultSlice,
+    TimelineQuery,
 };
 
 use super::identity::Operator;
@@ -49,8 +52,9 @@ use super::uptime::{self, Bar, Tallies};
 use crate::http::auth::Viewer;
 use crate::http::{AppState, now, status};
 
-/// The event stream the open page listens to.
-const EVENTS: &str = "/api/v1/events";
+/// The event stream the open page listens to: the board's own, since
+/// `/api/v1/events` leaves out every check on no component.
+const EVENTS: &str = "/internal/events";
 
 /// The sparkline's window: the last 24 hours, in half-hour slices.
 const SPARK_SLICES: i64 = 48;
@@ -82,16 +86,26 @@ pub fn router() -> Router<AppState> {
         .route("/internal/fragments/board", get(board_fragment))
         .route("/internal/checks/{id}", get(check))
         .route("/internal/checks/{id}/live", get(check_fragment))
+        .route(EVENTS, get(events))
         .layer(axum::middleware::map_response(private))
 }
 
 /// Keeps every response, a refusal included, out of shared caches and
-/// search indexes.
+/// search indexes. The event stream keeps `no-transform`, so no proxy
+/// holds its events back to compress them.
 async fn private(mut response: Response) -> Response {
     let headers = response.headers_mut();
+    let streamed = headers
+        .get(header::CACHE_CONTROL)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("no-transform"));
     headers.insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-store"),
+        HeaderValue::from_static(if streamed {
+            "private, no-store, no-transform"
+        } else {
+            "private, no-store"
+        }),
     );
     headers.insert("x-robots-tag", HeaderValue::from_static("noindex"));
     response
@@ -254,6 +268,12 @@ async fn board(State(state): State<AppState>, operator: Operator) -> Result<Resp
         sections,
     };
     Ok(page::render(StatusCode::OK, &page))
+}
+
+/// Every event, every check's included, for the board and check pages
+/// to refresh on.
+async fn events(State(state): State<AppState>, _operator: Operator) -> Response {
+    crate::http::events::stream(&state, Viewer::Trusted)
 }
 
 async fn board_fragment(
@@ -815,6 +835,7 @@ async fn detail(state: &AppState, id: &str) -> Result<Detail, HtmlError> {
         .store
         .timeline(TimelineQuery {
             visible: Projects::All,
+            shown: Checks::All,
             since,
             after: None,
             order: Order::NewestFirst,

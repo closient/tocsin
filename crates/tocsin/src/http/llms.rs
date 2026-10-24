@@ -100,7 +100,7 @@ async fn render(state: &AppState) -> Result<String, ApiError> {
 
 - [OpenAPI 3.1 document]({base}{OPENAPI_PATH}): every endpoint, parameter and schema
 - [Current status]({base}/api/v1/status.json): this page as JSON
-- [Checks]({base}/api/v1/checks): every check and heartbeat with its current health
+- [Checks]({base}/api/v1/checks): every check and heartbeat on a component above, with its current health
 - [API reference]({DOCS_URL}): endpoints, tokens and the `tocsin` CLI
 
 ## Feeds

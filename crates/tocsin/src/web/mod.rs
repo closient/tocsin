@@ -41,6 +41,8 @@ mod feeds_tests;
 #[cfg(test)]
 mod internal_tests;
 #[cfg(test)]
+mod public_tests;
+#[cfg(test)]
 mod status_tests;
 #[cfg(test)]
 mod tests;

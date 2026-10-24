@@ -20,6 +20,7 @@ use utoipa_axum::routes;
 
 use super::auth::Viewer;
 use super::error::{ApiError, ErrorBody};
+use super::public;
 use super::releases::visible_projects;
 use super::{AppState, now};
 
@@ -76,7 +77,8 @@ pub struct Window<'a> {
 
 /// Outages, incidents and deploys, oldest first, read in one snapshot.
 /// Ties on time order by kind (outage, incident, deploy, release), then id.
-/// Without a `status:read` token only public projects' deploys appear.
+/// Without a `status:read` token only public projects' deploys appear,
+/// and only outages of checks and heartbeats on a public component.
 #[utoipa::path(
     get,
     path = "/api/v1/timeline",
@@ -159,6 +161,7 @@ pub async fn read(
         .store
         .timeline(TimelineQuery {
             visible: visible_projects(&state.config, viewer),
+            shown: public::shown(&state.config, viewer),
             since,
             after,
             order,

@@ -21,6 +21,7 @@ pub mod incidents;
 pub mod llms;
 pub mod metrics;
 pub mod openapi;
+pub mod public;
 pub mod releases;
 pub mod status;
 pub mod timeline;

@@ -204,8 +204,8 @@ struct ValidateInput {
 
 #[tool_router(router = tool_router)]
 impl Server {
-    /// The status now: overall, every component and check, and the open
-    /// incidents. Start here to find what is down.
+    /// The status now: overall, every component, and the open incidents.
+    /// Start here to find what is down.
     #[tool(name = "get_status")]
     async fn get_status(&self, extensions: Extensions) -> CallToolResult {
         match &self.backend {
@@ -223,7 +223,8 @@ impl Server {
     }
 
     /// Outages open at any time in a window, newest first: what went down
-    /// and since when.
+    /// and since when. Outages of checks on no component need the
+    /// `status:read` scope.
     #[tool(name = "list_outages")]
     async fn list_outages(
         &self,
@@ -234,9 +235,10 @@ impl Server {
         match &self.backend {
             Backend::Local(state) => local(
                 async {
-                    caller(&extensions)?;
+                    let viewer = caller(&extensions)?.viewer();
                     history::outages(
                         state,
+                        viewer,
                         OutageParams {
                             since: input.since,
                             before: input.before,
@@ -329,8 +331,8 @@ impl Server {
     }
 
     /// Outages, incidents and deploys, oldest first: what changed just
-    /// before something broke. Non-public projects' deploys need the
-    /// `status:read` scope.
+    /// before something broke. Non-public projects' deploys, and outages of
+    /// checks on no component, need the `status:read` scope.
     #[tool(name = "get_timeline")]
     async fn get_timeline(
         &self,

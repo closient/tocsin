@@ -24,6 +24,8 @@ fn variable(name: &str) -> Option<String> {
         "TOKEN_C" => Some("another-token-secret".to_owned()),
         "HTTPS_URL" => Some("https://user:HTTPS-SECRET@mail.example.com".to_owned()),
         "WEBHOOK_SECRET" => Some("SIGNING-SECRET".to_owned()),
+        "SLACK_CLIENT_ID" => Some("1234.5678".to_owned()),
+        "SLACK_CLIENT_SECRET" => Some("CLIENT-SECRET-VALUE".to_owned()),
         _ => None,
     }
 }
@@ -165,7 +167,9 @@ notifiers = ["ops-slack", "ops-email"]
         .slack
         .as_ref()
         .expect("slack")
-        .webhook_url;
+        .webhook_url
+        .as_ref()
+        .expect("webhook_url");
     assert_eq!(
         webhook.expose(),
         "https://hooks.slack.com/services/T0/B0/SECRET-VALUE"
@@ -340,6 +344,65 @@ fn email_notifiers_need_sender_settings() {
             "server.toml:1:1: `[server.email]` needs `smtp_url` because notifier `mail` sends email",
         ]
     );
+}
+
+const SLACK: &str =
+    "[slack]\nclient_id = \"${ENV:SLACK_CLIENT_ID}\"\nclient_secret = \"${ENV:SLACK_CLIENT_SECRET}\"\n";
+const ADMIN: &str = "[server]\npublic_url = \"https://status.example.com\"\n[server.auth]\nmode = \"trusted_header\"\ntrusted_proxies = [\"10.0.0.0/8\"]\n";
+
+#[test]
+fn slack_needs_an_https_page_and_someone_to_connect() {
+    let config = run(&[("server.toml", ADMIN), ("slack.toml", SLACK)]).expect("valid");
+    let slack = config.slack.as_ref().expect("[slack]");
+    assert_eq!(slack.client_id.expose(), "1234.5678");
+    assert_eq!(slack.client_secret.expose(), "CLIENT-SECRET-VALUE");
+    let shown = serde_json::to_string(&config).expect("serializes");
+    assert!(!shown.contains("CLIENT-SECRET-VALUE"), "{shown}");
+    assert!(shown.contains("${ENV:SLACK_CLIENT_SECRET}"), "{shown}");
+
+    assert_eq!(
+        errors(&[("slack.toml", SLACK)]),
+        [
+            "slack.toml:1:1: `[slack]` needs `[server] public_url`: Slack sends people back to it after they approve",
+            "slack.toml:1:1: `[slack]` has no one to connect a channel: it needs the admin page or `[subscribers]`",
+        ]
+    );
+    let plain = ADMIN.replace("https://", "http://");
+    assert_eq!(
+        errors(&[("server.toml", &plain), ("slack.toml", SLACK)]),
+        ["server.toml:2:14: `[slack]` needs an `https` `public_url`: Slack sends people back only to https addresses"]
+    );
+    let long = format!("{SLACK}app_name = \"{}\"\n", "a".repeat(36));
+    assert_eq!(
+        errors(&[("server.toml", ADMIN), ("slack.toml", &long)]),
+        ["slack.toml:4:12: `app_name` must be 1 to 35 characters, as Slack requires; this one is 36"]
+    );
+    let pasted = SLACK.replace("${ENV:SLACK_CLIENT_SECRET}", "CLIENT-SECRET-PASTED");
+    let diagnostic = only_error(&[("server.toml", ADMIN), ("slack.toml", &pasted)]);
+    assert_eq!(diagnostic.location().as_deref(), Some("slack.toml:3:17"));
+    assert!(!diagnostic.to_string().contains("CLIENT-SECRET-PASTED"));
+}
+
+#[test]
+fn a_slack_notifier_names_a_connection_or_a_webhook_not_both() {
+    let notifier = |settings: &str| {
+        format!("[[notifier]]\nid = \"ops\"\ntype = \"slack\"\n[notifier.slack]\n{settings}")
+    };
+    let config = run(&[("notify.toml", &notifier("connection = \"ops-alerts\"\n"))])
+        .expect("a connection needs no [slack] to be named");
+    let slack = config.notifiers[0].slack.as_ref().expect("slack");
+    assert_eq!(slack.connection.as_ref().map(Id::as_str), Some("ops-alerts"));
+    assert!(slack.webhook_url.is_none());
+    for settings in [
+        "",
+        "connection = \"ops-alerts\"\nwebhook_url = \"${ENV:SLACK_WEBHOOK_URL}\"\n",
+    ] {
+        assert_eq!(
+            errors(&[("notify.toml", &notifier(settings))]),
+            ["notify.toml:4:1: `[notifier.slack]` needs `webhook_url` or `connection`, not both"],
+            "{settings}"
+        );
+    }
 }
 
 #[test]

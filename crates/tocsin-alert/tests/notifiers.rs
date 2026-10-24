@@ -15,12 +15,14 @@ use tocsin_alert::notifiers::discord::Discord;
 use tocsin_alert::notifiers::email::Email;
 use tocsin_alert::notifiers::ntfy::Ntfy;
 use tocsin_alert::notifiers::pushover::{Priorities, Pushover};
-use tocsin_alert::notifiers::slack::Slack;
+use tocsin_alert::notifiers::slack::{Slack, SlackConnection};
 use tocsin_alert::notifiers::telegram::Telegram;
 use tocsin_alert::notifiers::webhook::{self, SIGNATURE_HEADER, TIMESTAMP_HEADER, Webhook};
-use tocsin_alert::{Alert, AlertEvent, Notifier};
+use tocsin_alert::{Alert, AlertEvent, Notifier, SlackHooks};
 use tocsin_core::Health;
-use tocsin_store::SubjectKind;
+use tocsin_store::{
+    NewSlackConnection, Preferences, SlackHook, SlackPurpose, Store, SubjectKind, WebhookUrl,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -477,6 +479,104 @@ async fn a_failure_is_classified_and_never_repeats_the_secret_url() {
     let error = slack.send(&alert(AlertEvent::Fire)).await.unwrap_err();
     assert!(!error.permanent);
     assert!(!error.message.contains("hook-secret"), "{}", error.message);
+}
+
+/// A store holding operator connection `name` to `url`, in a folder kept
+/// alive by the returned guard.
+async fn connected(name: &str, url: String) -> (tempfile::TempDir, std::sync::Arc<Store>) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join(tocsin_store::DB_FILE)).unwrap();
+    store
+        .connect_slack(NewSlackConnection {
+            purpose: SlackPurpose::Operator,
+            name: Some(name.to_owned()),
+            webhook_url: WebhookUrl::new(url),
+            channel: "#ops-alerts".to_owned(),
+            channel_id: Some("C0".to_owned()),
+            team: "Acme".to_owned(),
+            team_id: Some("T0".to_owned()),
+            configuration_url: None,
+            created_by: Some("admin@acme.example".to_owned()),
+            manage_secret: None,
+            preferences: Preferences::default(),
+            now_ms: STARTED,
+        })
+        .await
+        .unwrap();
+    (dir, std::sync::Arc::new(store))
+}
+
+#[tokio::test]
+async fn a_slack_connection_posts_the_fire_and_its_resolve_to_its_webhook() {
+    let (base, mut requests) = accepting().await;
+    let (_dir, store) = connected("ops-alerts", format!("{base}/services/T0/B0/connected")).await;
+    let hooks: std::sync::Arc<dyn SlackHooks> = store;
+    let slack = SlackConnection::new(client(), "ops-alerts".to_owned(), hooks);
+    fire_then_resolve(&slack).await;
+    let (fire, resolve) = two(&mut requests).await;
+    assert_eq!(fire.path, "/services/T0/B0/connected");
+    assert!(fire.json()["text"].as_str().unwrap().starts_with(":rotating_light:"));
+    assert!(
+        resolve.json()["text"]
+            .as_str()
+            .unwrap()
+            .starts_with(":white_check_mark:")
+    );
+    assert!(fire.json()["blocks"][0]["text"]["text"].as_str().unwrap().contains(IDENTITY_LINE));
+    assert!(resolve.json()["blocks"][0]["text"]["text"].as_str().unwrap().contains(IDENTITY_LINE));
+}
+
+#[tokio::test]
+async fn a_slack_connection_not_connected_fails_loudly_and_permanently() {
+    let (base, mut requests) = accepting().await;
+    let (_dir, store) = connected("ops-alerts", format!("{base}/services/T0/B0/connected")).await;
+    let slack = SlackConnection::new(client(), "other".to_owned(), store);
+    let error = slack.send(&alert(AlertEvent::Fire)).await.unwrap_err();
+    assert!(error.permanent);
+    assert_eq!(
+        error.message,
+        "no Slack connection `other`; connect it on the admin page"
+    );
+    assert!(requests.try_recv().is_err(), "nothing was posted");
+}
+
+#[tokio::test]
+async fn slack_revoking_a_connection_marks_it_dead_and_stops_posting() {
+    let (base, mut requests) = mock(StatusCode::NOT_FOUND, "channel_not_found").await;
+    let (_dir, store) = connected("ops-alerts", format!("{base}/services/T0/B0/revoked")).await;
+    let slack = SlackConnection::new(client(), "ops-alerts".to_owned(), store.clone());
+    let error = slack.send(&alert(AlertEvent::Fire)).await.unwrap_err();
+    assert!(error.permanent);
+    assert!(!error.message.contains("revoked\"") && !error.message.contains("/services/"), "{}", error.message);
+    assert_eq!(
+        error.message,
+        "Slack revoked connection `ops-alerts` (channel_not_found); reconnect it on the admin page"
+    );
+    requests.recv().await.unwrap();
+    assert_eq!(
+        store.slack_hook("ops-alerts".to_owned()).await.unwrap(),
+        SlackHook::Dead {
+            reason: "channel_not_found".to_owned()
+        }
+    );
+    // The resolve is not posted to a dead webhook, and says why.
+    let error = slack.send(&alert(AlertEvent::Resolve)).await.unwrap_err();
+    assert!(error.permanent);
+    assert!(error.message.contains("is dead (channel_not_found)"), "{}", error.message);
+    assert!(requests.try_recv().is_err(), "nothing more was posted");
+
+    // A failure that is not a revocation leaves the connection alone.
+    let (base, mut requests) = mock(StatusCode::BAD_REQUEST, "invalid_payload").await;
+    let (_dir, store) = connected("ops-alerts", format!("{base}/services/T0/B0/payload")).await;
+    let slack = SlackConnection::new(client(), "ops-alerts".to_owned(), store.clone());
+    let error = slack.send(&alert(AlertEvent::Fire)).await.unwrap_err();
+    requests.recv().await.unwrap();
+    assert!(error.permanent);
+    assert!(error.message.starts_with("HTTP 400"), "{}", error.message);
+    assert!(matches!(
+        store.slack_hook("ops-alerts".to_owned()).await.unwrap(),
+        SlackHook::Live { .. }
+    ));
 }
 
 /// A minimal SMTP server: every message it accepts, raw.

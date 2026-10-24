@@ -159,6 +159,15 @@ impl Redactor {
     ///
     /// The status is not a success.
     pub async fn check(&self, response: reqwest::Response) -> Result<String, SendError> {
+        let (status, retry_after, body) = Redactor::read(response).await;
+        self.judge(status, retry_after, &body)
+    }
+
+    /// A response's status, its `Retry-After` (for a 429 or 503) and its
+    /// body, for [`Redactor::judge`].
+    pub async fn read(
+        response: reqwest::Response,
+    ) -> (reqwest::StatusCode, Option<Duration>, String) {
         let status = response.status();
         let retry_after = if status == reqwest::StatusCode::TOO_MANY_REQUESTS
             || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
@@ -172,8 +181,22 @@ impl Redactor {
             None
         };
         let body = response.text().await.unwrap_or_default();
+        (status, retry_after, body)
+    }
+
+    /// [`Redactor::check`], given what [`Redactor::read`] read.
+    ///
+    /// # Errors
+    ///
+    /// The status is not a success.
+    pub fn judge(
+        &self,
+        status: reqwest::StatusCode,
+        retry_after: Option<Duration>,
+        body: &str,
+    ) -> Result<String, SendError> {
         if status.is_success() {
-            return Ok(body);
+            return Ok(body.to_owned());
         }
         let snippet: String = body.chars().take(200).collect();
         let message = self.redact(&format!("HTTP {status}: {}", snippet.trim()));

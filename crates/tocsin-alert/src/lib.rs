@@ -23,6 +23,7 @@ pub use history::AlertingHistory;
 pub use mail::{Mailer, Outgoing};
 pub use metrics::AlertMetrics;
 pub use notifier::{HTTP_TIMEOUT, Notifier, Redactor, SendError};
+pub use notifiers::slack::SlackHooks;
 pub use notifiers::{Notifiers, build, build_all};
 pub use route::Router;
 pub use worker::{Alerter, Backoff, Jitter, WorkerSettings};

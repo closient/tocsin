@@ -15,7 +15,7 @@ This file is the decision record from the 2026-10-22 plan review, and it is cano
 
 * **Language:** Rust.
 * **Deployment:** one binary, plus a config folder and a data folder.
-* **Topology:** single node first. A central reporting node or federation (nodes behind a firewall or DMZ reporting out, or nodes sharing data with each other) comes later.
+* **Topology:** single node first. A central reporting node or federation (nodes behind a firewall or DMZ reporting out, or nodes sharing data with each other) comes later; the proposed design, push to upstreams, is [docs/design/federation.md](docs/design/federation.md).
 * **Storage:** SQLite.
 * **Configuration:** files only. The format is open as long as agents can write it and it can be verified (see the defaults below for the format chosen).
 * **No Terraform provider.**
@@ -52,7 +52,7 @@ This file is the decision record from the 2026-10-22 plan review, and it is cano
   * Every write path uses a bearer token declared in config, whose secret comes from an environment variable.
 * **Proxy auth:** tocsin verifies the `Cf-Access-Jwt-Assertion` token against the Cloudflare Access team's public keys (JWKS) and audience. It never trusts the email header on its own. Other proxies (oauth2-proxy, Tailscale) can use a generic trusted-header mode, which is off unless explicitly enabled.
 * **Email:** the From and Reply-To addresses are required settings, and validation rejects any `noreply` address. Every email tocsin sends must be one a person can answer, matching Closient's own rule.
-* **Federation groundwork, from day one:** every result carries a `node_id`, and results are append-only.
+* **Federation groundwork, from day one:** every result carries a `node_id`, and results are append-only. Federation merges rows by their single writer, the origin node ([docs/design/federation.md](docs/design/federation.md#merging-results-and-outages-without-conflicts)).
 * **Operator alerts:** Slack, Pushover, email, ntfy, Discord, Telegram and a generic webhook, plus posting to Alertmanager. Every alert has a matching "resolved" message with the same identity, so no alert is fire-only.
 * **Subscriber channels (v0.2):** email with double opt-in, Slack by signing in (below), plus RSS/Atom feeds for incidents and releases.
 * **Agent surfaces:**
@@ -113,9 +113,9 @@ Why not one shared app: a shared app needs a server that every tocsin's sign-in 
 
 ## Milestones
 
-* **v0.1 — Monitor, page and releases.** Enough to retire Gatus at Closient. UptimeFlare stays as the outside watchdog for the tocsin node, because a single node cannot report its own death.
+* **v0.1 — Monitor, page and releases.** Enough to retire Gatus at Closient. UptimeFlare stays as the outside watchdog for the tocsin node, because a single node cannot report its own death. It can go once a second node in a separate failure domain watches this one ([docs/design/federation.md](docs/design/federation.md#nodes-watching-each-other)).
 * **v0.2 — Subscribers and MCP.**
-* **Federation.** Design first, then build.
+* **Federation.** Design first, then build. Design: [docs/design/federation.md](docs/design/federation.md) (TOC-55).
 
 ## Repo
 

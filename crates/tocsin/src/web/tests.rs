@@ -1079,6 +1079,7 @@ async fn the_resolve_form_starts_from_wording_for_the_kind() {
                 message: "Planned.".into(),
                 scheduled_start: scheduled.map(|(start, _)| start),
                 scheduled_end: scheduled.map(|(_, end)| end),
+                notify: true,
             },
             Actor::person(ALICE),
         )
@@ -1187,6 +1188,7 @@ async fn script_in_a_title_or_body_never_renders_live() {
             ),
             scheduled_start: None,
             scheduled_end: None,
+            notify: true,
         },
         Actor::person("<b>mallory</b>@example.com"),
     )

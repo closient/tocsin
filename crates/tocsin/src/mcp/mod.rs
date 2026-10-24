@@ -179,6 +179,15 @@ struct UpdateInput {
     status: IncidentStatus,
     /// Markdown. Not empty.
     message: String,
+    /// Whether subscribers (email and Slack) hear about the update. `false`
+    /// posts it quietly, for a typo fix or a minor note. Default `true`.
+    #[serde(default = "notify_by_default")]
+    #[schemars(default = "notify_by_default")]
+    notify: bool,
+}
+
+fn notify_by_default() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -430,7 +439,8 @@ impl Server {
     }
 
     /// Open an incident, or announce maintenance with `kind` set to
-    /// `maintenance`. Needs the `incident` scope.
+    /// `maintenance`. Subscribers hear about it unless `notify` is `false`.
+    /// Needs the `incident` scope.
     #[tool(name = "create_incident")]
     async fn create_incident(
         &self,
@@ -449,8 +459,8 @@ impl Server {
         }
     }
 
-    /// Post an update to an incident, moving it to a new status. Needs the
-    /// `incident` scope.
+    /// Post an update to an incident, moving it to a new status. Subscribers
+    /// hear about it unless `notify` is `false`. Needs the `incident` scope.
     #[tool(name = "update_incident")]
     async fn update_incident(
         &self,
@@ -460,7 +470,7 @@ impl Server {
         let update = NewUpdate {
             status: input.status,
             message: input.message,
-            notify: true,
+            notify: input.notify,
         };
         match &self.backend {
             Backend::Local(state) => local(

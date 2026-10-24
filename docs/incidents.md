@@ -69,7 +69,7 @@ served at `GET /api/v1/openapi.json` and committed as
 |---|---|---|---|
 | `GET /api/v1/incidents?limit=&before=` | none | | 200, `{incidents, next_before}` |
 | `GET /api/v1/incidents/{id}` | none | | 200, the incident |
-| `POST /api/v1/incidents` | `incident` | `{kind, title, impact, components, status, message, scheduled_start, scheduled_end}` | 201, the incident, with `Location` |
+| `POST /api/v1/incidents` | `incident` | `{kind, title, impact, components, status, message, scheduled_start, scheduled_end, notify}` | 201, the incident, with `Location` |
 | `POST /api/v1/incidents/{id}/updates` | `incident` | `{status, message, notify}` | 201, the incident |
 | `PATCH /api/v1/incidents/{id}` | `incident` | any of `{title, impact, components, scheduled_start, scheduled_end}` | 200, the incident |
 
@@ -79,6 +79,7 @@ served at `GET /api/v1/openapi.json` and committed as
 - **Create** needs `title` and `message`; `kind` defaults to `incident`,
   `impact` to `none`, `components` to none, and `status` to the kind's first
   status. Maintenance needs `scheduled_start` and `scheduled_end`.
+  `"notify": false` (default `true`) opens it without emailing subscribers.
 - **Update** appends to the timeline and moves `status`. The status must
   belong to the incident's kind. With [email subscribers](subscribers.md)
   on, each new incident and update is emailed to the subscribers of its
@@ -145,6 +146,7 @@ export TOCSIN_URL=https://status.example.com TOCSIN_TOKEN=...
 
 tocsin incident new --title "API errors" --impact major \
   --component api --component web --message "Looking into elevated errors."
+tocsin incident new --title "Typo test" --message "Ignore." --quiet  # no email
 tocsin incident update 7 --status identified --message "A bad deploy; rolling back."
 tocsin incident update 7 --status identified --message "Fixed a typo." --quiet  # no email
 tocsin incident edit 7 --title "API errors in eu-west" --component api

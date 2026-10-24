@@ -75,6 +75,8 @@ struct Row {
 struct CreateForm {
     title: String,
     message: String,
+    /// The switch was unticked; the default form has it ticked.
+    quiet: bool,
     errors: Vec<FieldError>,
 }
 
@@ -138,6 +140,8 @@ struct IncidentPage {
     resolve: Option<Resolve>,
     message: String,
     errors: Vec<FieldError>,
+    /// Whether subscribers exist to be told, so the form offers the switch.
+    can_notify: bool,
 }
 
 #[derive(Deserialize)]
@@ -235,6 +239,7 @@ async fn create(
     let form = CreateForm {
         title: fields.text("title"),
         message: fields.text("message"),
+        quiet: !wants_notify(&fields),
         errors: Vec::new(),
     };
     if errors.is_empty() {
@@ -247,6 +252,7 @@ async fn create(
             message: form.message.clone(),
             scheduled_start: None,
             scheduled_end: None,
+            notify: !form.quiet,
         };
         match incidents::open(&state, new, admin.actor()).await {
             Ok(incident) => {
@@ -307,7 +313,7 @@ async fn update(
         let update = NewUpdate {
             status,
             message: message.clone(),
-            notify: true,
+            notify: wants_notify(&fields),
         };
         match incidents::append(&state, id, update, admin.actor()).await {
             Ok(_) => return Ok(Redirect::to(&format!("/admin/incidents/{id}")).into_response()),
@@ -326,6 +332,14 @@ async fn update(
         StatusCode::UNPROCESSABLE_ENTITY,
     )
     .await
+}
+
+/// Whether the update form asks to tell subscribers. An unchecked checkbox
+/// sends nothing, so the form also sends `notify_shown`: with it, a missing
+/// `notify` means the box was unchecked; without it (a hand-made post, an
+/// older page) the default holds and subscribers hear.
+fn wants_notify(fields: &Fields) -> bool {
+    fields.get("notify_shown").is_none() || fields.get("notify").is_some()
 }
 
 async fn incident_page(
@@ -366,6 +380,7 @@ async fn incident_page(
         resolve,
         message,
         errors,
+        can_notify: state.subscribers.is_some(),
         incident,
     };
     Ok(render(status, &page))

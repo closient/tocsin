@@ -377,6 +377,15 @@ pub struct NewIncident {
     /// incident.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_end: Option<Timestamp>,
+    /// Whether subscribers hear about it. `false` opens it quietly. It
+    /// changes nothing else.
+    #[serde(
+        default = "notify_by_default",
+        skip_serializing_if = "is_notify_default"
+    )]
+    #[schema(default = true)]
+    #[schemars(default = "notify_by_default")]
+    pub notify: bool,
 }
 
 fn default_kind() -> IncidentKind {
@@ -763,6 +772,7 @@ mod tests {
             message: "Looking into it.".into(),
             scheduled_start: None,
             scheduled_end: None,
+            notify: true,
         }
     }
 

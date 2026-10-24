@@ -36,6 +36,10 @@
   <label>Message <span class="hint">Markdown</span>
     <textarea name="message" rows="4" required>{{ message }}</textarea>
   </label>
+{%- if can_notify %}
+  <input type="hidden" name="notify_shown" value="1">
+  <label class="check"><input type="checkbox" name="notify" value="1" checked> Notify subscribers <span class="hint">Untick for a typo fix or a minor note</span></label>
+  {%- endif %}
   <div class="actions"><button type="submit">Post update</button></div>
 </form>
 
@@ -47,6 +51,10 @@
   <label>Closing message <span class="hint">Markdown</span>
     <textarea name="message" rows="3" required>{{ resolve.message }}</textarea>
   </label>
+{%- if can_notify %}
+  <input type="hidden" name="notify_shown" value="1">
+  <label class="check"><input type="checkbox" name="notify" value="1" checked> Notify subscribers <span class="hint">Untick for a typo fix or a minor note</span></label>
+  {%- endif %}
   <div class="actions"><button type="submit" class="secondary">Mark {{ resolve.status }}</button></div>
 </form>
 {%- endif %}

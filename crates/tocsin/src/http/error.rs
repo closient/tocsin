@@ -16,8 +16,9 @@ use utoipa::ToSchema;
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ErrorBody {
     /// Stable machine-readable code: `unauthorized`, `forbidden`,
-    /// `not_found`, `method_not_allowed`, `bad_request`, `too_large`, `invalid`,
-    /// `too_many_requests`, `unavailable` or `internal`.
+    /// `not_found`, `method_not_allowed`, `conflict`, `bad_request`,
+    /// `too_large`, `invalid`, `too_many_requests`, `unavailable` or
+    /// `internal`.
     pub error: &'static str,
     /// What went wrong, for a person.
     pub message: String,
@@ -70,6 +71,12 @@ impl ApiError {
             "method_not_allowed",
             "this route does not take that method",
         )
+    }
+
+    /// 409: the request suits a different state of the resource, such as
+    /// publishing an incident that is already published.
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "conflict", message)
     }
 
     /// 400: a body or query that is not even well-formed.
@@ -144,6 +151,9 @@ impl From<tocsin_store::Error> for ApiError {
     fn from(error: tocsin_store::Error) -> Self {
         match error {
             tocsin_store::Error::Invalid(fields) => ApiError::invalid(fields),
+            published @ tocsin_store::Error::Published(_) => {
+                ApiError::conflict(published.to_string())
+            }
             other => ApiError::internal(&other),
         }
     }

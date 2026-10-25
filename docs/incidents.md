@@ -6,6 +6,9 @@ through the HTTP API, by hand with `tocsin incident` and
 `tocsin maintenance`, or by any tool that holds a token. Monitors never open
 incidents on their own.
 
+An incident can start as a [draft](#drafts): visible to operators only, and
+told to nobody, until a person publishes it.
+
 ## The model
 
 | Field | |
@@ -19,6 +22,7 @@ incidents on their own.
 | `scheduled_start`, `scheduled_end` | Maintenance only, and required for it; the end is after the start. |
 | `resolved_at` | When it first reached `resolved` (incident) or `completed` (maintenance); cleared if an update reopens it. |
 | `created_at`, `created_by` | When and by whom it was opened. |
+| `published_at`, `published_by` | When and by whom it went public; both `null` while it is a [draft](#drafts). An incident created published has the creation's time and author. |
 | `updated_at`, `updated_by` | The last update or edit, and who sent it. |
 | `updates` | The timeline, oldest first. |
 
@@ -42,9 +46,60 @@ RFC 3339 offset and stores UTC.
 How the tables store this, and how edits are audited, is in
 [`storage.md`](storage.md#incident-incident_component-incident_update-and-incident_edit).
 
+## Drafts
+
+A draft is an incident nobody outside has seen. An agent or a person writes
+it, the people who run the service read it on the
+[internal board](status-page.md) and the [admin page](admin.md), and one of
+them publishes it when it says the right thing. Until then:
+
+- It is **not public**. The status page, its fragments and incident pages,
+  `status.json`, the incidents and timeline API without a `status:read`
+  token, the Atom feeds, the event stream, `llms.txt` and the Markdown
+  export all leave it out; `GET /api/v1/incidents/{id}` and
+  `/incidents/{id}` answer 404 for it. A `status:read` token sees it, with
+  `published_at: null`.
+- It **tells nobody**. Creating it, updating it or editing it sends no
+  email and no Slack post, whatever `notify` says.
+- It **is a real incident otherwise**: updates append to its timeline,
+  edits change it, and its status moves, so the draft a person publishes
+  is already the whole story.
+- It does not change any component's status, so the page's banner and
+  the engine's notices ignore it.
+
+**Publishing** stamps `published_at` and `published_by`, emits
+`incident_published`, and tells subscribers once, with the newest update's
+message, exactly as a new incident would. From then on it is an ordinary
+incident. Publishing twice is 409. `"notify": false` publishes it without
+telling anyone.
+
+**Discarding** deletes a draft and its timeline. A published incident cannot
+be discarded (409); resolve it instead.
+
+| Where | Create as a draft | Publish | Discard |
+|---|---|---|---|
+| HTTP | `POST /api/v1/incidents` with `"draft": true` | `POST /api/v1/incidents/{id}/publish` | `DELETE /api/v1/incidents/{id}` |
+| CLI | `tocsin incident new --draft` | `tocsin incident publish <id>` | `tocsin incident discard <id>` |
+| MCP | `create_incident` (drafts by default) | none, on purpose | `discard_incident` |
+| Admin | "Save as draft" on the new-incident form | Publish on the incident's page | Discard on the incident's page |
+| Internal board | | Publish beside each draft | Discard beside each draft |
+
+Drafts are listed at the top of the internal board and marked on the admin
+page with who wrote them.
+
 ## Tokens
 
-Writes need a bearer token whose `[[token]]` entry has the `incident` scope:
+Writes need a bearer token whose `[[token]]` entry has one of two scopes:
+
+| Scope | May |
+|---|---|
+| `incident` | Everything: create published or as a draft, update, edit, publish and discard. |
+| `incident:draft` | Create drafts, and update, edit and discard drafts. Publishing, creating with `"draft": false`, and any write to a published incident are 403. |
+
+Give an agent `incident:draft`, so what it writes waits for a person. An
+`incident:draft` token's incident is a draft when `draft` is left out; an
+`incident` token's is published, except over MCP, which drafts unless
+`draft: false` is passed.
 
 ```toml
 [[token]]
@@ -67,11 +122,13 @@ served at `GET /api/v1/openapi.json` and committed as
 
 | Method and path | Token | Body | Success |
 |---|---|---|---|
-| `GET /api/v1/incidents?limit=&before=` | none | | 200, `{incidents, next_before}` |
-| `GET /api/v1/incidents/{id}` | none | | 200, the incident |
-| `POST /api/v1/incidents` | `incident` | `{kind, title, impact, components, status, message, scheduled_start, scheduled_end, notify}` | 201, the incident, with `Location` |
-| `POST /api/v1/incidents/{id}/updates` | `incident` | `{status, message, notify}` | 201, the incident |
-| `PATCH /api/v1/incidents/{id}` | `incident` | any of `{title, impact, components, scheduled_start, scheduled_end}` | 200, the incident |
+| `GET /api/v1/incidents?limit=&before=` | none; `status:read` adds drafts | | 200, `{incidents, next_before}` |
+| `GET /api/v1/incidents/{id}` | none; `status:read` for a draft | | 200, the incident |
+| `POST /api/v1/incidents` | `incident` or `incident:draft` | `{kind, title, impact, components, status, message, scheduled_start, scheduled_end, notify, draft}` | 201, the incident, with `Location` |
+| `POST /api/v1/incidents/{id}/updates` | `incident`, or `incident:draft` on a draft | `{status, message, notify}` | 201, the incident |
+| `PATCH /api/v1/incidents/{id}` | `incident`, or `incident:draft` on a draft | any of `{title, impact, components, scheduled_start, scheduled_end}` | 200, the incident |
+| `POST /api/v1/incidents/{id}/publish` | `incident` | `{notify}`, or no body | 200, the incident |
+| `DELETE /api/v1/incidents/{id}` | `incident` or `incident:draft` | none | 200, the discarded draft |
 
 - **List** returns newest first. `limit` is 1 to 100 (default 20).
   `next_before` is set when more incidents follow; pass it as `before` for
@@ -80,11 +137,16 @@ served at `GET /api/v1/openapi.json` and committed as
   `impact` to `none`, `components` to none, and `status` to the kind's first
   status. Maintenance needs `scheduled_start` and `scheduled_end`.
   `"notify": false` (default `true`) opens it without emailing subscribers.
+  `"draft": true` makes it a [draft](#drafts); left out, it follows the
+  token's scope.
 - **Update** appends to the timeline and moves `status`. The status must
   belong to the incident's kind. With [email subscribers](subscribers.md)
   on, each new incident and update is emailed to the subscribers of its
   components; `"notify": false` (default `true`) posts an update without
-  emailing it, for a typo fix or a minor note.
+  emailing it, for a typo fix or a minor note. An update to a draft is
+  never sent.
+- **Publish** and **discard** act on a draft only; on a published incident
+  they are 409.
 - **Edit** changes only the fields it names; `components` replaces the whole
   set (`[]` clears it). It adds nothing to the timeline. A schedule on an
   incident, or one that ends before it starts, is refused.
@@ -107,8 +169,9 @@ Every error, including an unknown route (404) or method (405), is JSON:
 |---|---|---|
 | 400 | `bad_request` | The body is not JSON, or has trailing data. |
 | 401 | `unauthorized` | No bearer token, or one no `[[token]]` has. Carries `WWW-Authenticate: Bearer`. |
-| 403 | `forbidden` | The token lacks the `incident` scope. The message names the token id. |
-| 404 | `not_found` | No incident with that id, or no such route. |
+| 403 | `forbidden` | The token lacks the scope the write needs; an `incident:draft` token publishing or writing to a published incident. The message names the token id. |
+| 404 | `not_found` | No incident with that id (or a draft, to a caller without `status:read`), or no such route. |
+| 409 | `conflict` | Publishing an incident already published, or discarding one. |
 | 405 | `method_not_allowed` | The route exists; the method does not. |
 | 413 | `too_large` | The body is over 2 MiB (2,097,152 bytes). |
 | 415 | `bad_request` | The body is not sent as JSON. |
@@ -122,8 +185,11 @@ token learns nothing about the body rules.
 
 Every successful write emits one event on the server's internal event bus,
 after its transaction commits: `incident_created`, `incident_updated` (an
-update was appended) or `incident_edited`, each carrying the incident as the
-API returns it. Refused writes emit nothing. The engine publishes
+update was appended), `incident_edited`, `incident_published` or
+`incident_discarded`, each carrying the incident as the API returns it.
+Refused writes emit nothing. An event about a draft reaches only the
+internal board's stream and `status:read` readers; the public stream first
+hears of a draft when it is published. The engine publishes
 `check_changed` and `component_changed` on the same bus, and rereads
 incidents on every incident event, so a posted incident moves its
 components at once; see [engine.md](engine.md#events).
@@ -136,7 +202,7 @@ remote.
 | Setting | Flag | Environment |
 |---|---|---|
 | Server base URL | `--url` | `TOCSIN_URL` |
-| Bearer token (writes only) | `--token` | `TOCSIN_TOKEN` |
+| Bearer token (writes, and reading drafts) | `--token` | `TOCSIN_TOKEN` |
 
 The flag wins over the variable. Prefer the variable for the token, so it
 stays out of shell history and process listings.
@@ -147,6 +213,9 @@ export TOCSIN_URL=https://status.example.com TOCSIN_TOKEN=...
 tocsin incident new --title "API errors" --impact major \
   --component api --component web --message "Looking into elevated errors."
 tocsin incident new --title "Typo test" --message "Ignore." --quiet  # no email
+tocsin incident new --title "API errors" --message "Looking into it." --draft
+tocsin incident publish 9 [--quiet]
+tocsin incident discard 10
 tocsin incident update 7 --status identified --message "A bad deploy; rolling back."
 tocsin incident update 7 --status identified --message "Fixed a typo." --quiet  # no email
 tocsin incident edit 7 --title "API errors in eu-west" --component api
@@ -164,7 +233,7 @@ tocsin incident export --all --format md --out notes/
 ```
 
 With `--json`, stdout is exactly one JSON document: the incident for `new`,
-`update`, `edit`, `show` and `schedule`; `{incidents, next_before}` for
+`update`, `edit`, `show`, `publish`, `discard` and `schedule`; `{incidents, next_before}` for
 `list`; `{id, format, markdown}` for a printed export; and
 `{format, files: [{id, path}]}` when `--out` writes files. Logs go to stderr.
 
@@ -211,5 +280,6 @@ Fixed.
 ```
 
 `scheduled_start` and `scheduled_end` appear for maintenance, and
-`resolved_at` once it is over. Authors are written `kind:id`. Edits do not
+`resolved_at` once it is over. The export reads without a token, so a draft
+is never exported: `--all` skips it and `export <id>` is a 404. Authors are written `kind:id`. Edits do not
 appear in the export; the `incident_edit` table keeps them.

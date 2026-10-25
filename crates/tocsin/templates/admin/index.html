@@ -12,10 +12,11 @@
   <li>
     <a class="item-title" href="/admin/incidents/{{ incident.id }}">{{ incident.title }}</a>
     <div class="meta">
+      {%- if incident.draft %}<span class="badge draft">draft</span> {% endif %}
       <span class="badge {{ incident.status }}">{{ incident.status }}</span>
       <span class="badge {{ incident.impact }}">{{ incident.impact }}</span>
       {%- if incident.kind != "incident" %} <span class="badge">{{ incident.kind }}</span>{% endif %}
-      <span class="muted">#{{ incident.id }} · {{ incident.created_at }}{% if !incident.over %} · open{% endif %}</span>
+      <span class="muted">#{{ incident.id }} · {{ incident.created_at }}{% if incident.draft %} · by {{ incident.created_by }}{% endif %}{% if !incident.over %} · open{% endif %}</span>
     </div>
   </li>
   {%- endfor %}
@@ -66,9 +67,10 @@
   <label>Message <span class="hint">Markdown</span>
     <textarea name="message" rows="5" required>{{ form.message }}</textarea>
   </label>
+  <label class="check"><input type="checkbox" name="draft" value="1"{% if form.draft %} checked{% endif %}> Save as draft <span class="hint">Only signed-in people see it until someone publishes it</span></label>
   {%- if subscribers %}
   <input type="hidden" name="notify_shown" value="1">
-  <label class="check"><input type="checkbox" name="notify" value="1"{% if !form.quiet %} checked{% endif %}> Notify subscribers <span class="hint">Untick to open it quietly</span></label>
+  <label class="check"><input type="checkbox" name="notify" value="1"{% if !form.quiet %} checked{% endif %}> Notify subscribers <span class="hint">Untick to open it quietly; a draft notifies when published</span></label>
   {%- endif %}
   <div class="actions"><button type="submit">Open incident</button></div>
 </form>

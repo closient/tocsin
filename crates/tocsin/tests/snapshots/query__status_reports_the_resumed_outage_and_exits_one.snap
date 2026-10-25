@@ -35,6 +35,11 @@ expression: document
       "id": 1,
       "impact": "major",
       "kind": "incident",
+      "published_at": "[time]",
+      "published_by": {
+        "id": "oncall",
+        "kind": "token"
+      },
       "resolved_at": null,
       "scheduled_end": null,
       "scheduled_start": null,

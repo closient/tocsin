@@ -20,6 +20,7 @@ use tower::ServiceExt;
 
 use super::status::PAGE_CACHE;
 use super::status_tests::{PUBLIC_PROJECT, Site, site};
+use crate::http::auth::IncidentWriter;
 use crate::http::{self, AppState, incidents, now, releases};
 
 const ATOM: &str = "http://www.w3.org/2005/Atom";
@@ -418,7 +419,7 @@ async fn an_entry_keeps_its_id_through_updates_edits_and_new_configuration() {
             message: "Found the bad deploy.".to_owned(),
             notify: true,
         },
-        Actor::person("alice@example.com"),
+        &IncidentWriter::publishing(Actor::person("alice@example.com")),
     )
     .await
     .unwrap();
@@ -438,6 +439,7 @@ async fn an_entry_keeps_its_id_through_updates_edits_and_new_configuration() {
                 title: Some("Elevated API error rate".to_owned()),
                 ..IncidentEdit::default()
             },
+            false,
             Actor::person("alice@example.com"),
             Timestamp::from_millis(now().as_millis() + 60_000),
         )
@@ -479,8 +481,9 @@ async fn text_is_escaped_once_and_reads_back_exactly() {
             scheduled_start: None,
             scheduled_end: None,
             notify: true,
+            draft: None,
         },
-        Actor::person("alice@example.com"),
+        &IncidentWriter::publishing(Actor::person("alice@example.com")),
     )
     .await
     .unwrap();

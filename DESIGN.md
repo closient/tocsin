@@ -19,7 +19,7 @@ This file is the decision record from the 2026-10-22 plan review, and it is cano
 * **Storage:** SQLite.
 * **Configuration:** files only. The format is open as long as agents can write it and it can be verified (see the defaults below for the format chosen).
 * **No Terraform provider.**
-* **Incidents are data, not configuration.** They are stored in SQLite and written through `tocsin incident ...`, an authenticated write API, or a small admin page. They can be exported to markdown. Outages tocsin detects itself are recorded automatically. Scheduled maintenance follows the same rule: it is a kind of incident, not configuration.
+* **Incidents are data, not configuration.** They are stored in SQLite and written through `tocsin incident ...`, an authenticated write API, or a small admin page. They can be exported to markdown. Outages tocsin detects itself are recorded automatically. An incident can start as a draft, internal and silent until a person publishes it; a machine token with `incident:draft` writes only drafts, so an agent never puts words in front of the public or subscribers on its own (TOC-93). Scheduled maintenance follows the same rule: it is a kind of incident, not configuration.
 * **Releases are push only.** CI posts the version, notes and deploy time. tocsin never polls GitHub, so there is no GitHub auth to manage.
 * **Checks:** HTTP, TLS certificates, TCP and other standard network protocols, plus push heartbeats (for example, webhooks arriving).
 * **Status page:** components, incidents, a 90-day uptime bar and live updates.

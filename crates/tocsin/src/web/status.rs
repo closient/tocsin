@@ -42,7 +42,7 @@ use tocsin_core::config::{Component, Config, Group};
 use tocsin_core::incident::{Incident, IncidentKind, IncidentStatus, Timestamp};
 use tocsin_core::state::ComponentStatus;
 use tocsin_core::status::ComponentState;
-use tocsin_store::{Day, Order};
+use tocsin_store::{Day, Drafts, Order};
 
 use super::assets;
 use super::feeds;
@@ -617,7 +617,7 @@ fn card(config: &Config, zone: &TimeZone, incident: &Incident) -> Card {
 async fn recently_resolved(state: &AppState, zone: &TimeZone) -> Result<Vec<Card>, HtmlError> {
     Ok(state
         .store
-        .incidents(None, RECENT_SCAN)
+        .incidents(Drafts::Exclude, None, RECENT_SCAN)
         .await
         .map_err(|error| HtmlError::internal(&error))?
         .iter()
@@ -757,7 +757,7 @@ async fn fragment(
         Fragment::Incidents => {
             let active = state
                 .store
-                .unresolved_incidents()
+                .unresolved_incidents(Drafts::Exclude)
                 .await
                 .map_err(|error| HtmlError::internal(&error))?
                 .iter()
@@ -789,6 +789,7 @@ async fn incident(
         .incident(id)
         .await
         .map_err(|error| HtmlError::internal(&error))?
+        .filter(|incident| !incident.is_draft())
         .ok_or_else(HtmlError::not_found)?;
     let config = &state.config;
     let zone = zone(config);
@@ -834,7 +835,7 @@ async fn history(
     let zone = zone(config);
     let mut incidents = state
         .store
-        .incidents(before, HISTORY_PAGE + 1)
+        .incidents(Drafts::Exclude, before, HISTORY_PAGE + 1)
         .await
         .map_err(|error| HtmlError::internal(&error))?;
     let more = incidents.len() > HISTORY_PAGE as usize;

@@ -74,7 +74,9 @@ pub fn incident_opened(config: &Config, base: &str, incident: &Incident) -> Text
     };
     let mut body = format!("{what}: {}\n", incident.title);
     describe(&mut body, config, incident);
-    if let Some(update) = incident.updates.first() {
+    // The newest update: a draft edited before it was published opens
+    // with where it stands now.
+    if let Some(update) = incident.updates.iter().max_by_key(|update| update.id) {
         let _ = write!(body, "\n{}\n", update.message.trim());
     }
     let _ = write!(body, "\nFollow it at {base}/incidents/{}\n", incident.id);

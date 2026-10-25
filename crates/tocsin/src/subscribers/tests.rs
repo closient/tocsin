@@ -30,6 +30,8 @@ const ONCALL: &str = "oncall-secret-0123456789";
 const DEPLOYS: &str = "deploy-secret-0123456789";
 const OPERATOR: &str = "operator-secret-0123456789";
 const READER: &str = "reader-secret-0123456789";
+/// An `incident:draft` token, as an agent holds.
+const DRAFTER: &str = "drafter-secret-0123456789";
 /// Where Turnstile is asked when it is not on: nothing listens.
 const NO_TURNSTILE: &str = "http://127.0.0.1:9/";
 
@@ -56,6 +58,7 @@ fn config(subscribers: &str) -> Config {
          [[token]]\nid = \"oncall\"\nsecret = \"${{ENV:ONCALL_TOKEN}}\"\nscopes = [\"incident\"]\n\n\
          [[token]]\nid = \"deploys\"\nsecret = \"${{ENV:DEPLOY_TOKEN}}\"\nscopes = [\"release\"]\n\n\
          [[token]]\nid = \"reader\"\nsecret = \"${{ENV:READER_TOKEN}}\"\nscopes = [\"status:read\"]\n\n\
+         [[token]]\nid = \"drafter\"\nsecret = \"${{ENV:DRAFTER_TOKEN}}\"\nscopes = [\"incident:draft\"]\n\n\
          {admin_token}"
     );
     let variable = |name: &str| match name {
@@ -64,6 +67,7 @@ fn config(subscribers: &str) -> Config {
         "DEPLOY_TOKEN" => Some(DEPLOYS.to_owned()),
         "OPERATOR_TOKEN" => Some(OPERATOR.to_owned()),
         "READER_TOKEN" => Some(READER.to_owned()),
+        "DRAFTER_TOKEN" => Some(DRAFTER.to_owned()),
         "TURNSTILE_SECRET" => Some("turnstile-secret".to_owned()),
         "SLACK_CLIENT_ID" => Some(slack::CLIENT_ID.to_owned()),
         "SLACK_CLIENT_SECRET" => Some(slack::CLIENT_SECRET.to_owned()),
@@ -1213,6 +1217,164 @@ async fn every_subscription_page_passes_the_structural_audit() {
             "{uri}"
         );
     }
+}
+
+/// An `incident:draft` token writes and discards drafts, and nothing it
+/// does reaches the public or a subscriber; publishing, or touching a
+/// published incident, is refused.
+#[tokio::test]
+async fn a_drafting_token_drafts_but_never_publishes() {
+    let site = site();
+    site.subscribe("reader@example.com").await;
+    let postman = site.postman();
+    let call = |method: Method, uri: String, token: &'static str, body: Option<Value>| {
+        let site = &site;
+        async move { site.api(method, &uri, Some(token), body, 1).await }
+    };
+    let incident =
+        |title: &str| json!({"title": title, "components": ["api"], "message": "Looking into it."});
+
+    // A drafting token's incident is a draft, unasked.
+    let (status, _, draft) = call(
+        Method::POST,
+        "/api/v1/incidents".into(),
+        DRAFTER,
+        Some(incident("Agent draft")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{draft}");
+    assert_eq!(draft["published_at"], Value::Null, "{draft}");
+    assert_eq!(draft["created_by"]["id"], "drafter", "{draft}");
+    let id = draft["id"].as_i64().unwrap();
+    // And it cannot ask for anything else.
+    let mut published = incident("Agent publish");
+    published["draft"] = json!(false);
+    let (status, _, refused) = call(
+        Method::POST,
+        "/api/v1/incidents".into(),
+        DRAFTER,
+        Some(published),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+
+    // It edits and updates its draft, but cannot publish it.
+    let (status, _, edited) = call(
+        Method::PATCH,
+        format!("/api/v1/incidents/{id}"),
+        DRAFTER,
+        Some(json!({"title": "Agent draft, edited"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    let (status, _, updated) = call(
+        Method::POST,
+        format!("/api/v1/incidents/{id}/updates"),
+        DRAFTER,
+        Some(json!({"status": "identified", "message": "Found it.", "notify": true})),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {updated}");
+    let publish = format!("/api/v1/incidents/{id}/publish");
+    let (status, _, refused) = call(Method::POST, publish.clone(), DRAFTER, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+
+    // Without `status:read` the draft is not there; with it, it is.
+    for (token, expected) in [
+        (None, StatusCode::NOT_FOUND),
+        (Some(READER), StatusCode::OK),
+    ] {
+        let (status, _, body) = site
+            .api(
+                Method::GET,
+                &format!("/api/v1/incidents/{id}"),
+                token,
+                None,
+                1,
+            )
+            .await;
+        assert_eq!(status, expected, "{token:?}: {body}");
+    }
+
+    // A person's token publishes it; the drafting token may then neither
+    // update, edit nor discard it.
+    let (status, _, published) = call(Method::POST, publish, ONCALL, None).await;
+    assert_eq!(status, StatusCode::OK, "{published}");
+    let (status, _, refused) = call(
+        Method::POST,
+        format!("/api/v1/incidents/{id}/updates"),
+        DRAFTER,
+        Some(json!({"status": "resolved", "message": "Fixed."})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    let (status, _, refused) = call(
+        Method::PATCH,
+        format!("/api/v1/incidents/{id}"),
+        DRAFTER,
+        Some(json!({"title": "Renamed"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    let (status, _, refused) = call(
+        Method::DELETE,
+        format!("/api/v1/incidents/{id}"),
+        DRAFTER,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+
+    // Only the publish told the subscriber anything.
+    site.settled().await;
+    postman.stop().await;
+    let sent = site.sent.to("reader@example.com");
+    let told: Vec<&str> = sent
+        .iter()
+        .map(subject)
+        .filter(|subject| !subject.starts_with("Confirm"))
+        .collect();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(told[0].contains("Agent draft, edited"), "{told:?}");
+}
+
+/// An `incident:draft` token discards a draft of its own, and then nobody
+/// can read it.
+#[tokio::test]
+async fn a_drafting_token_discards_its_draft() {
+    let site = site();
+    let call = |method: Method, uri: String, token: &'static str, body: Option<Value>| {
+        let site = &site;
+        async move { site.api(method, &uri, Some(token), body, 1).await }
+    };
+    let (status, _, second) = call(
+        Method::POST,
+        "/api/v1/incidents".into(),
+        DRAFTER,
+        Some(json!({"title": "Second thoughts", "components": ["api"], "message": "Hmm."})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{second}");
+    let second = second["id"].as_i64().unwrap();
+    let (status, _, discarded) = call(
+        Method::DELETE,
+        format!("/api/v1/incidents/{second}"),
+        DRAFTER,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{discarded}");
+    assert_eq!(discarded["title"], "Second thoughts", "{discarded}");
+    let (status, _, _) = site
+        .api(
+            Method::GET,
+            &format!("/api/v1/incidents/{second}"),
+            Some(READER),
+            None,
+            1,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 mod slack;

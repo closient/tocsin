@@ -328,8 +328,23 @@ pub struct Incident {
     pub updated_at: Timestamp,
     /// Who made the last change.
     pub updated_by: Actor,
+    /// When it was published: shown publicly and announced to subscribers.
+    /// `null` while it is a draft, which only trusted readers see.
+    #[serde(default)]
+    pub published_at: Option<Timestamp>,
+    /// Who published it; `null` while it is a draft.
+    #[serde(default)]
+    pub published_by: Option<Actor>,
     /// Every update, oldest first. The first is the opening message.
     pub updates: Vec<IncidentUpdate>,
+}
+
+impl Incident {
+    /// Whether it is still a draft: not yet published.
+    #[must_use]
+    pub fn is_draft(&self) -> bool {
+        self.published_at.is_none()
+    }
 }
 
 /// One entry in an incident's timeline. Updates are never changed.
@@ -386,6 +401,13 @@ pub struct NewIncident {
     #[schema(default = true)]
     #[schemars(default = "notify_by_default")]
     pub notify: bool,
+    /// `true` saves it as a draft: internal only, announced to nobody, until
+    /// a person publishes it. Left out, it is published when the caller may
+    /// publish (the `incident` scope, or a person) and a draft otherwise
+    /// (the `incident:draft` scope); the MCP tool always defaults to a
+    /// draft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<bool>,
 }
 
 fn default_kind() -> IncidentKind {
@@ -773,6 +795,7 @@ mod tests {
             scheduled_start: None,
             scheduled_end: None,
             notify: true,
+            draft: None,
         }
     }
 
@@ -988,7 +1011,9 @@ mod tests {
             created_at: at,
             created_by: actor.clone(),
             updated_at: at,
-            updated_by: actor,
+            updated_by: actor.clone(),
+            published_at: Some(at),
+            published_by: Some(actor),
             updates: Vec::new(),
         }
     }

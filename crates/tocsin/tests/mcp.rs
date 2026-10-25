@@ -70,19 +70,26 @@ scopes = ["incident"]
 id = "reader"
 secret = "${ENV:READER_TOKEN}"
 scopes = ["status:read"]
+
+[[token]]
+id = "drafter"
+secret = "${ENV:DRAFTER_TOKEN}"
+scopes = ["incident:draft"]
 "#;
 
 const AGENT: &str = "agent-secret-0123456789";
 const ONCALL: &str = "oncall-secret-0123456789";
 const READER: &str = "reader-secret-0123456789";
+const DRAFTER: &str = "drafter-secret-0123456789";
 
 const READY: &str = "waiting for SIGINT or SIGTERM";
 const MINUTE: i64 = 60_000;
 const DAY: i64 = 24 * 60 * MINUTE;
 
 /// Every tool `/mcp` lists; stdio adds `validate_config`.
-const TOOLS: [&str; 11] = [
+const TOOLS: [&str; 12] = [
     "create_incident",
+    "discard_incident",
     "explain_check",
     "get_check_history",
     "get_status",
@@ -130,6 +137,7 @@ impl Node {
             .env("AGENT_TOKEN", AGENT)
             .env("ONCALL_TOKEN", ONCALL)
             .env("READER_TOKEN", READER)
+            .env("DRAFTER_TOKEN", DRAFTER)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
@@ -420,6 +428,14 @@ async fn drives_every_tool(peer: &Peer<RoleClient>, node: &Node) {
     let id = opened["id"].as_i64().expect("an incident id");
     assert_eq!(opened["status"], "investigating");
     assert_eq!(opened["created_by"]["id"], "agent", "{opened}");
+    // An agent drafts unless told otherwise, even holding `incident`.
+    assert!(opened["published_at"].is_null(), "{opened}");
+    let public = http_client()
+        .get(format!("{}/api/v1/incidents/{id}", node.url()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(public.status(), reqwest::StatusCode::NOT_FOUND);
 
     let updated = ok(
         peer,
@@ -433,6 +449,17 @@ async fn drives_every_tool(peer: &Peer<RoleClient>, node: &Node) {
     let incidents = ok(peer, "list_incidents", json!({})).await;
     assert_eq!(incidents, node.rest(AGENT, "/api/v1/incidents").await);
     assert_eq!(incidents["incidents"][0]["id"], id);
+
+    let scratch = ok(
+        peer,
+        "create_incident",
+        json!({ "title": "Scratch", "message": "Never mind." }),
+    )
+    .await;
+    let discarded = ok(peer, "discard_incident", json!({ "id": scratch["id"] })).await;
+    assert_eq!(discarded["title"], "Scratch", "{discarded}");
+    let gone = refused(peer, "discard_incident", json!({ "id": scratch["id"] })).await;
+    assert!(gone.contains("no incident"), "{gone}");
 
     let published = ok(
         peer,
@@ -669,6 +696,71 @@ async fn write_tools_refuse_a_token_without_their_scope_over_stdio() {
         node.stdio(ONCALL).await,
     );
     writes_refuse_without_scope(&writer, &reader, &oncall).await;
+}
+
+/// An `incident:draft` token over MCP: drafts, updates and discards its
+/// own drafts, and is refused anything that would publish or touch a
+/// published incident.
+async fn drafts_only(drafter: &Peer<RoleClient>, writer: &Peer<RoleClient>) {
+    let draft = ok(
+        drafter,
+        "create_incident",
+        json!({ "title": "Agent draft", "message": "Looking into it." }),
+    )
+    .await;
+    assert!(draft["published_at"].is_null(), "{draft}");
+    assert_eq!(draft["created_by"]["id"], "drafter", "{draft}");
+    let refusal = refused(
+        drafter,
+        "create_incident",
+        json!({ "title": "Nope", "message": "Nope.", "draft": false }),
+    )
+    .await;
+    assert!(refusal.contains("`incident`"), "{refusal}");
+    let updated = ok(
+        drafter,
+        "update_incident",
+        json!({ "id": draft["id"], "status": "identified", "message": "Found it." }),
+    )
+    .await;
+    assert_eq!(updated["status"], "identified", "{updated}");
+    ok(drafter, "discard_incident", json!({ "id": draft["id"] })).await;
+
+    let published = ok(
+        writer,
+        "create_incident",
+        json!({ "title": "Live", "message": "Looking into it.", "draft": false }),
+    )
+    .await;
+    assert!(published["published_at"].is_string(), "{published}");
+    let refusal = refused(
+        drafter,
+        "update_incident",
+        json!({ "id": published["id"], "status": "resolved", "message": "Nope." }),
+    )
+    .await;
+    assert!(refusal.contains("`incident`"), "{refusal}");
+    let refusal = refused(
+        drafter,
+        "discard_incident",
+        json!({ "id": published["id"] }),
+    )
+    .await;
+    assert!(refusal.contains("published"), "{refusal}");
+}
+
+#[tokio::test]
+async fn a_drafting_token_only_drafts_over_http() {
+    let node = Node::start();
+    let (drafter, writer) = (node.http(DRAFTER).await, node.http(AGENT).await);
+    drafts_only(&drafter, &writer).await;
+}
+
+#[tokio::test]
+async fn a_drafting_token_only_drafts_over_stdio() {
+    let node = Node::start();
+    let (drafter, writer) = (node.stdio(DRAFTER).await, node.stdio(AGENT).await);
+    drafts_only(&drafter, &writer).await;
 }
 
 #[tokio::test]

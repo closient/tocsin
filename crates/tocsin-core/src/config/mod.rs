@@ -564,8 +564,15 @@ pub struct Token {
 pub enum TokenScope {
     /// Heartbeat pings.
     Heartbeat,
-    /// Incidents and maintenance.
+    /// Incidents and maintenance: open, update, edit, publish and discard
+    /// them. Includes everything `incident:draft` may do.
     Incident,
+    /// Draft incidents only: open an incident as a draft, and update, edit
+    /// or discard a draft. Never publishes and never changes a published
+    /// incident, so whoever holds it (an AI seat, a script) cannot put
+    /// anything in front of the public or subscribers without a person.
+    #[serde(rename = "incident:draft")]
+    IncidentDraft,
     /// Releases and deploys.
     Release,
     /// Reading what is not public in the read API: non-public components,

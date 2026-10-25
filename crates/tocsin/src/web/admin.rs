@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `/admin/`: open incidents, post updates and resolve them from a phone.
+//! `/admin/`: open incidents, post updates and resolve them from a phone;
+//! publish or discard drafts.
 //!
-//! Writes go through [`crate::http::incidents::open`] and
-//! [`crate::http::incidents::append`], the same validation, storage and
-//! events as the JSON API; the author recorded is the signed-in person.
-//! Maintenance stays with the API and CLI, which take its schedule.
+//! Writes go through [`crate::http::incidents::open`],
+//! [`crate::http::incidents::append`], [`crate::http::incidents::publish`]
+//! and [`crate::http::incidents::discard`], the same validation, storage
+//! and events as the JSON API; the author recorded is the signed-in person,
+//! who may always publish. Maintenance stays with the API and CLI, which
+//! take its schedule.
 
 use std::str::FromStr;
 
@@ -20,12 +23,14 @@ use serde::Deserialize;
 use tocsin_core::incident::{
     FieldError, Impact, Incident, IncidentKind, IncidentStatus, NewIncident, NewUpdate,
 };
+use tocsin_store::Drafts;
 
 use super::form::Fields;
 use super::identity::{Admin, AdminForm};
 use super::markdown;
 use super::page::{HtmlError, Layout, render};
 use crate::http::AppState;
+use crate::http::auth::IncidentWriter;
 use crate::http::incidents;
 
 /// Incidents per page of the list.
@@ -50,6 +55,14 @@ pub fn router() -> Router<AppState> {
             "/admin/incidents/{id}/updates",
             get(to_incident).post(update),
         )
+        .route(
+            "/admin/incidents/{id}/publish",
+            get(to_incident).post(publish),
+        )
+        .route(
+            "/admin/incidents/{id}/discard",
+            get(to_incident).post(discard),
+        )
 }
 
 /// One option of a select or checkbox group.
@@ -68,6 +81,9 @@ struct Row {
     impact: &'static str,
     created_at: String,
     over: bool,
+    /// Unpublished: shown here and on the internal board only.
+    draft: bool,
+    created_by: String,
 }
 
 /// What the create form holds when it comes back with errors.
@@ -77,6 +93,8 @@ struct CreateForm {
     message: String,
     /// The switch was unticked; the default form has it ticked.
     quiet: bool,
+    /// Save it as a draft rather than publish it.
+    draft: bool,
     errors: Vec<FieldError>,
 }
 
@@ -144,6 +162,14 @@ struct IncidentPage {
     can_notify: bool,
 }
 
+impl IncidentPage {
+    /// Whether an update to this incident can notify anyone: never while
+    /// it is a draft.
+    fn update_notifies(&self) -> bool {
+        self.can_notify && !self.incident.is_draft()
+    }
+}
+
 #[derive(Deserialize)]
 struct ListQuery {
     before: Option<i64>,
@@ -179,7 +205,7 @@ async fn index_page(
 ) -> Result<Response, HtmlError> {
     let mut incidents = state
         .store
-        .incidents(before, PAGE_SIZE + 1)
+        .incidents(Drafts::Include, before, PAGE_SIZE + 1)
         .await
         .map_err(|error| HtmlError::internal(&error))?;
     let more = incidents.len() > PAGE_SIZE as usize;
@@ -242,6 +268,7 @@ async fn create(
         title: fields.text("title"),
         message: fields.text("message"),
         quiet: !wants_notify(&fields),
+        draft: fields.get("draft").is_some(),
         errors: Vec::new(),
     };
     if errors.is_empty() {
@@ -255,8 +282,10 @@ async fn create(
             scheduled_start: None,
             scheduled_end: None,
             notify: !form.quiet,
+            draft: Some(form.draft),
         };
-        match incidents::open(&state, new, admin.actor()).await {
+        let writer = IncidentWriter::publishing(admin.actor());
+        match incidents::open(&state, new, &writer).await {
             Ok(incident) => {
                 return Ok(
                     Redirect::to(&format!("/admin/incidents/{}", incident.id)).into_response()
@@ -317,7 +346,8 @@ async fn update(
             message: message.clone(),
             notify: wants_notify(&fields),
         };
-        match incidents::append(&state, id, update, admin.actor()).await {
+        let writer = IncidentWriter::publishing(admin.actor());
+        match incidents::append(&state, id, update, &writer).await {
             Ok(_) => return Ok(Redirect::to(&format!("/admin/incidents/{id}")).into_response()),
             Err(error) if error.status() == StatusCode::UNPROCESSABLE_ENTITY => {
                 errors = error.fields().to_vec();
@@ -334,6 +364,43 @@ async fn update(
         StatusCode::UNPROCESSABLE_ENTITY,
     )
     .await
+}
+
+/// Publishes a draft, from its page here or the internal board, and
+/// returns to where the button was.
+async fn publish(
+    State(state): State<AppState>,
+    id: Result<Path<i64>, PathRejection>,
+    AdminForm { admin, fields }: AdminForm,
+) -> Result<Redirect, HtmlError> {
+    let id = id.map_err(|_| HtmlError::not_found())?.0;
+    incidents::publish(&state, id, admin.actor(), wants_notify(&fields)).await?;
+    Ok(Redirect::to(&back(
+        &fields,
+        &format!("/admin/incidents/{id}"),
+    )))
+}
+
+/// Deletes a draft, from its page here or the internal board, and returns
+/// to the list it was on.
+async fn discard(
+    State(state): State<AppState>,
+    id: Result<Path<i64>, PathRejection>,
+    AdminForm { admin, fields }: AdminForm,
+) -> Result<Redirect, HtmlError> {
+    let id = id.map_err(|_| HtmlError::not_found())?.0;
+    incidents::discard(&state, id, &admin.actor()).await?;
+    Ok(Redirect::to(&back(&fields, "/admin/")))
+}
+
+/// Where a publish or discard form returns to: the internal board when it
+/// was posted from there (`back=internal`), `otherwise` if not. Never a
+/// path the form names, so it cannot redirect off the site.
+fn back(fields: &Fields, otherwise: &str) -> String {
+    match fields.get("back") {
+        Some("internal") => "/internal/".to_owned(),
+        _ => otherwise.to_owned(),
+    }
 }
 
 /// Whether the update form asks to tell subscribers. An unchecked checkbox
@@ -397,6 +464,8 @@ fn row(incident: &Incident) -> Row {
         impact: incident.impact.as_str(),
         created_at: incident.created_at.to_string(),
         over: incident.status.is_terminal(),
+        draft: incident.is_draft(),
+        created_by: incident.created_by.to_string(),
     }
 }
 

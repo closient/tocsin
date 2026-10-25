@@ -354,6 +354,17 @@ it; `resolved_at` keeps the first resolution and clears if an update
 reopens the incident. Triggers refuse an `UPDATE` of `incident_update` or
 `incident_edit`. All four tables cascade with their incident.
 
+**Drafts** (migration 0011): `published_at`, `published_by_kind` and
+`published_by` are all `NULL` on a [draft](incidents.md#drafts) and all set
+once it is published; a `CHECK` keeps them together. The migration
+backfilled every existing incident as published by its creator at its
+creation, so none became a draft. A trigger refuses changing them once
+set, so an incident is published once and never goes back to being a
+draft. Every public read filters on `published_at IS NOT NULL`; a partial
+index on the drafts serves the internal board's list. Discarding a draft
+deletes its row, and its updates and edits cascade with it; a published
+incident is never deleted.
+
 ### `release`
 
 One release of a `[[project]]` to one environment, pushed by CI

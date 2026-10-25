@@ -18,13 +18,16 @@ errors and limits are the REST ones. Writes are recorded as the token's
 
 ## Setting it up
 
-Give the agent a token with the scopes it needs (see [Tools](#tools)):
+Give the agent a token with the scopes it needs (see [Tools](#tools)).
+`incident:draft` lets it draft, edit and discard incidents but never
+publish one, so a person reviews what it wrote before anyone is told
+(see [Drafts](incidents.md#drafts)):
 
 ```toml
 [[token]]
 id = "agent"
 secret = "${ENV:TOCSIN_AGENT_TOKEN}"
-scopes = ["status:read", "incident"]
+scopes = ["status:read", "incident:draft"]
 description = "Claude Code on the on-call laptop"
 ```
 
@@ -109,6 +112,12 @@ before it sends anything.
 
 ## Tools
 
+An agent's incident starts as a [draft](incidents.md#drafts): nobody
+outside sees it and nobody is told until a person publishes it from the
+internal board, the admin page, the API or the CLI. There is no publish
+tool. Give an agent's token `incident:draft` rather than `incident`, and
+it cannot publish at all.
+
 | Tool | Route | Scope | What it answers |
 |---|---|---|---|
 | `get_status` | `GET /api/v1/status.json` | any token | The page now: overall status, components and their health, open incidents. |
@@ -116,10 +125,11 @@ before it sends anything.
 | `get_check_history` | `GET /api/v1/checks/{id}/results` | `status:read` | One check's or heartbeat's raw results, newest first, with errors and assertion detail. |
 | `explain_check` | `GET /api/v1/checks/{id}/results?limit=1` | `status:read` | `{check_id, latest}`: the latest result in the past 365 days, or `null`. |
 | `get_timeline` | `GET /api/v1/timeline` | any token; `status:read` adds non-public projects and checks on no component | Outages, incidents and deploys, oldest first. |
-| `list_incidents` | `GET /api/v1/incidents` | any token | Incidents and maintenance, newest first. |
+| `list_incidents` | `GET /api/v1/incidents` | any token; `status:read` adds drafts | Incidents and maintenance, newest first. |
 | `list_releases` | `GET /api/v1/releases` | any token; `status:read` adds non-public projects | Releases, newest first. |
-| `create_incident` | `POST /api/v1/incidents` | `incident` | The new incident or maintenance. |
-| `update_incident` | `POST /api/v1/incidents/{id}/updates` | `incident` | The incident with the update appended. `notify: false` (default `true`) posts it without telling subscribers. |
+| `create_incident` | `POST /api/v1/incidents` | `incident` or `incident:draft` | The new incident or maintenance, as a [draft](incidents.md#drafts) unless `draft: false` is passed, which needs `incident`. |
+| `update_incident` | `POST /api/v1/incidents/{id}/updates` | `incident`, or `incident:draft` on a draft | The incident with the update appended. `notify: false` (default `true`) posts it without telling subscribers; an update to a draft tells nobody. |
+| `discard_incident` | `DELETE /api/v1/incidents/{id}` | `incident` or `incident:draft` | The discarded draft. A published incident is refused. |
 | `publish_release` | `POST /api/v1/releases` | `release` | The release, new or updated. |
 | `mark_deployed` | `POST /api/v1/releases/{project}/{version}/deployed` | `release` | The release with its deploy time. |
 | `validate_config` | none; `tocsin mcp` only | none | `tocsin config check --json` on a folder: `ok` and what it holds, or `ok: false` with every error. |

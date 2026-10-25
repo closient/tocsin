@@ -2,17 +2,17 @@
 
 //! Checks on no component stay off every public surface (TOC-69), and so
 //! does a component that is not public, with its group, its checks and
-//! their outages (TOC-92).
+//! their outages (TOC-92), and so do draft incidents (TOC-93).
 //!
 //! The routes come from the router itself, not from a list kept by hand:
 //! a route added without a line in [`ROUTES`] fails
 //! [`every_route_is_classified`]. Each public route is then read with no
 //! token and with a token lacking `status:read`, and must name none of the
 //! internal check, the internal heartbeat, the component that is not
-//! public, its group and its checks; the event stream and the MCP tools are
-//! read the same way. The internal board and a `status:read` token are the
-//! controls: they see them all, so an absence on a public surface is a
-//! filter at work and not a missing seed.
+//! public, its group and its checks, and the draft; the event stream and
+//! the MCP tools are read the same way. The internal board and a
+//! `status:read` token are the controls: they see them all, so an absence
+//! on a public surface is a filter at work and not a missing seed.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,13 +36,15 @@ use super::internal_tests::{
 };
 use super::status_tests::PUBLIC_PROJECT;
 use super::tests::{ALICE, OUTSIDER, PROXY, from, send};
+use crate::http::auth::IncidentWriter;
 use crate::http::events::Event;
 use crate::http::{self, OPENAPI_PATH, incidents, now, releases};
 
-/// What names the internal check and heartbeat, and the component that is
-/// not public: their ids, names and the checks' targets, the component's
-/// group, and a removed check whose outage recorded the component.
-const HIDDEN: [&str; 12] = [
+/// What names the internal check and heartbeat, the component that is
+/// not public and the draft incident: their ids, names and the checks'
+/// targets, the component's group, a removed check whose outage recorded
+/// the component, and the draft's title and message.
+const HIDDEN: [&str; 14] = [
     "backup-disk",
     "Backup disk",
     "nightly-dump",
@@ -55,7 +57,12 @@ const HIDDEN: [&str; 12] = [
     "vault-ping",
     "vault.internal.example.com",
     "vault-retired",
+    DRAFT,
+    "Not public yet.",
 ];
+
+/// The seeded draft incident's title.
+const DRAFT: &str = "Drafted trouble";
 
 /// A group whose one component is not public, with a check on it.
 const NOT_PUBLIC: &str = r#"
@@ -127,6 +134,12 @@ const ROUTES: &[(&str, Class, &[&str])] = &[
         ],
     ),
     ("/incidents/{id}", Class::Public, &["/incidents/{incident}"]),
+    // The draft's own page and record are not found.
+    (
+        "/incidents/{id}",
+        Class::Refused,
+        &["/incidents/{draft}", "/api/v1/incidents/{draft}"],
+    ),
     ("/releases", Class::Public, &["/releases"]),
     (
         "/releases/{project}/{version}",
@@ -212,6 +225,11 @@ const ROUTES: &[(&str, Class, &[&str])] = &[
         &["/api/v1/incidents/{incident}/updates"],
     ),
     (
+        "/api/v1/incidents/{id}/publish",
+        Class::Refused,
+        &["/api/v1/incidents/{draft}/publish"],
+    ),
+    (
         "/api/v1/releases/{project}/{version}/deployed",
         Class::Refused,
         &["/api/v1/releases/app/1.0.0/deployed"],
@@ -241,6 +259,16 @@ const ROUTES: &[(&str, Class, &[&str])] = &[
         "/admin/incidents/{id}/updates",
         Class::Redirect,
         &["/admin/incidents/{incident}/updates"],
+    ),
+    (
+        "/admin/incidents/{id}/publish",
+        Class::Redirect,
+        &["/admin/incidents/{draft}/publish"],
+    ),
+    (
+        "/admin/incidents/{id}/discard",
+        Class::Redirect,
+        &["/admin/incidents/{draft}/discard"],
     ),
     ("/admin/timeline", Class::Refused, &["/admin/timeline"]),
     ("/internal/", Class::Refused, &["/internal/"]),
@@ -290,8 +318,9 @@ fn served_routes(router: &axum::Router) -> Vec<String> {
 
 /// A board behind a trusted proxy with a public project, a component that
 /// is not public and a `status:read` token, seeded with results, outages
-/// of every check and of a removed one, an incident and a deployed
-/// release. Returns the incident's id.
+/// of every check and of a removed one, an incident, a draft incident on a
+/// public component and a deployed release. Returns the published
+/// incident's id.
 async fn seeded() -> (Board, String) {
     let config = config(&format!(
         "{TRUSTED_HEADER}{PUBLIC_PROJECT}{READER_TOKEN}{NOT_PUBLIC}"
@@ -334,8 +363,27 @@ async fn seeded() -> (Board, String) {
             scheduled_start: None,
             scheduled_end: None,
             notify: true,
+            draft: None,
         },
-        Actor::person(ALICE),
+        &IncidentWriter::publishing(Actor::person(ALICE)),
+    )
+    .await
+    .unwrap();
+    incidents::open(
+        &board.state,
+        NewIncident {
+            kind: IncidentKind::Incident,
+            title: DRAFT.to_owned(),
+            impact: Impact::Major,
+            components: vec!["api".to_owned()],
+            status: None,
+            message: "Not public yet.".to_owned(),
+            scheduled_start: None,
+            scheduled_end: None,
+            notify: true,
+            draft: Some(true),
+        },
+        &IncidentWriter::publishing(Actor::person(ALICE)),
     )
     .await
     .unwrap();
@@ -394,6 +442,7 @@ async fn every_route_is_classified() {
         .map(|(pattern, ..)| (*pattern).to_owned())
         .collect();
     classified.sort();
+    classified.dedup();
     assert_eq!(
         served, classified,
         "a route was added or removed: classify it in `ROUTES` (left: served, right: classified)"
@@ -403,6 +452,7 @@ async fn every_route_is_classified() {
 #[tokio::test]
 async fn no_anonymous_route_names_an_internal_check() {
     let (board, incident) = seeded().await;
+    let draft = draft_id(&board).await;
     for &(pattern, class, uris) in ROUTES {
         if matches!(class, Class::Stream | Class::Mcp) {
             continue;
@@ -410,6 +460,7 @@ async fn no_anonymous_route_names_an_internal_check() {
         for uri in uris {
             let uri = uri
                 .replace("{incident}", &incident)
+                .replace("{draft}", &draft)
                 .replace("{asset}", assets::url("tocsin.css"));
             // No token, and a token without `status:read`: both the public.
             for token in [None, Some(ONCALL)] {
@@ -476,7 +527,22 @@ async fn the_public_sees_the_public_check_and_a_reader_sees_both() {
 }
 
 #[tokio::test]
-async fn the_internal_board_shows_both() {
+async fn a_reader_sees_the_draft() {
+    let (board, _) = seeded().await;
+    let draft = draft_id(&board).await;
+    for uri in [
+        "/api/v1/incidents".to_owned(),
+        format!("/api/v1/incidents/{draft}"),
+        "/api/v1/timeline".to_owned(),
+    ] {
+        let (status, full) = read(&board, &uri, Some(READER)).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert!(full.contains(DRAFT), "{DRAFT} missing from {uri}: {full}");
+    }
+}
+
+#[tokio::test]
+async fn the_internal_board_shows_them_all() {
     let (board, _) = seeded().await;
     let page = board.page("/internal/").await;
     for shown in [
@@ -486,6 +552,7 @@ async fn the_internal_board_shows_both() {
         "Back office",
         "Vault hosts",
         "vault-ping",
+        DRAFT,
     ] {
         assert!(page.contains(shown), "{shown} missing from the board");
     }
@@ -578,6 +645,13 @@ async fn an_incident_may_not_name_a_component_that_is_not_public() {
         body.contains("components[1]") && body.contains("is not public"),
         "{body}"
     );
+}
+
+/// The seeded draft's id.
+async fn draft_id(board: &Board) -> String {
+    let drafts = board.state.store.draft_incidents().await.unwrap();
+    assert_eq!(drafts.len(), 1, "{drafts:?}");
+    drafts[0].id.to_string()
 }
 
 // --- The event streams ---------------------------------------------------

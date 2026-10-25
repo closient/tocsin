@@ -1941,7 +1941,12 @@
         },
         {
           "const": "incident",
-          "description": "Incidents and maintenance.",
+          "description": "Incidents and maintenance: open, update, edit, publish and discard\nthem. Includes everything `incident:draft` may do.",
+          "type": "string"
+        },
+        {
+          "const": "incident:draft",
+          "description": "Draft incidents only: open an incident as a draft, and update, edit\nor discard a draft. Never publishes and never changes a published\nincident, so whoever holds it (an AI seat, a script) cannot put\nanything in front of the public or subscribers without a person.",
           "type": "string"
         },
         {

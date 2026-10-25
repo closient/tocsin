@@ -11,7 +11,7 @@ use tocsin_core::incident::{
     Actor, ActorKind, Impact, IncidentEdit, IncidentKind, IncidentStatus, NewIncident, NewUpdate,
     Timestamp,
 };
-use tocsin_store::{Error, Store};
+use tocsin_store::{Drafts, Error, Store};
 
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -51,6 +51,7 @@ fn outage() -> NewIncident {
         scheduled_start: None,
         scheduled_end: None,
         notify: true,
+        draft: None,
     }
 }
 
@@ -65,6 +66,7 @@ fn maintenance() -> NewIncident {
         scheduled_start: Some(at(10_000)),
         scheduled_end: Some(at(20_000)),
         notify: true,
+        draft: None,
     }
 }
 
@@ -108,7 +110,7 @@ async fn updates_append_move_the_status_and_record_each_author() {
     };
     let resolved = fixture
         .store
-        .add_incident_update(opened.id, resolve.clone(), oncall.clone(), at(5000))
+        .add_incident_update(opened.id, resolve.clone(), false, oncall.clone(), at(5000))
         .await
         .unwrap()
         .unwrap();
@@ -122,7 +124,7 @@ async fn updates_append_move_the_status_and_record_each_author() {
     // A second resolving update keeps the first resolution time.
     let again = fixture
         .store
-        .add_incident_update(opened.id, resolve, oncall.clone(), at(6000))
+        .add_incident_update(opened.id, resolve, false, oncall.clone(), at(6000))
         .await
         .unwrap()
         .unwrap();
@@ -138,6 +140,7 @@ async fn updates_append_move_the_status_and_record_each_author() {
                 message: "Errors are back.".into(),
                 notify: true,
             },
+            false,
             oncall,
             at(7000),
         )
@@ -166,6 +169,7 @@ async fn an_update_status_must_suit_the_kind() {
                 message: "Done.".into(),
                 notify: true,
             },
+            false,
             Actor::token("ci"),
             at(2000),
         )
@@ -193,7 +197,7 @@ async fn edits_change_the_row_and_are_logged_with_their_author() {
     };
     let edited = fixture
         .store
-        .edit_incident(opened.id, edit, Actor::token("planner"), at(2000))
+        .edit_incident(opened.id, edit, false, Actor::token("planner"), at(2000))
         .await
         .unwrap()
         .unwrap();
@@ -222,7 +226,13 @@ async fn edits_change_the_row_and_are_logged_with_their_author() {
     };
     let error = fixture
         .store
-        .edit_incident(opened.id, backwards, Actor::token("planner"), at(3000))
+        .edit_incident(
+            opened.id,
+            backwards,
+            false,
+            Actor::token("planner"),
+            at(3000),
+        )
         .await
         .unwrap_err();
     assert!(matches!(error, Error::Invalid(_)), "{error}");
@@ -241,7 +251,7 @@ async fn unknown_ids_are_none() {
     assert_eq!(
         fixture
             .store
-            .add_incident_update(42, update, actor.clone(), at(1))
+            .add_incident_update(42, update, false, actor.clone(), at(1))
             .await
             .unwrap(),
         None
@@ -253,7 +263,7 @@ async fn unknown_ids_are_none() {
     assert_eq!(
         fixture
             .store
-            .edit_incident(42, edit, actor, at(1))
+            .edit_incident(42, edit, false, actor, at(1))
             .await
             .unwrap(),
         None
@@ -285,7 +295,7 @@ async fn open_incidents_leave_out_resolved_and_completed_ones() {
             notify: true,
         };
         store
-            .add_incident_update(id, update, ci.clone(), at(2000))
+            .add_incident_update(id, update, false, ci.clone(), at(2000))
             .await
             .unwrap()
             .unwrap();
@@ -317,10 +327,18 @@ async fn listing_is_newest_first_and_pages_by_id() {
             .await
             .unwrap();
     }
-    let first = fixture.store.incidents(None, 2).await.unwrap();
+    let first = fixture
+        .store
+        .incidents(Drafts::Include, None, 2)
+        .await
+        .unwrap();
     let ids: Vec<i64> = first.iter().map(|incident| incident.id).collect();
     assert_eq!(ids, [5, 4]);
-    let next = fixture.store.incidents(Some(4), 10).await.unwrap();
+    let next = fixture
+        .store
+        .incidents(Drafts::Include, Some(4), 10)
+        .await
+        .unwrap();
     let ids: Vec<i64> = next.iter().map(|incident| incident.id).collect();
     assert_eq!(ids, [3, 2, 1]);
     assert_eq!(next[0].updates.len(), 1);
@@ -405,4 +423,187 @@ async fn info_counts_the_incident_tables() {
     assert_eq!(count("incident_component"), Some(2));
     assert_eq!(count("incident_update"), Some(1));
     assert_eq!(count("incident_edit"), Some(0));
+}
+
+fn draft() -> NewIncident {
+    NewIncident {
+        draft: Some(true),
+        ..outage()
+    }
+}
+
+#[tokio::test]
+async fn an_incident_is_published_when_created_unless_a_draft() {
+    let fixture = open();
+    let ci = Actor::token("ci");
+    let published = fixture
+        .store
+        .create_incident(outage(), ci.clone(), at(1000))
+        .await
+        .unwrap();
+    assert_eq!(published.published_at, Some(at(1000)));
+    assert_eq!(published.published_by, Some(ci.clone()));
+    let drafted = fixture
+        .store
+        .create_incident(draft(), Actor::token("seat"), at(2000))
+        .await
+        .unwrap();
+    assert!(drafted.is_draft());
+    assert_eq!(drafted.published_by, None);
+}
+
+#[tokio::test]
+async fn a_draft_is_left_out_of_every_read_that_excludes_drafts() {
+    let fixture = open();
+    let store = &fixture.store;
+    let drafted = store
+        .create_incident(draft(), Actor::token("seat"), at(1000))
+        .await
+        .unwrap();
+    let ids = |incidents: Vec<tocsin_core::incident::Incident>| {
+        incidents
+            .iter()
+            .map(|incident| incident.id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        ids(store.incidents(Drafts::Exclude, None, 10).await.unwrap()),
+        [] as [i64; 0]
+    );
+    assert_eq!(
+        ids(store
+            .incidents_naming(Drafts::Exclude, "api", 10)
+            .await
+            .unwrap()),
+        [] as [i64; 0]
+    );
+    assert_eq!(
+        ids(store.unresolved_incidents(Drafts::Exclude).await.unwrap()),
+        [] as [i64; 0]
+    );
+    assert_eq!(store.open_incidents().await.unwrap(), []);
+    assert_eq!(
+        ids(store.incidents(Drafts::Include, None, 10).await.unwrap()),
+        [drafted.id]
+    );
+    assert_eq!(
+        ids(store
+            .incidents_naming(Drafts::Include, "api", 10)
+            .await
+            .unwrap()),
+        [drafted.id]
+    );
+    assert_eq!(
+        ids(store.unresolved_incidents(Drafts::Include).await.unwrap()),
+        [drafted.id]
+    );
+    assert_eq!(ids(store.draft_incidents().await.unwrap()), [drafted.id]);
+}
+
+#[tokio::test]
+async fn publishing_stamps_who_and_when_once() {
+    let fixture = open();
+    let store = &fixture.store;
+    let drafted = store
+        .create_incident(draft(), Actor::token("seat"), at(1000))
+        .await
+        .unwrap();
+    let person = Actor::person("ops@example.com");
+    let published = store
+        .publish_incident(drafted.id, person.clone(), at(5000))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(published.published_at, Some(at(5000)));
+    assert_eq!(published.published_by, Some(person.clone()));
+    assert_eq!(published.created_by, Actor::token("seat"));
+    assert_eq!(store.draft_incidents().await.unwrap(), []);
+    assert_eq!(store.open_incidents().await.unwrap().len(), 1);
+    let again = store.publish_incident(drafted.id, person, at(6000)).await;
+    assert!(
+        matches!(again, Err(Error::Published(id)) if id == drafted.id),
+        "{again:?}"
+    );
+    assert_eq!(
+        store
+            .publish_incident(999, Actor::token("ci"), at(1))
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn a_drafts_only_writer_changes_drafts_but_not_published_incidents() {
+    let fixture = open();
+    let store = &fixture.store;
+    let seat = Actor::token("seat");
+    let drafted = store
+        .create_incident(draft(), seat.clone(), at(1000))
+        .await
+        .unwrap();
+    let update = NewUpdate {
+        status: IncidentStatus::Identified,
+        message: "Found it.".into(),
+        notify: true,
+    };
+    let edit = IncidentEdit {
+        title: Some("API errors on login".into()),
+        ..IncidentEdit::default()
+    };
+    store
+        .add_incident_update(drafted.id, update.clone(), true, seat.clone(), at(2000))
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .edit_incident(drafted.id, edit.clone(), true, seat.clone(), at(2000))
+        .await
+        .unwrap()
+        .unwrap();
+    let published = store
+        .create_incident(outage(), Actor::token("ci"), at(1000))
+        .await
+        .unwrap();
+    let refused = store
+        .add_incident_update(published.id, update, true, seat.clone(), at(3000))
+        .await;
+    assert!(matches!(refused, Err(Error::Published(_))), "{refused:?}");
+    let refused = store
+        .edit_incident(published.id, edit, true, seat, at(3000))
+        .await;
+    assert!(matches!(refused, Err(Error::Published(_))), "{refused:?}");
+    assert_eq!(
+        store.incident(published.id).await.unwrap().unwrap(),
+        published
+    );
+}
+
+#[tokio::test]
+async fn a_draft_is_discarded_with_its_updates_and_a_published_incident_never_is() {
+    let fixture = open();
+    let store = &fixture.store;
+    let drafted = store
+        .create_incident(draft(), Actor::token("seat"), at(1000))
+        .await
+        .unwrap();
+    let discarded = store.discard_incident(drafted.id).await.unwrap();
+    assert_eq!(discarded, Some(drafted.clone()));
+    assert_eq!(store.incident(drafted.id).await.unwrap(), None);
+    let updates: i64 = raw(&fixture)
+        .query_row(
+            "SELECT count(*) FROM incident_update WHERE incident_id = ?1",
+            [drafted.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(updates, 0);
+    assert_eq!(store.discard_incident(drafted.id).await.unwrap(), None);
+    let published = store
+        .create_incident(outage(), Actor::token("ci"), at(1000))
+        .await
+        .unwrap();
+    let refused = store.discard_incident(published.id).await;
+    assert!(matches!(refused, Err(Error::Published(_))), "{refused:?}");
+    assert!(store.incident(published.id).await.unwrap().is_some());
 }

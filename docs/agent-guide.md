@@ -80,6 +80,12 @@ finds them all:
 - **Client commands are idempotent where it matters.** `release publish`,
   `release deployed` and `heartbeat ping` can be retried after a failure.
   `incident new` cannot: check `incident list --json` first.
+- **What an agent writes about an incident is a draft.** Pass `--draft` to
+  `incident new` (MCP's `create_incident` drafts by default) and leave
+  publishing to a person; a token with only `incident:draft` cannot
+  publish. A draft is invisible to the public and tells nobody, and
+  `incident discard <id>` removes one written by mistake. See
+  [incidents.md](incidents.md#drafts).
 - **`config show --json`** prints the merged configuration with secrets
   redacted, which is the safe way to show a person what tocsin sees.
 

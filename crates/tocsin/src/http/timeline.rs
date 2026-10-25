@@ -78,7 +78,8 @@ pub struct Window<'a> {
 /// Outages, incidents and deploys, oldest first, read in one snapshot.
 /// Ties on time order by kind (outage, incident, deploy, release), then id.
 /// Without a `status:read` token only public projects' deploys appear,
-/// and only outages of checks and heartbeats on a public component.
+/// and only outages of checks and heartbeats on a public component; a
+/// component that is not public answers as an unknown one.
 #[utoipa::path(
     get,
     path = "/api/v1/timeline",
@@ -119,9 +120,9 @@ pub fn default_since() -> Timestamp {
 ///
 /// # Errors
 ///
-/// 422 for an unknown component, a `since` more than [`MAX_WINDOW_MS`]
-/// ago, an `after` no page handed out, or a `limit` outside 1 to
-/// [`MAX_LIMIT`]; 500 if the store fails.
+/// 422 for an unknown component or one `viewer` may not see, a `since`
+/// more than [`MAX_WINDOW_MS`] ago, an `after` no page handed out, or a
+/// `limit` outside 1 to [`MAX_LIMIT`]; 500 if the store fails.
 pub async fn read(
     state: &AppState,
     viewer: Viewer,
@@ -144,7 +145,8 @@ pub async fn read(
         None => None,
     };
     let component = match component {
-        Some(id) if !state.knows_component(id) => {
+        // One the viewer may not see answers as if it were not there.
+        Some(id) if !public::shows_component(&state.config, viewer, id) => {
             errors.push(FieldError::new(
                 "component",
                 format!("no [[component]] has id {id:?}"),

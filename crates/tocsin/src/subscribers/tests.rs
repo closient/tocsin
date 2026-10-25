@@ -50,6 +50,7 @@ fn config(subscribers: &str) -> Config {
          {subscribers}\n\
          [[component]]\nid = \"api\"\nname = \"API\"\n\n\
          [[component]]\nid = \"web\"\nname = \"Web\"\n\n\
+         [[component]]\nid = \"vault\"\nname = \"Vault hosts\"\npublic = false\n\n\
          [[project]]\nid = \"api\"\nname = \"API server\"\ncomponents = [\"api\"]\n\n\
          [[project]]\nid = \"internal\"\nname = \"Internal tool\"\npublic = false\n\n\
          [[token]]\nid = \"oncall\"\nsecret = \"${{ENV:ONCALL_TOKEN}}\"\nscopes = [\"incident\"]\n\n\
@@ -737,6 +738,21 @@ async fn sign_up_refuses_bad_input_by_field() {
         .collect();
     assert_eq!(paths, ["email", "components[0]", "projects[0]"], "{body}");
 
+    // A component that is not public is as unknown as one that is not
+    // configured.
+    let (status, _, body) = site
+        .sign_up(
+            json!({"email": "someone@example.com", "components": ["vault"]}),
+            site.fresh_peer(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["fields"][0]["path"], "components[0]", "{body}");
+    assert_eq!(
+        body["fields"][0]["message"], "no public component `vault`",
+        "{body}"
+    );
+
     let (status, _, page) = site
         .post(
             "/subscribe",
@@ -807,6 +823,10 @@ async fn the_page_offers_a_plain_form_and_the_feeds() {
     for choice in ["value=\"api\"", "value=\"web\"", "API server"] {
         assert!(page.contains(choice), "{choice}: {page}");
     }
+    assert!(
+        !page.contains("Vault hosts") && !page.contains("value=\"vault\""),
+        "a component that is not public is offered: {page}"
+    );
     assert!(
         !page.contains("Internal tool"),
         "a private project is offered"

@@ -604,10 +604,10 @@ fn choose(
     let mut chosen_components = Vec::new();
     for (index, id) in components.iter().enumerate() {
         let id = id.trim();
-        if id != EVERY && !state.knows_component(id) {
+        if id != EVERY && !state.component_is_public(id) {
             errors.push(FieldError::new(
                 format!("components[{index}]"),
-                format!("no component `{id}`"),
+                format!("no public component `{id}`"),
             ));
         } else if !chosen_components.iter().any(|known| known == id) {
             chosen_components.push(id.to_owned());

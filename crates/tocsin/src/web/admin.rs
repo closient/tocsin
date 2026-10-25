@@ -207,10 +207,12 @@ async fn index_page(
             .filter(|value| value.allowed_for(IncidentKind::Incident) && !value.is_terminal())
             .map(|value| choice(value.as_str(), value.as_str(), *value == first_status))
             .collect(),
+        // An incident may name only what the status page shows.
         components: state
             .config
             .components
             .iter()
+            .filter(|component| state.component_is_public(component.id.as_str()))
             .map(|component| {
                 choice(
                     component.id.as_str(),

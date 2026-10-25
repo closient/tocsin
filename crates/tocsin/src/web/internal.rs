@@ -322,7 +322,7 @@ async fn sections(state: &AppState) -> Result<(Summary, Vec<Section>), HtmlError
     let mut cards = cards(state, &members).await?;
     let summary = summary(&members);
     let mut sections = Vec::new();
-    for (group, components) in ordered(config) {
+    for (group, components) in ordered(config, Viewer::Trusted) {
         let mut section = Section {
             name: group.map_or_else(
                 || "Components in no group".to_owned(),

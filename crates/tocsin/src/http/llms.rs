@@ -48,7 +48,8 @@ pub async fn get_llms_txt(
 
 /// The page's text.
 async fn render(state: &AppState) -> Result<String, ApiError> {
-    let document = status::document(state).await?;
+    // Public components only, whoever asks: the page is the same for all.
+    let document = status::document(state, Viewer::Public).await?;
     let base = state
         .config
         .server

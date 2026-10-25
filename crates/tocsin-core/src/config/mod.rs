@@ -399,6 +399,13 @@ pub struct Component {
     /// How the health of the component's checks combines into its own.
     #[serde(default)]
     pub rule: ComponentRule,
+    /// Whether the status page and the unauthenticated API show the
+    /// component. A non-public component, its checks and heartbeats, their
+    /// outages and its timeline are seen only with a `status:read` token
+    /// and on the internal board, under its group like any other. No
+    /// incident or maintenance may name one.
+    #[serde(default = "default_public")]
+    pub public: bool,
 }
 
 /// How a component's health is derived from the health of its checks.
@@ -561,10 +568,11 @@ pub enum TokenScope {
     Incident,
     /// Releases and deploys.
     Release,
-    /// Reading what is not public in the read API: checks and heartbeats
-    /// on no component, non-public projects' releases and deploys, check
-    /// targets, raw check results, and how the configuration last
-    /// reloaded. The internal board behind proxy auth reads the same.
+    /// Reading what is not public in the read API: non-public components,
+    /// checks and heartbeats on no component or a non-public one,
+    /// non-public projects' releases and deploys, check targets, raw check
+    /// results, and how the configuration last reloaded. The internal
+    /// board behind proxy auth reads the same.
     #[serde(rename = "status:read")]
     StatusRead,
     /// Listing, counting and removing email subscribers.

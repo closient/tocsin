@@ -120,6 +120,11 @@ impl AppState {
             .any(|project| project.id.as_str() == id)
     }
 
+    /// Whether `[[component]]` `id` is configured and public.
+    pub fn component_is_public(&self, id: &str) -> bool {
+        public::component_is_public(&self.config, id)
+    }
+
     /// Whether `[[project]]` `id` is configured and public.
     pub fn project_is_public(&self, id: &str) -> bool {
         self.config

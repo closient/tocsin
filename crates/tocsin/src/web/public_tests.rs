@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Checks on no component stay off every public surface (TOC-69).
+//! Checks on no component stay off every public surface (TOC-69), and so
+//! does a component that is not public, with its group, its checks and
+//! their outages (TOC-92).
 //!
 //! The routes come from the router itself, not from a list kept by hand:
 //! a route added without a line in [`ROUTES`] fails
 //! [`every_route_is_classified`]. Each public route is then read with no
-//! token and with a token lacking `status:read`, and must name neither the
-//! internal check nor the internal heartbeat; the event stream and the MCP
-//! tools are read the same way. The internal board and a `status:read`
-//! token are the controls: they see both, so an absence on a public
-//! surface is a filter at work and not a missing seed.
+//! token and with a token lacking `status:read`, and must name none of the
+//! internal check, the internal heartbeat, the component that is not
+//! public, its group and its checks; the event stream and the MCP tools are
+//! read the same way. The internal board and a `status:read` token are the
+//! controls: they see them all, so an absence on a public surface is a
+//! filter at work and not a missing seed.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -21,7 +25,8 @@ use serde_json::json;
 use tocsin_core::Health::{Down, Up};
 use tocsin_core::incident::{Actor, Impact, IncidentKind, NewIncident, Timestamp};
 use tocsin_core::release::NewRelease;
-use tocsin_engine::{CheckChange, EngineEvent, MemberKind};
+use tocsin_core::state::ComponentStatus;
+use tocsin_engine::{CheckChange, ComponentChange, ComponentSnapshot, EngineEvent, MemberKind};
 use tocsin_store::{NewOutage, SubjectKind};
 
 use super::assets;
@@ -32,17 +37,45 @@ use super::internal_tests::{
 use super::status_tests::PUBLIC_PROJECT;
 use super::tests::{ALICE, OUTSIDER, PROXY, from, send};
 use crate::http::events::Event;
-use crate::http::{OPENAPI_PATH, incidents, now, releases};
+use crate::http::{self, OPENAPI_PATH, incidents, now, releases};
 
-/// What names the internal check and heartbeat: their ids, names and the
-/// check's target.
-const HIDDEN: [&str; 5] = [
+/// What names the internal check and heartbeat, and the component that is
+/// not public: their ids, names and the checks' targets, the component's
+/// group, and a removed check whose outage recorded the component.
+const HIDDEN: [&str; 12] = [
     "backup-disk",
     "Backup disk",
     "nightly-dump",
     "Nightly dump",
     "backup.internal.example.com",
+    "back-office",
+    "Back office",
+    "vault-hosts",
+    "Vault hosts",
+    "vault-ping",
+    "vault.internal.example.com",
+    "vault-retired",
 ];
+
+/// A group whose one component is not public, with a check on it.
+const NOT_PUBLIC: &str = r#"
+[[group]]
+id = "back-office"
+name = "Back office"
+
+[[component]]
+id = "vault-hosts"
+name = "Vault hosts"
+group = "back-office"
+public = false
+
+[[check]]
+id = "vault-ping"
+component = "vault-hosts"
+type = "tcp"
+target = "vault.internal.example.com:22"
+interval = "1m"
+"#;
 
 /// [`CONFIG`](super::status_tests::CONFIG)'s check on the API component.
 const SHOWN: &str = "api-https";
@@ -255,11 +288,14 @@ fn served_routes(router: &axum::Router) -> Vec<String> {
     paths
 }
 
-/// A board behind a trusted proxy with a public project and a
-/// `status:read` token, seeded with results, outages of all three checks,
-/// an incident and a deployed release. Returns the incident's id.
+/// A board behind a trusted proxy with a public project, a component that
+/// is not public and a `status:read` token, seeded with results, outages
+/// of every check and of a removed one, an incident and a deployed
+/// release. Returns the incident's id.
 async fn seeded() -> (Board, String) {
-    let config = config(&format!("{TRUSTED_HEADER}{PUBLIC_PROJECT}{READER_TOKEN}"));
+    let config = config(&format!(
+        "{TRUSTED_HEADER}{PUBLIC_PROJECT}{READER_TOKEN}{NOT_PUBLIC}"
+    ));
     let admin = AdminAuth::from_config(&config).unwrap();
     let board = serve(config, admin);
     board.furnish().await;
@@ -268,6 +304,8 @@ async fn seeded() -> (Board, String) {
         (SHOWN, SubjectKind::Check, Some("api")),
         ("backup-disk", SubjectKind::Check, None),
         ("nightly-dump", SubjectKind::Heartbeat, None),
+        ("vault-ping", SubjectKind::Check, Some("vault-hosts")),
+        ("vault-retired", SubjectKind::Check, Some("vault-hosts")),
     ] {
         board
             .state
@@ -420,7 +458,15 @@ async fn the_public_sees_the_public_check_and_a_reader_sees_both() {
         }
         let (status, full) = read(&board, uri, Some(READER)).await;
         assert_eq!(status, StatusCode::OK, "{uri}");
-        for id in [SHOWN, "backup-disk", "nightly-dump"] {
+        let removed: &[&str] = if uri == "/api/v1/checks" {
+            &[]
+        } else {
+            &["vault-retired"]
+        };
+        for id in [SHOWN, "backup-disk", "nightly-dump", "vault-ping"]
+            .iter()
+            .chain(removed)
+        {
             assert!(
                 full.contains(id),
                 "{id} missing from {uri} with status:read: {full}"
@@ -433,9 +479,105 @@ async fn the_public_sees_the_public_check_and_a_reader_sees_both() {
 async fn the_internal_board_shows_both() {
     let (board, _) = seeded().await;
     let page = board.page("/internal/").await;
-    for shown in [SHOWN, "Backup disk", "Nightly dump"] {
+    for shown in [
+        SHOWN,
+        "Backup disk",
+        "Nightly dump",
+        "Back office",
+        "Vault hosts",
+        "vault-ping",
+    ] {
         assert!(page.contains(shown), "{shown} missing from the board");
     }
+}
+
+/// Every route naming the component that is not public answers as it would
+/// for one never configured, word for word but the id; a `status:read`
+/// token reads it like any other.
+#[tokio::test]
+async fn a_component_that_is_not_public_is_unknown_to_the_public() {
+    let (board, _) = seeded().await;
+    for uri in [
+        "/components/{id}",
+        "/api/v1/components/{id}",
+        "/feeds/components/{id}.atom",
+        "/api/v1/timeline?component={id}",
+    ] {
+        for token in [None, Some(ONCALL)] {
+            let (unknown_status, unknown) = read(&board, &uri.replace("{id}", "nope"), token).await;
+            let (status, body) = read(&board, &uri.replace("{id}", "vault-hosts"), token).await;
+            assert!(
+                unknown_status.is_client_error(),
+                "{uri} is {unknown_status}"
+            );
+            assert_eq!(status, unknown_status, "{uri} (token {token:?}): {body}");
+            assert_eq!(
+                body.replace("vault-hosts", "nope"),
+                unknown,
+                "{uri} (token {token:?})"
+            );
+        }
+    }
+    for uri in [
+        "/api/v1/components/vault-hosts",
+        "/api/v1/timeline?component=vault-hosts",
+        "/api/v1/status.json",
+    ] {
+        let (status, body) = read(&board, uri, Some(READER)).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        assert!(body.contains("vault-hosts"), "{uri}: {body}");
+    }
+}
+
+/// The overall status is the worst of the components a viewer sees, so a
+/// component that is not public cannot leak through it while it is down.
+#[tokio::test]
+async fn the_overall_status_ignores_a_component_that_is_not_public() {
+    let (mut board, _) = seeded().await;
+    let mut snapshot = board.state.live.snapshot();
+    snapshot.components.push(ComponentSnapshot {
+        id: "vault-hosts".into(),
+        health: Some(Down),
+        status: ComponentStatus::Down,
+    });
+    board.state.live = Arc::new(snapshot);
+    board.router = http::router(board.state.clone());
+    for (token, expected) in [
+        (None, "unknown"),
+        (Some(ONCALL), "unknown"),
+        (Some(READER), "down"),
+    ] {
+        let (status, body) = read(&board, "/api/v1/status.json", token).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let document: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(document["status"], expected, "token {token:?}: {body}");
+    }
+}
+
+/// An incident or maintenance is public, so it may not name a component
+/// that is not.
+#[tokio::test]
+async fn an_incident_may_not_name_a_component_that_is_not_public() {
+    let (board, _) = seeded().await;
+    let request = from(OUTSIDER, Method::POST, "/api/v1/incidents")
+        .header(header::AUTHORIZATION, format!("Bearer {ONCALL}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "title": "Vault down",
+                "impact": "major",
+                "components": ["api", "vault-hosts"],
+                "message": "Looking into it.",
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let (status, _, body) = parts(send(&board.router, request).await.1).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        body.contains("components[1]") && body.contains("is not public"),
+        "{body}"
+    );
 }
 
 // --- The event streams ---------------------------------------------------
@@ -458,15 +600,27 @@ fn changed(check_id: &str, kind: MemberKind, component_id: Option<&str>) -> Even
     .into()
 }
 
-/// What `request`'s event stream carries once the three checks change,
-/// up to the change of `last`, which comes after the other two.
+/// What `request`'s event stream carries once the component that is not
+/// public and then every check change, up to the change of `last`, which
+/// comes after the others.
 async fn stream(board: &Board, request: Request<Body>, last: &str) -> String {
     let (status, response) = send(&board.router, request).await;
     assert_eq!(status, StatusCode::OK);
     let mut body = response.into_body().into_data_stream();
+    board.state.events.emit(
+        EngineEvent::ComponentChanged(ComponentChange {
+            component_id: "vault-hosts".into(),
+            from: ComponentStatus::Operational,
+            to: ComponentStatus::Down,
+            health: Some(Down),
+            at_ms: now().as_millis(),
+        })
+        .into(),
+    );
     let changes = [
         ("backup-disk", MemberKind::Check, None),
         ("nightly-dump", MemberKind::Heartbeat, None),
+        ("vault-ping", MemberKind::Check, Some("vault-hosts")),
         (SHOWN, MemberKind::Check, Some("api")),
     ];
     for (check_id, kind, component_id) in changes.iter().filter(|(id, ..)| *id != last) {
@@ -517,7 +671,13 @@ async fn the_board_has_its_own_stream_with_every_change() {
         .body(Body::empty())
         .unwrap();
     let seen = stream(&board, request, "nightly-dump").await;
-    for id in [SHOWN, "backup-disk", "nightly-dump"] {
+    for id in [
+        SHOWN,
+        "backup-disk",
+        "vault-ping",
+        "nightly-dump",
+        "\"type\":\"component_changed\",\"component_id\":\"vault-hosts\"",
+    ] {
         assert!(
             seen.contains(id),
             "{id} missing from /internal/events: {seen}"
@@ -569,7 +729,9 @@ async fn mcp_without_status_read_leaves_out_internal_checks() {
             );
             let full = call(&board, READER, tool).await;
             assert!(
-                full.contains("backup-disk") && full.contains("nightly-dump"),
+                full.contains("backup-disk")
+                    && full.contains("nightly-dump")
+                    && full.contains("vault-ping"),
                 "MCP {tool} with status:read: {full}"
             );
         }

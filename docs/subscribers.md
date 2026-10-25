@@ -41,7 +41,7 @@ the running one, logs a warning, and applies everything else.
 
 ## Signing up
 
-`/` shows a short form: an address, a box for every component and one for
+`/` shows a short form: an address, a box for every public component and one for
 every public project, and a link to `/subscribe`, where each component and
 project can be chosen on its own. It is a plain form post, so it works with JavaScript off. Next to
 it, the page links the [Atom feeds](status-page.md#feeds) of incidents
@@ -57,8 +57,8 @@ curl -X POST https://status.example.com/api/v1/subscribers \
 
 `components` defaults to `["*"]` and `projects` to none. `*` is every
 component, or every public project, including ones added later. A
-component that does not exist, or a project that does not exist or is not
-public, is a 422 naming the field.
+component or project that does not exist or is not public is a 422
+naming the field.
 
 The answer is the same 202 whether the address is new, is waiting for its
 confirmation or is already subscribed, so it cannot be used to learn who

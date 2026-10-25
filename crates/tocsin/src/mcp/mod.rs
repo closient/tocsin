@@ -220,8 +220,8 @@ impl Server {
         match &self.backend {
             Backend::Local(state) => local(
                 async {
-                    caller(&extensions)?;
-                    status::document(state).await
+                    let viewer = caller(&extensions)?.viewer();
+                    status::document(state, viewer).await
                 }
                 .await,
             ),

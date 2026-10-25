@@ -54,7 +54,7 @@ use super::timeline::{Row, Rows, row};
 use super::uptime::{self, Bar, Tallies};
 use crate::http::auth::Viewer;
 use crate::http::timeline::{self, Window, component_scope};
-use crate::http::{AppState, now, status};
+use crate::http::{AppState, now, public, status};
 
 /// `Cache-Control` on the pages: a CDN may serve a copy for 15 seconds
 /// and a stale one for 30 more while it refetches; a browser revalidates.
@@ -469,17 +469,22 @@ pub(super) fn cached(
     }
 }
 
-/// Groups and their components in display order: components in no group
-/// first, then groups in `[page] groups` order and the rest as defined;
-/// within each, `[page] components` order and the rest as defined.
-pub(super) fn ordered(config: &Config) -> Vec<(Option<&Group>, Vec<&Component>)> {
+/// Groups and the components `viewer` may see in display order:
+/// components in no group first, then groups in `[page] groups` order and
+/// the rest as defined; within each, `[page] components` order and the
+/// rest as defined. A group with none to show is left out.
+pub(super) fn ordered(config: &Config, viewer: Viewer) -> Vec<(Option<&Group>, Vec<&Component>)> {
     fn rank(order: &[tocsin_core::config::Id], id: &tocsin_core::config::Id) -> usize {
         order
             .iter()
             .position(|listed| listed == id)
             .unwrap_or(order.len())
     }
-    let mut components: Vec<&Component> = config.components.iter().collect();
+    let mut components: Vec<&Component> = config
+        .components
+        .iter()
+        .filter(|component| public::shows_component(config, viewer, component.id.as_str()))
+        .collect();
     // Stable: unlisted components keep their definition order.
     components.sort_by_key(|component| rank(&config.page.components, &component.id));
     let mut groups: Vec<&Group> = config.groups.iter().collect();
@@ -503,7 +508,7 @@ pub(super) fn ordered(config: &Config) -> Vec<(Option<&Group>, Vec<&Component>)>
 
 /// The component sections, with each component's state from `states`.
 fn sections(config: &Config, states: &[ComponentState]) -> Vec<Section> {
-    ordered(config)
+    ordered(config, Viewer::Public)
         .into_iter()
         .map(|(group, components)| Section {
             name: group.map(|group| group.name.clone()),
@@ -546,7 +551,7 @@ pub(super) async fn tallies(state: &AppState, today: Day) -> Result<Tallies, Htm
 async fn uptime_rows(state: &AppState) -> Result<Vec<UptimeRow>, HtmlError> {
     let today = today();
     let tallies = tallies(state, today).await?;
-    Ok(ordered(&state.config)
+    Ok(ordered(&state.config, Viewer::Public)
         .into_iter()
         .flat_map(|(_, components)| components)
         .map(|component| UptimeRow {
@@ -694,7 +699,7 @@ fn graph(page: Value, incidents: impl IntoIterator<Item = Value>) -> Value {
 async fn index(State(state): State<AppState>, request: HeaderMap) -> Result<Response, HtmlError> {
     let config = &state.config;
     let zone = zone(config);
-    let document = status::document(&state).await?;
+    let document = status::document(&state, Viewer::Public).await?;
     let json_ld = graph(
         web_page(config, &config.page.title, "/"),
         document
@@ -736,12 +741,12 @@ async fn fragment(
     let zone = zone(config);
     Ok(match fragment {
         Fragment::Banner => {
-            let document = status::document(&state).await?;
+            let document = status::document(&state, Viewer::Public).await?;
             let banner = StatusLabel::overall(document.status);
             respond(&request, FRAGMENT_CACHE, &BannerFragment { banner })
         }
         Fragment::Components => {
-            let document = status::document(&state).await?;
+            let document = status::document(&state, Viewer::Public).await?;
             let sections = sections(config, &document.components);
             respond(&request, FRAGMENT_CACHE, &ComponentsFragment { sections })
         }

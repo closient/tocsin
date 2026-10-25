@@ -105,13 +105,13 @@ pub async fn list(state: &AppState, query: ListQuery) -> Result<IncidentList, Ap
 ///
 /// # Errors
 ///
-/// 404 if no `[[component]]` has that id; 500 if the store fails.
+/// 404 if no public `[[component]]` has that id; 500 if the store fails.
 pub async fn naming(
     state: &AppState,
     component: &str,
     limit: u32,
 ) -> Result<Vec<Incident>, ApiError> {
-    if !state.knows_component(component) {
+    if !state.component_is_public(component) {
         return Err(ApiError::not_found(format!("no component {component}")));
     }
     Ok(state.store.incidents_naming(component, limit).await?)
@@ -208,8 +208,11 @@ pub async fn open(
     new: NewIncident,
     actor: Actor,
 ) -> Result<Arc<Incident>, ApiError> {
-    new.validate(&|id| state.knows_component(id))
-        .map_err(ApiError::invalid)?;
+    validated(
+        new.validate(&|id| state.knows_component(id)),
+        state,
+        &new.components,
+    )?;
     let notify = new.notify;
     let incident = state
         .store
@@ -284,8 +287,11 @@ pub async fn edit_incident(
     ApiJson(edit): ApiJson<IncidentEdit>,
 ) -> Result<Json<Arc<Incident>>, ApiError> {
     let id = incident_id(id)?;
-    edit.validate(&|component| state.knows_component(component))
-        .map_err(ApiError::invalid)?;
+    validated(
+        edit.validate(&|component| state.knows_component(component)),
+        &state,
+        edit.components.as_deref().unwrap_or_default(),
+    )?;
     let incident = state
         .store
         .edit_incident(id, edit, auth.actor.clone(), now())
@@ -307,4 +313,32 @@ fn incident_id(id: Result<Path<i64>, PathRejection>) -> Result<i64, ApiError> {
 
 fn missing(id: i64) -> ApiError {
     ApiError::not_found(format!("no incident {id}"))
+}
+
+/// `checked`, the incident's or edit's own validation, with an error for
+/// each of `components` that is configured but not public: whatever an
+/// incident says is public, so it may name only what the status page
+/// shows.
+fn validated(
+    checked: Result<(), Vec<FieldError>>,
+    state: &AppState,
+    components: &[String],
+) -> Result<(), ApiError> {
+    let mut errors = checked.err().unwrap_or_default();
+    for (index, id) in components.iter().enumerate() {
+        if state.knows_component(id) && !state.component_is_public(id) {
+            errors.push(FieldError::new(
+                format!("components[{index}]"),
+                format!(
+                    "[[component]] {id:?} is not public; an incident or maintenance may name \
+                     only a public component"
+                ),
+            ));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(ApiError::invalid(errors))
+    }
 }

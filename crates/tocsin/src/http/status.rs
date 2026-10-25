@@ -3,10 +3,11 @@
 //! `/api/v1/status.json`, `/api/v1/components/{id}` and `/api/v1/checks`:
 //! what is up right now.
 //!
-//! Components are public, as the status page shows them, and so are the
-//! checks and heartbeats that belong to one ([`public`]). One on no
-//! component, and any check's `target`, which can name an internal host,
-//! only a `status:read` token sees.
+//! A component is public unless configured `public = false`, as the
+//! status page shows it, and so are the checks and heartbeats that belong
+//! to one ([`public`]). A component that is not public, one on no
+//! component or on one that is not public, and any check's `target`, which
+//! can name an internal host, only a `status:read` token sees.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -48,9 +49,9 @@ pub fn router() -> OpenApiRouter<AppState> {
 )]
 pub async fn get_status(
     State(state): State<AppState>,
-    _viewer: Viewer,
+    viewer: Viewer,
 ) -> Result<Json<StatusDocument>, ApiError> {
-    document(&state).await.map(Json)
+    document(&state, viewer).await.map(Json)
 }
 
 /// One component: its status, its checks and heartbeats, and the open
@@ -64,7 +65,7 @@ pub async fn get_status(
     responses(
         (status = 200, description = "The component", body = ComponentDetail),
         (status = 401, description = "An `Authorization` header with an unknown token", body = ErrorBody),
-        (status = 404, description = "No `[[component]]` has that id", body = ErrorBody),
+        (status = 404, description = "No `[[component]]` has that id, or it is not public and the token lacks `status:read`", body = ErrorBody),
     ),
 )]
 pub async fn get_component(
@@ -81,7 +82,9 @@ pub async fn get_component(
 ///
 /// # Errors
 ///
-/// 404 if no `[[component]]` has that id; 500 if the store fails.
+/// 404 if no `[[component]]` has that id, or `viewer` may not see it
+/// (worded the same, so the answer does not say it exists); 500 if the
+/// store fails.
 pub async fn component_detail(
     state: &AppState,
     viewer: Viewer,
@@ -91,7 +94,9 @@ pub async fn component_detail(
         .config
         .components
         .iter()
-        .find(|component| component.id.as_str() == id)
+        .find(|component| {
+            component.id.as_str() == id && public::shows_component(&state.config, viewer, id)
+        })
         .ok_or_else(|| ApiError::not_found(format!("no component {id}")))?;
     let snapshot = state.live.snapshot();
     let incidents = state
@@ -112,7 +117,8 @@ pub async fn component_detail(
 }
 
 /// Every check and heartbeat on a public component with its current
-/// state; with a `status:read` token, those on no component too.
+/// state; with a `status:read` token, those on no component or on one that
+/// is not public too.
 #[utoipa::path(
     get,
     path = "/api/v1/checks",
@@ -130,18 +136,21 @@ pub async fn list_checks(State(state): State<AppState>, viewer: Viewer) -> Json<
     })
 }
 
-/// The status document: every component in configuration order joined
-/// with the live state, and the incidents not yet resolved.
+/// The status document: every component `viewer` may see, in
+/// configuration order, joined with the live state, and the incidents not
+/// yet resolved. The overall status rolls up the components shown, so a
+/// component that is not public never moves the public page's.
 ///
 /// # Errors
 ///
 /// 500 if the store fails.
-pub async fn document(state: &AppState) -> Result<StatusDocument, ApiError> {
+pub async fn document(state: &AppState, viewer: Viewer) -> Result<StatusDocument, ApiError> {
     let snapshot = state.live.snapshot();
     let components: Vec<ComponentState> = state
         .config
         .components
         .iter()
+        .filter(|component| public::shows_component(&state.config, viewer, component.id.as_str()))
         .map(|component| component_state(component, &snapshot))
         .collect();
     let incidents: Vec<Incident> = state.store.unresolved_incidents().await?;
@@ -176,7 +185,8 @@ fn component_state(component: &Component, snapshot: &Snapshot) -> ComponentState
 
 /// Every check, then every heartbeat, in configuration order, with what
 /// the snapshot knows of each. Only a [`Viewer::Trusted`] sees targets,
-/// and those on no component ([`public::may_see`]).
+/// and those on no component or on one that is not public
+/// ([`public::may_see`]).
 pub(crate) fn checks(config: &Config, snapshot: &Snapshot, viewer: Viewer) -> Vec<CheckState> {
     let trusted = viewer == Viewer::Trusted;
     let probed = config.checks.iter().map(|check| Member {
@@ -199,7 +209,7 @@ pub(crate) fn checks(config: &Config, snapshot: &Snapshot, viewer: Viewer) -> Ve
     });
     probed
         .chain(pinged)
-        .filter(|member| public::may_see(viewer, member.component.map(Id::as_str)))
+        .filter(|member| public::may_see(config, viewer, member.component.map(Id::as_str)))
         .map(|member| member.state(snapshot))
         .collect()
 }

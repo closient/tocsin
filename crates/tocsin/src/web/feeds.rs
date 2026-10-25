@@ -12,10 +12,11 @@
 //! `/releases.atom[?project=]` serves the release feeds as well, from
 //! before they moved under `/feeds/`.
 //!
-//! - **Visibility**: what the anonymous page shows. Every component and
-//!   incident is public; releases come through
-//!   [`crate::http::releases::visible_projects`], so an unknown component
-//!   and a private or unknown project are the same 404.
+//! - **Visibility**: what the anonymous page shows. Every incident is
+//!   public, and so is a component unless configured `public = false`;
+//!   releases come through [`crate::http::releases::visible_projects`], so
+//!   an unknown component and one that is not public, and a private or
+//!   unknown project, are the same 404.
 //! - **Ids** never change once an entry is out: `urn:tocsin:incident:{id}`
 //!   from the incident's row id, which is never reused, and
 //!   `urn:tocsin:release:{project}:{version}` per version. An update or

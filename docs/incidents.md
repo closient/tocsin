@@ -14,7 +14,7 @@ incidents on their own.
 | `kind` | `incident` or `maintenance`. Fixed at creation. |
 | `title` | One line, shown on the status page: no line breaks, tabs or other control characters. |
 | `impact` | `none`, `minor`, `major` or `critical`. Defaults to `none`. |
-| `components` | Ids of `[[component]]` entries it affects, sorted. An id the configuration does not define is refused. |
+| `components` | Ids of `[[component]]` entries it affects, sorted. An id the configuration does not define, or one of a component with `public = false`, is refused. |
 | `status` | The status of the latest update. |
 | `scheduled_start`, `scheduled_end` | Maintenance only, and required for it; the end is after the start. |
 | `resolved_at` | When it first reached `resolved` (incident) or `completed` (maintenance); cleared if an update reopens it. |

@@ -145,9 +145,9 @@ pub(super) fn every() -> Vec<String> {
     vec![EVERY.to_owned()]
 }
 
-/// The checkboxes for `preferences`: "every component" then each one,
-/// and "every public project" then each one, or none without a public
-/// project.
+/// The checkboxes for `preferences`: "every component" then each public
+/// one, and "every public project" then each one, or none without a
+/// public project.
 pub(super) fn choices(state: &AppState, preferences: &Preferences) -> (Vec<Choice>, Vec<Choice>) {
     let checked = |chosen: &[String], id: &str| chosen.iter().any(|known| known == id);
     let all_components = checked(&preferences.components, EVERY);
@@ -156,11 +156,18 @@ pub(super) fn choices(state: &AppState, preferences: &Preferences) -> (Vec<Choic
         label: "Every component".to_owned(),
         checked: all_components,
     })
-    .chain(state.config.components.iter().map(|component| Choice {
-        value: component.id.as_str().to_owned(),
-        label: component.name.clone(),
-        checked: !all_components && checked(&preferences.components, component.id.as_str()),
-    }))
+    .chain(
+        state
+            .config
+            .components
+            .iter()
+            .filter(|component| state.component_is_public(component.id.as_str()))
+            .map(|component| Choice {
+                value: component.id.as_str().to_owned(),
+                label: component.name.clone(),
+                checked: !all_components && checked(&preferences.components, component.id.as_str()),
+            }),
+    )
     .collect();
     let public = state
         .config

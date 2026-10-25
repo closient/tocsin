@@ -36,8 +36,9 @@ pages that do not belong on the public page. It replaces the Gatus
 dashboard. It is read-only; checks are changed only in the config files.
 
 Checks are grouped like the status page: each group's components in
-order, then a last section, "Not on the status page", for checks and
-heartbeats on no component. Each check shows:
+order, those with `public = false` included under their group, then a
+last section, "Not on the status page", for checks and heartbeats on no
+component. Each check shows:
 
 - its health and how long it has held it;
 - its type, interval, target and component;
@@ -75,10 +76,11 @@ pages carry no structured data. Nothing public links to the board: not
 sitemap.
 
 `/internal/events` is the board's own stream, behind the same guard: it
-carries every check change, including those of checks on no component.
-The public stream, `/api/v1/events`, carries only changes of checks and
-heartbeats on a component, as the anonymous `GET /api/v1/checks` lists
-only those; see [api.md](api.md#public-and-internal-checks).
+carries every check and component change, including those of checks on
+no component and of non-public components. The public stream,
+`/api/v1/events`, carries only changes of public components and of the
+checks and heartbeats on them, as the anonymous `GET /api/v1/checks`
+lists only those; see [api.md](api.md#public-and-internal-checks).
 
 ## Setting it up
 

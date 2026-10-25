@@ -23,13 +23,17 @@ pub enum Checks {
     /// is now: shown if it is in `public`, hidden if it is in `internal`,
     /// whatever component they recorded. One no longer configured has
     /// only its outages to go by, so each is shown if it recorded a
-    /// component: a check removed from the status page keeps its public
-    /// history, and one removed while on no component stays hidden.
+    /// component not in `internal_components`: a check removed from the
+    /// status page keeps its public history, and one removed while on no
+    /// component or a non-public one stays hidden.
     Public {
-        /// The configured checks and heartbeats on a component.
+        /// The configured checks and heartbeats on a public component.
         public: Vec<String>,
-        /// The configured checks and heartbeats on none.
+        /// The configured checks and heartbeats on none, or on a
+        /// non-public one.
         internal: Vec<String>,
+        /// The configured components that are not public.
+        internal_components: Vec<String>,
     },
 }
 
@@ -38,9 +42,18 @@ impl Checks {
     pub(crate) fn bind(&self) -> Option<String> {
         match self {
             Checks::All => None,
-            Checks::Public { public, internal } => {
-                Some(serde_json::json!({ "public": public, "internal": internal }).to_string())
-            }
+            Checks::Public {
+                public,
+                internal,
+                internal_components,
+            } => Some(
+                serde_json::json!({
+                    "public": public,
+                    "internal": internal,
+                    "internal_components": internal_components,
+                })
+                .to_string(),
+            ),
         }
     }
 }
@@ -50,7 +63,9 @@ impl Checks {
 /// timeline's outage read uses it too.
 pub(crate) const SHOWN: &str = "(:shown IS NULL \
      OR (check_id NOT IN (SELECT value FROM json_each(:shown, '$.internal')) \
-         AND (component_id IS NOT NULL \
+         AND ((component_id IS NOT NULL \
+               AND component_id NOT IN \
+                   (SELECT value FROM json_each(:shown, '$.internal_components'))) \
               OR check_id IN (SELECT value FROM json_each(:shown, '$.public')))))";
 
 /// Which page of a history read: newest first from `before`, back to
@@ -350,7 +365,9 @@ const OUTAGES: &str =
        AND started_at <= :at AND (started_at < :at OR id < :before)
        AND (:shown IS NULL
             OR (check_id NOT IN (SELECT value FROM json_each(:shown, '$.internal'))
-                AND (component_id IS NOT NULL
+                AND ((component_id IS NOT NULL
+                      AND component_id NOT IN
+                          (SELECT value FROM json_each(:shown, '$.internal_components')))
                      OR check_id IN (SELECT value FROM json_each(:shown, '$.public')))))
      UNION ALL
      SELECT id, node_id, check_id, component_id, health, started_at, ended_at, subject_kind,
@@ -360,7 +377,9 @@ const OUTAGES: &str =
        AND started_at <= :at AND (started_at < :at OR id < :before)
        AND (:shown IS NULL
             OR (check_id NOT IN (SELECT value FROM json_each(:shown, '$.internal'))
-                AND (component_id IS NOT NULL
+                AND ((component_id IS NOT NULL
+                      AND component_id NOT IN
+                          (SELECT value FROM json_each(:shown, '$.internal_components')))
                      OR check_id IN (SELECT value FROM json_each(:shown, '$.public')))))
      UNION ALL
      SELECT id, node_id, check_id, component_id, health, started_at, ended_at, subject_kind,
@@ -370,7 +389,9 @@ const OUTAGES: &str =
        AND started_at <= :at AND (started_at < :at OR id < :before)
        AND (:shown IS NULL
             OR (check_id NOT IN (SELECT value FROM json_each(:shown, '$.internal'))
-                AND (component_id IS NOT NULL
+                AND ((component_id IS NOT NULL
+                      AND component_id NOT IN
+                          (SELECT value FROM json_each(:shown, '$.internal_components')))
                      OR check_id IN (SELECT value FROM json_each(:shown, '$.public')))))
      ORDER BY started_at DESC, id DESC LIMIT :limit";
 

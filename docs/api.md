@@ -21,6 +21,7 @@ the `status:read` scope to read the rest:
 |---|---|---|
 | Overall status, components, their health, open incidents | yes | yes |
 | Checks and heartbeats on a component: id, kind, name, interval, health, outages | yes | yes |
+| A component with `public = false`, its checks and heartbeats, their changes, outages and timeline | no | yes |
 | Checks and heartbeats on no component, their changes and their outages | no | yes |
 | A check's `target` (its URL or host, which can name an internal host) | no | yes |
 | A check's raw results (`/checks/{id}/results`) | no, 401 | yes |
@@ -46,8 +47,8 @@ with nothing public to show: no token is 401 and a token without
 
 ### Public and internal checks
 
-A check or heartbeat is public when it is on a component, since every
-component is on the status page. One on no component is internal: the
+A check or heartbeat is public when it is on a public component, the
+default. One on no component is internal: the
 [internal board](admin.md#the-internal-board) and a `status:read` token
 see it, and without that scope no read names it, its health or its
 outages. `checks`, `events`, `outages`, `timeline` and the MCP tools
@@ -56,8 +57,19 @@ the feeds and the status page never listed it, and a component's health
 comes from its own checks only. A configured check's outages follow
 where it is now, so moving it off its component hides its old outages
 too. A removed check has only its outages to go by: those recorded on a
-component stay public, ending `withdrawn`, and those recorded on none
-stay hidden.
+public component stay public, ending `withdrawn`, and those recorded on
+none, or on a component that is not public, stay hidden.
+
+A `[[component]]` with `public = false` is internal too, and so is every
+check and heartbeat on it. Without `status:read` it is not in
+`status.json`, the overall status ignores it, `components/{id}` and its
+feed are 404, `timeline?component=` refuses it like an unknown id, and
+`checks`, `events`, `outages`, the MCP tools, `/llms.txt`, the status
+page and the subscribe page leave it and its checks out. A group whose
+components are all non-public does not appear. With `status:read`, and
+on the internal board, it is listed under its group like any other. An
+incident or maintenance may not name a non-public component (422); a
+`[[project]]` may list one, since releases carry no component ids.
 
 Likewise a `[[project]]` can be non-public. A non-public project is left
 out wholesale, not redacted: it is not in the release list, its deploys
@@ -105,7 +117,7 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
   `incidents` are the open incidents and maintenance.
 - **`components/{id}`** is one component with every check and heartbeat
   that sets its health and the open incidents naming it. An unknown id is
-  404.
+  404, and so is a component with `public = false` without `status:read`.
 - **`checks`** lists every check and heartbeat on a component, and with
   a `status:read` token those on none too. `kind` is `check` or
   `heartbeat`, so heartbeats sit beside checks rather than in a second
@@ -147,7 +159,8 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
 - **`timeline`** merges outages, incidents, deploys and releases; see
   [releases.md](releases.md#http-api). `component=` narrows it to one
   component's checks, incidents and projects. Without `status:read` its
-  outages are only those of checks on a component.
+  outages are only those of checks on a public component, and a
+  non-public `component=` is a 422 like an unknown id.
 
 ### Windows and paging
 
@@ -203,10 +216,12 @@ seconds keeps a quiet connection open through proxies, and the response
 carries `X-Accel-Buffering: no` so nginx passes events through at once.
 The stream ends when the server shuts down; reconnect.
 
-Anyone sees incident and component events, changes of checks on a
-component, and the releases of public projects; a `status:read` token
-also sees changes of checks on no component and releases of private
-ones. The status page's live updates are this stream; the internal board
+Anyone sees incident events, changes of public components and of the
+checks on them, and the releases of public projects; a `status:read`
+token also sees non-public components, changes of checks on no
+component, and releases of private ones. A stream without `status:read`
+also ends when the configuration reloads, since a component may have
+changed sides; reconnect. The status page's live updates are this stream; the internal board
 has its own, `/internal/events`.
 
 ## `/llms.txt`

@@ -183,6 +183,7 @@ async fn outages_narrow_to_the_checks_shown() {
     let shown = || Checks::Public {
         public: vec!["a".to_owned()],
         internal: vec!["b".to_owned()],
+        internal_components: Vec::new(),
     };
     let read = |rows: Vec<tocsin_core::status::OutageRecord>| -> Vec<(i64, String)> {
         rows.into_iter().map(|row| (row.id, row.check_id)).collect()
@@ -224,6 +225,7 @@ async fn outages_narrow_to_the_checks_shown() {
                 Checks::Public {
                     public: Vec::new(),
                     internal: vec!["a".to_owned(), "b".to_owned()],
+                    internal_components: Vec::new(),
                 }
             )
             .await
@@ -527,8 +529,8 @@ async fn results_slice_into_latency_and_failure_counts() {
 }
 
 /// A check no longer configured has only its outages to say where it was:
-/// one recorded on a component stays public, one recorded on none does
-/// not. A configured check follows where it is now, whatever its outages
+/// one recorded on a public component stays public, one recorded on none
+/// or on a component that is not public does not. A configured check follows where it is now, whatever its outages
 /// recorded.
 #[tokio::test]
 async fn outages_of_removed_checks_follow_the_component_they_recorded() {
@@ -556,9 +558,15 @@ async fn outages_of_removed_checks_follow_the_component_they_recorded() {
         .open_outage(on("moved-on", None, 1_003))
         .await
         .unwrap();
+    // Removed while on a component that is not public.
+    store
+        .open_outage(on("gone-private", Some("hosts"), 1_004))
+        .await
+        .unwrap();
     let shown = Checks::Public {
         public: vec!["moved-on".to_owned()],
         internal: vec!["moved-off".to_owned()],
+        internal_components: vec!["hosts".to_owned()],
     };
     let ids: Vec<i64> = store
         .outages(page(0, None, 10), shown.clone())

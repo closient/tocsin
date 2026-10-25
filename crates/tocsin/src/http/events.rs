@@ -19,7 +19,8 @@ use axum::http::{HeaderValue, header};
 use axum::response::sse::{self, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
-use tocsin_core::incident::Incident;
+use tocsin_core::config::Config;
+use tocsin_core::incident::{Incident, Timestamp};
 use tocsin_core::release::Release;
 use tocsin_engine::ports::Sink;
 use tocsin_engine::{CheckChange, ComponentChange, EngineEvent, NoticesHandle};
@@ -32,6 +33,7 @@ use super::AppState;
 use super::auth::Viewer;
 use super::error::ErrorBody;
 use super::public;
+use crate::reload::ConfigStatus;
 
 /// The OpenAPI tag for the event stream.
 pub const TAG: &str = "events";
@@ -106,21 +108,27 @@ impl Event {
         }
     }
 
-    /// Whether `viewer` may see this event: everything but a release of a
-    /// project that is not public, and a change of a check or heartbeat on
-    /// no component, which only a trusted viewer sees. The change carries
-    /// the component the engine's configuration gave the check when it
-    /// changed, so a stream opened before a reload follows the new one.
-    fn visible_to(&self, viewer: Viewer) -> bool {
+    /// Whether `viewer` may see this event under `config`: everything but
+    /// a release of a project that is not public, a change of a component
+    /// that is not public, and a change of a check or heartbeat on no
+    /// component or on one that is not public, which only a trusted viewer
+    /// sees. The check change carries the component the engine's
+    /// configuration gave the check when it changed.
+    fn visible_to(&self, config: &Config, viewer: Viewer) -> bool {
         match self {
             Event::ReleasePublished { public, .. } | Event::ReleaseDeployed { public, .. } => {
                 *public || viewer == Viewer::Trusted
             }
-            Event::CheckChanged(change) => public::may_see(viewer, change.component_id.as_deref()),
+            Event::CheckChanged(change) => {
+                public::may_see(config, viewer, change.component_id.as_deref())
+            }
+            Event::ComponentChanged(change) => {
+                viewer == Viewer::Trusted
+                    || public::component_is_public(config, &change.component_id)
+            }
             Event::IncidentCreated { .. }
             | Event::IncidentUpdated { .. }
-            | Event::IncidentEdited { .. }
-            | Event::ComponentChanged(_) => true,
+            | Event::IncidentEdited { .. } => true,
         }
     }
 }
@@ -184,9 +192,11 @@ pub fn router() -> OpenApiRouter<AppState> {
 /// event's `type` and the data its JSON. The first event is `resync`, and
 /// so is the one after the stream fell behind and missed some; on either,
 /// re-read what you show. A comment line every 15 seconds keeps a quiet
-/// connection open. Anyone sees incident and component events, changes of
-/// checks and heartbeats on a public component, and releases of public
-/// projects; a `status:read` token sees every check and release.
+/// connection open. Anyone sees incident events, changes of public
+/// components and of the checks and heartbeats on one, and releases of
+/// public projects; a `status:read` token sees every component, check and
+/// release. Without one, the stream ends when the configuration reloads,
+/// since what is public may have changed; reconnect to follow the new one.
 #[utoipa::path(
     get,
     path = "/api/v1/events",
@@ -209,6 +219,13 @@ pub fn stream(state: &AppState, viewer: Viewer) -> Response {
     let subscription = Subscription {
         events: state.events.subscribe(),
         closing: state.events.closing.subscribe(),
+        config: Arc::clone(&state.config),
+        // A trusted viewer sees every component under any configuration.
+        reloads: (viewer == Viewer::Public).then(|| {
+            let reloads = state.config_status.clone();
+            let loaded_at = reloads.borrow().loaded_at;
+            (reloads, loaded_at)
+        }),
         viewer,
         greeted: false,
     };
@@ -235,6 +252,12 @@ pub fn stream(state: &AppState, viewer: Viewer) -> Response {
 struct Subscription {
     events: broadcast::Receiver<Event>,
     closing: watch::Receiver<bool>,
+    /// The configuration the stream opened under, which decides what is
+    /// public.
+    config: Arc<Config>,
+    /// How the configuration last reloaded, and when the one in `config`
+    /// was read; `None` for a viewer the stream need not end for.
+    reloads: Option<(watch::Receiver<ConfigStatus>, Timestamp)>,
     viewer: Viewer,
     /// Whether the opening `resync` was sent.
     greeted: bool,
@@ -242,7 +265,7 @@ struct Subscription {
 
 impl Subscription {
     /// The next event to send; `None` ends the stream, when the server
-    /// stops.
+    /// stops or, for a viewer it filters, the configuration reloads.
     async fn next(&mut self) -> Option<sse::Event> {
         if !self.greeted {
             self.greeted = true;
@@ -254,8 +277,11 @@ impl Subscription {
                 // Also ends the stream if the bus is gone, which only
                 // happens once the server is.
                 _ = self.closing.wait_for(|closing| *closing) => return None,
+                () = reloaded(&mut self.reloads) => return None,
                 received = self.events.recv() => match received {
-                    Ok(event) if event.visible_to(self.viewer) => return Some(message(&event)),
+                    Ok(event) if event.visible_to(&self.config, self.viewer) => {
+                        return Some(message(&event));
+                    }
                     Ok(_) => {}
                     Err(RecvError::Lagged(_)) => return Some(resync()),
                     Err(RecvError::Closed) => return None,
@@ -263,6 +289,22 @@ impl Subscription {
             }
         }
     }
+}
+
+/// Resolves once a configuration other than the one read at `loaded_at`
+/// is running; never without `reloads`, or once nothing can reload it.
+async fn reloaded(reloads: &mut Option<(watch::Receiver<ConfigStatus>, Timestamp)>) {
+    if let Some((reloads, loaded_at)) = reloads {
+        let loaded_at = *loaded_at;
+        if reloads
+            .wait_for(|status| status.loaded_at != loaded_at)
+            .await
+            .is_ok()
+        {
+            return;
+        }
+    }
+    std::future::pending::<()>().await;
 }
 
 /// `event` as the stream sends it.
@@ -318,6 +360,26 @@ pub(crate) mod tests {
     use tocsin_engine::MemberKind;
 
     use super::*;
+
+    /// A configuration whose one component, `api`, is public or not.
+    fn config(public: bool) -> Config {
+        let text = format!(
+            "[[component]]\nid = \"api\"\nname = \"API\"\npublic = {public}\n\n\
+             [[check]]\nid = \"api-health\"\ncomponent = \"api\"\ntype = \"tcp\"\n\
+             target = \"api.internal.example.com:443\"\n"
+        );
+        tocsin_core::config::load(
+            &[tocsin_core::config::Source {
+                name: "tocsin.toml".into(),
+                text: Ok(text),
+            }],
+            &tocsin_core::config::Environment {
+                hostname: "test".into(),
+                variable: &|_| None,
+            },
+        )
+        .unwrap()
+    }
 
     pub(crate) fn every_event(public: bool) -> Vec<Event> {
         let actor = Actor::token("ops");
@@ -400,35 +462,80 @@ pub(crate) mod tests {
 
     #[test]
     fn a_release_of_a_private_project_reaches_only_a_trusted_viewer() {
+        let config = config(true);
         for event in every_event(false) {
             let release = matches!(
                 event,
                 Event::ReleasePublished { .. } | Event::ReleaseDeployed { .. }
             );
             assert_eq!(
-                event.visible_to(Viewer::Public),
+                event.visible_to(&config, Viewer::Public),
                 !release,
                 "{}",
                 event.name()
             );
-            assert!(event.visible_to(Viewer::Trusted), "{}", event.name());
+            assert!(
+                event.visible_to(&config, Viewer::Trusted),
+                "{}",
+                event.name()
+            );
         }
         assert!(
             every_event(true)
                 .iter()
-                .all(|event| event.visible_to(Viewer::Public))
+                .all(|event| event.visible_to(&config, Viewer::Public))
         );
     }
 
     #[test]
     fn a_change_of_a_check_on_no_component_reaches_only_a_trusted_viewer() {
+        let config = config(true);
         for mut event in every_event(true) {
             let Event::CheckChanged(change) = &mut event else {
                 continue;
             };
             change.component_id = None;
-            assert!(!event.visible_to(Viewer::Public));
-            assert!(event.visible_to(Viewer::Trusted));
+            assert!(!event.visible_to(&config, Viewer::Public));
+            assert!(event.visible_to(&config, Viewer::Trusted));
         }
+    }
+
+    /// A component that is not public, and every check and heartbeat on
+    /// it, changes unseen by anyone without `status:read`; incidents still
+    /// reach everyone, since none may name it.
+    #[test]
+    fn a_change_on_a_component_that_is_not_public_reaches_only_a_trusted_viewer() {
+        let config = config(false);
+        for event in every_event(true) {
+            let on_component = matches!(event, Event::CheckChanged(_) | Event::ComponentChanged(_));
+            assert_eq!(
+                event.visible_to(&config, Viewer::Public),
+                !on_component,
+                "{}",
+                event.name()
+            );
+            assert!(
+                event.visible_to(&config, Viewer::Trusted),
+                "{}",
+                event.name()
+            );
+        }
+    }
+
+    /// A trusted stream keeps the configuration it opened with, so a
+    /// component added by a later reload must still reach it; only the
+    /// public stream needs the component in that configuration.
+    #[test]
+    fn a_component_added_after_the_stream_opened_reaches_a_trusted_viewer() {
+        let event = Event::ComponentChanged(ComponentChange {
+            component_id: "added-later".to_owned(),
+            from: ComponentStatus::Operational,
+            to: ComponentStatus::Down,
+            health: Some(Health::Down),
+            at_ms: 0,
+        });
+        let config = config(true);
+        assert!(event.visible_to(&config, Viewer::Trusted));
+        assert!(!event.visible_to(&config, Viewer::Public));
     }
 }

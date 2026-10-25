@@ -207,6 +207,7 @@ A `[[check.link]]` or `[[heartbeat.link]]`: a named link to somewhere an operato
 | `group` | [`Id`](#type-id) |  |  | The `[[group]]` the component is shown under. |
 | `id` | [`Id`](#type-id) | yes |  | Unique among components in every file. |
 | `name` | string | yes |  | Display name. |
+| `public` | boolean |  | `true` | Whether the status page and the unauthenticated API show the component. A non-public component, its checks and heartbeats, their outages and its timeline are seen only with a `status:read` token and on the internal board, under its group like any other. No incident or maintenance may name one. |
 | `rule` | [`ComponentRule`](#type-componentrule) |  | `"worst"` | How the health of the component's checks combines into its own. |
 
 <a id="table-group"></a>
@@ -719,6 +720,6 @@ What a token may do.
 | `"heartbeat"` | Heartbeat pings. |
 | `"incident"` | Incidents and maintenance. |
 | `"release"` | Releases and deploys. |
-| `"status:read"` | Reading what is not public in the read API: checks and heartbeats on no component, non-public projects' releases and deploys, check targets, raw check results, and how the configuration last reloaded. The internal board behind proxy auth reads the same. |
+| `"status:read"` | Reading what is not public in the read API: non-public components, checks and heartbeats on no component or a non-public one, non-public projects' releases and deploys, check targets, raw check results, and how the configuration last reloaded. The internal board behind proxy auth reads the same. |
 | `"subscribers:admin"` | Listing, counting and removing email subscribers. |
 

@@ -224,6 +224,7 @@ Components are what the status page shows, each with a health state. Groups are 
 | `description` | string | Optional. |
 | `group` | group id | Components only: the group it is shown under. |
 | `rule` | `"worst"` or `"majority"` | Components only. How its checks combine into its health: the worst check (the default), or the worst state more than half of them are in or beyond. See [engine.md](engine.md#component-status). |
+| `public` | bool | Components only. Default `true`. With `false` the component, its checks and heartbeats, their outages and its timeline are left off the status page, the subscribe page, `/llms.txt` and every unauthenticated API read; a `status:read` token and the [internal board](admin.md#the-internal-board) see it under its group. A group with no public component is not shown. No incident or maintenance may name it; a `[[project]]` may. See [api.md](api.md#public-and-internal-checks). |
 
 ## `[[check]]`
 
@@ -477,5 +478,5 @@ A bearer token for the API: writing incidents, releases and heartbeats, and read
 |-----|------|-|
 | `id` | id | Required. Logged with each write. |
 | `secret` | secret | Required. Two tokens may not resolve to the same value; the error names both tokens, never the value. |
-| `scopes` | list of `heartbeat`, `incident`, `release`, `status:read`, `subscribers:admin` | Required, at least one. `release` publishes releases and stamps deploys; `subscribers:admin` lists and removes [subscribers](subscribers.md#for-operators); `status:read` reads what the public cannot: checks and heartbeats on no component, non-public projects' releases and deploys, check targets, raw check results, and [the reload status](#reloading). See [api.md](api.md#who-sees-what). |
+| `scopes` | list of `heartbeat`, `incident`, `release`, `status:read`, `subscribers:admin` | Required, at least one. `release` publishes releases and stamps deploys; `subscribers:admin` lists and removes [subscribers](subscribers.md#for-operators); `status:read` reads what the public cannot: non-public components, checks and heartbeats on one or on no component, non-public projects' releases and deploys, check targets, raw check results, and [the reload status](#reloading). See [api.md](api.md#who-sees-what). |
 | `description` | string | Optional. Who or what uses the token. |

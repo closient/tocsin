@@ -515,6 +515,11 @@
           "description": "Display name.",
           "type": "string"
         },
+        "public": {
+          "default": true,
+          "description": "Whether the status page and the unauthenticated API show the\ncomponent. A non-public component, its checks and heartbeats, their\noutages and its timeline are seen only with a `status:read` token\nand on the internal board, under its group like any other. No\nincident or maintenance may name one.",
+          "type": "boolean"
+        },
         "rule": {
           "allOf": [
             {
@@ -1946,7 +1951,7 @@
         },
         {
           "const": "status:read",
-          "description": "Reading what is not public in the read API: checks and heartbeats\non no component, non-public projects' releases and deploys, check\ntargets, raw check results, and how the configuration last\nreloaded. The internal board behind proxy auth reads the same.",
+          "description": "Reading what is not public in the read API: non-public components,\nchecks and heartbeats on no component or a non-public one,\nnon-public projects' releases and deploys, check targets, raw check\nresults, and how the configuration last reloaded. The internal\nboard behind proxy auth reads the same.",
           "type": "string"
         },
         {

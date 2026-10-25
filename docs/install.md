@@ -23,7 +23,7 @@ Each archive holds one folder, `tocsin-<target>/`, with the binary, the
 README and the licence. Download, verify and install:
 
 ```sh
-version=v0.3.0                       # the release you want
+version=v0.4.0                       # the release you want
 name=tocsin-x86_64-unknown-linux-musl
 base=https://github.com/closient/tocsin/releases/download/$version
 curl -fsSLO "$base/$name.tar.xz" -fsSLO "$base/$name.tar.xz.sha256"
@@ -47,7 +47,7 @@ From source, with the Rust toolchain pinned in `rust-toolchain.toml`:
 docker pull ghcr.io/closient/tocsin:latest
 ```
 
-Tags are the version without its `v` (`0.3.0`), its minor series (`0.3`)
+Tags are the version without its `v` (`0.4.0`), its minor series (`0.4`)
 and `latest`, for `linux/amd64` and `linux/arm64`. Prereleases are not
 published as images. The image is built from the release's own musl
 binaries on `gcr.io/distroless/static-debian13:nonroot`: no shell, no

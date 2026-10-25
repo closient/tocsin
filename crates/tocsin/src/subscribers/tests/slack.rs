@@ -1303,19 +1303,27 @@ async fn opening_an_incident_can_be_quiet_over_the_api_the_admin_form_and_mcp() 
         .await;
     site.admin_create("Default via form", &[]).await;
 
-    // MCP.
+    // MCP, which drafts unless told not to: a draft tells nobody.
     site.mcp_tool(
         "create_incident",
-        api("Quiet via MCP", json!({"notify": false})),
+        api("Quiet via MCP", json!({"notify": false, "draft": false})),
     )
     .await;
     site.mcp_tool(
         "create_incident",
-        api("Loud via MCP", json!({"notify": true})),
+        api("Loud via MCP", json!({"notify": true, "draft": false})),
     )
     .await;
-    site.mcp_tool("create_incident", api("Default via MCP", json!({})))
-        .await;
+    site.mcp_tool(
+        "create_incident",
+        api("Default via MCP", json!({"draft": false})),
+    )
+    .await;
+    site.mcp_tool(
+        "create_incident",
+        api("Drafted via MCP", json!({"notify": true})),
+    )
+    .await;
     site.settled().await;
     postman.stop().await;
 
@@ -1350,4 +1358,114 @@ async fn opening_an_incident_can_be_quiet_over_the_api_the_admin_form_and_mcp() 
             "{path}"
         );
     }
+    assert_eq!(titles(&site, &fake, "Drafted via MCP"), (0, 0));
+}
+
+/// A draft tells nobody however it is written to, and publishing it tells
+/// everyone exactly once, over the API, the admin and the internal board.
+#[tokio::test]
+async fn a_draft_tells_nobody_until_it_is_published_once() {
+    let (site, fake) = slack_site("").await;
+    fake.pick("#acme-status");
+    site.connect_subscriber(&fake, &[("components", "api"), ("projects", "api")])
+        .await;
+    site.subscribe("reader@example.com").await;
+    let postman = site.postman();
+
+    // Over the API: a draft, then a loud update to it.
+    let (status, _, draft) = site
+        .api(
+            Method::POST,
+            "/api/v1/incidents",
+            Some(super::ONCALL),
+            Some(json!({
+                "title": "Drafted via API",
+                "components": ["api"],
+                "message": "First look.",
+                "draft": true,
+            })),
+            1,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{draft}");
+    assert_eq!(draft["published_at"], Value::Null, "{draft}");
+    let id = draft["id"].as_i64().unwrap();
+    site.update_incident(id, "Found it.", true).await;
+    site.settled().await;
+    assert_eq!(heard(&site, &fake, "Drafted via API"), (0, 0));
+
+    let site = &site;
+    let publish = |id: i64| async move {
+        site.api(
+            Method::POST,
+            &format!("/api/v1/incidents/{id}/publish"),
+            Some(super::ONCALL),
+            None,
+            1,
+        )
+        .await
+    };
+    let (status, _, published) = publish(id).await;
+    assert_eq!(status, StatusCode::OK, "{published}");
+    assert_ne!(published["published_at"], Value::Null, "{published}");
+    assert_eq!(published["published_by"]["id"], "oncall", "{published}");
+    site.settled().await;
+    assert_eq!(heard(site, &fake, "Drafted via API"), (1, 1));
+    // The announcement carries where the draft got to, not its first word.
+    assert_eq!(heard(site, &fake, "Found it."), (1, 1));
+    let (status, _, again) = publish(id).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{again}");
+    site.settled().await;
+    assert_eq!(heard(site, &fake, "Drafted via API"), (1, 1));
+
+    // The admin form's draft box, then Publish on the internal board.
+    site.admin_create(
+        "Drafted via form",
+        &[("draft", "1"), ("notify_shown", "1"), ("notify", "1")],
+    )
+    .await;
+    site.settled().await;
+    assert_eq!(heard(site, &fake, "Drafted via form"), (0, 0));
+    let drafts = site.state.store.draft_incidents().await.unwrap();
+    assert_eq!(drafts.len(), 1, "{drafts:?}");
+    let id = drafts[0].id;
+    let (status, _, board) = site.admin_get("/internal/").await;
+    assert_eq!(status, StatusCode::OK, "{board}");
+    let section = board.find("Draft incidents").expect("the drafts section");
+    assert!(
+        section < board.find("id=\"board\"").unwrap(),
+        "drafts come before the checks: {board}"
+    );
+    assert!(board.contains("Drafted via form"), "{board}");
+    assert!(
+        board.contains(&format!("action=\"/admin/incidents/{id}/publish\"")),
+        "{board}"
+    );
+    assert!(board.contains(">Publish</button>"), "{board}");
+    let (status, headers, page) = site
+        .admin_post(
+            &format!("/admin/incidents/{id}/publish"),
+            &[("back", "internal")],
+        )
+        .await;
+    assert!(status.is_redirection(), "{status} {page}");
+    assert_eq!(headers[header::LOCATION], "/internal/");
+    site.settled().await;
+    assert_eq!(heard(site, &fake, "Drafted via form"), (1, 1));
+    let (_, _, board) = site.admin_get("/internal/").await;
+    assert!(!board.contains("Draft incidents"), "{board}");
+
+    // A discarded draft is gone and told nobody.
+    site.admin_create("Discarded via form", &[("draft", "1")])
+        .await;
+    let id = site.state.store.draft_incidents().await.unwrap()[0].id;
+    let (status, headers, page) = site
+        .admin_post(&format!("/admin/incidents/{id}/discard"), &[])
+        .await;
+    assert!(status.is_redirection(), "{status} {page}");
+    assert_eq!(headers[header::LOCATION], "/admin/");
+    assert!(site.state.store.incident(id).await.unwrap().is_none());
+    site.settled().await;
+    postman.stop().await;
+    assert_eq!(heard(site, &fake, "Discarded via form"), (0, 0));
 }

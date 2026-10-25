@@ -9,8 +9,40 @@
 <div class="intro">
 <h1>Internal board</h1>
 <p class="lede">Every check and heartbeat, including those on no public component.</p>
-<p class="muted">Signed in as <span class="who">{{ operator }}</span>. Read-only: checks are configured in the config files.</p>
+<p class="muted">Signed in as <span class="who">{{ operator }}</span>. Checks are read-only: they are configured in the config files.</p>
 </div>
+{%- if !drafts.is_empty() %}
+<section class="surface group drafts" aria-labelledby="drafts">
+  <div class="group-head">
+    <h2 id="drafts">Draft incidents</h2>
+    <p class="muted">Not on the status page, its feeds or the public API, and nobody is notified, until someone publishes them.</p>
+  </div>
+  <ul class="items">
+    {%- for draft in drafts %}
+    <li>
+      <a class="item-title" href="/admin/incidents/{{ draft.id }}">{{ draft.title }}</a>
+      <div class="meta">
+        <span class="badge draft">draft</span>
+        <span class="badge {{ draft.status }}">{{ draft.status }}</span>
+        <span class="badge {{ draft.impact }}">{{ draft.impact }}</span>
+        {%- if draft.kind != "incident" %} <span class="badge">{{ draft.kind }}</span>{% endif %}
+        <span class="muted">#{{ draft.id }} · {{ draft.created_at }} · by {{ draft.created_by }}</span>
+      </div>
+      <form class="inline" method="post" action="/admin/incidents/{{ draft.id }}/publish">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="back" value="internal">
+        <button type="submit">Publish</button>
+      </form>
+      <form class="inline" method="post" action="/admin/incidents/{{ draft.id }}/discard">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="back" value="internal">
+        <button type="submit" class="secondary">Discard</button>
+      </form>
+    </li>
+    {%- endfor %}
+  </ul>
+</section>
+{%- endif %}
 <div class="live board" hx-ext="sse" sse-connect="{{ events }}">
 <div id="board" hx-get="/internal/fragments/board" hx-trigger="sse:check_changed throttle:5s, sse:resync, every 60s" hx-swap="innerHTML">
 {%- include "internal/fragments/board.html" %}

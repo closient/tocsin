@@ -20,9 +20,8 @@ use utoipa_axum::routes;
 
 use super::auth::Viewer;
 use super::error::{ApiError, ErrorBody};
-use super::public;
 use super::releases::visible_projects;
-use super::{AppState, now};
+use super::{AppState, incidents, now, public};
 
 /// The OpenAPI tag for this route.
 pub const TAG: &str = "timeline";
@@ -169,6 +168,7 @@ pub async fn read(
             order,
             limit,
             component,
+            drafts: incidents::drafts_for(viewer),
         })
         .await?)
 }

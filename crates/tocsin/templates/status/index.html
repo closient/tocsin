@@ -11,19 +11,19 @@
 {%- endif %}
 </div>
 <div class="live" hx-ext="sse" sse-connect="{{ events }}">
-<div id="banner" role="status" hx-get="/fragments/banner" hx-trigger="sse:component_changed, sse:incident_created, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML">
+<div id="banner" role="status" hx-get="/fragments/banner" hx-trigger="sse:component_changed, sse:incident_created, sse:incident_published, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML">
 {%- include "status/fragments/banner.html" %}
 </div>
-<section id="incidents" aria-labelledby="incidents-heading" hx-get="/fragments/incidents" hx-trigger="sse:incident_created, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML">
+<section id="incidents" aria-labelledby="incidents-heading" hx-get="/fragments/incidents" hx-trigger="sse:incident_created, sse:incident_published, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML">
 {%- include "status/fragments/incidents.html" %}
 </section>
-<section id="components" aria-labelledby="components-heading" hx-get="/fragments/components" hx-trigger="sse:component_changed, sse:incident_created, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML">
+<section id="components" aria-labelledby="components-heading" hx-get="/fragments/components" hx-trigger="sse:component_changed, sse:incident_created, sse:incident_published, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML">
 {%- include "status/fragments/components.html" %}
 </section>
 <section id="uptime" aria-labelledby="uptime-heading" hx-get="/fragments/uptime" hx-trigger="sse:resync, every 600s" hx-swap="innerHTML">
 {%- include "status/fragments/uptime.html" %}
 </section>
-<section id="resolved" aria-labelledby="resolved-heading" hx-get="/fragments/resolved" hx-trigger="sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML">
+<section id="resolved" aria-labelledby="resolved-heading" hx-get="/fragments/resolved" hx-trigger="sse:incident_published, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML">
 {%- include "status/fragments/resolved.html" %}
 </section>
 {%- if let Some(releases) = releases %}

@@ -10,6 +10,13 @@ box, ticked by default. Unticked, the update is posted quietly, as
 `"notify": false` is through the API: neither email nor Slack subscribers
 hear about it. A post without the field still notifies.
 
+The new-incident form's "Save as draft" box opens it as a
+[draft](incidents.md#drafts): only the admin page and the internal board
+show it, and nobody is told. The list marks each draft and who wrote it,
+and a draft's page carries **Publish** (with its own "Notify subscribers"
+box) and **Discard**. Updates and edits to a draft are allowed and tell
+nobody; publishing tells subscribers once, with the newest update.
+
 tocsin does no sign-in of its own. A proxy in front of it signs people in
 and tells tocsin who they are, in one of two ways:
 
@@ -25,15 +32,24 @@ and tells tocsin who they are, in one of two ways:
 `allowed_emails` and `allowed_domains` then narrow who may use the page.
 The keys are in [config.md](config.md#serverauth).
 
-The same sign-in guards the read-only [internal board](#the-internal-board)
-at `/internal/`.
+The same sign-in guards the [internal board](#the-internal-board) at
+`/internal/`.
 
 ## The internal board
 
 `/internal/` shows every check and heartbeat, including those on no
 public component: the machines, certificates, heartbeats and vendor status
 pages that do not belong on the public page. It replaces the Gatus
-dashboard. It is read-only; checks are changed only in the config files.
+dashboard. Checks are read-only there; they are changed only in the config
+files.
+
+When there are [draft incidents](incidents.md#drafts), a "Draft incidents"
+section comes first, each draft with its author and a **Publish** and a
+**Discard** button. Both post to the admin routes
+(`/admin/incidents/{id}/publish` and `/discard`), so they need the same
+sign-in and CSRF token, and return to the board. The section is rendered
+with the page and does not refresh live; reload to see a draft an agent
+just wrote.
 
 Checks are grouped like the status page: each group's components in
 order, those with `public = false` included under their group, then a

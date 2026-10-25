@@ -2,7 +2,9 @@
 
 //! The internal board: every check and heartbeat at `/internal/`, whether
 //! or not a public component shows it, and one check's recent history at
-//! `/internal/checks/{id}`. Read-only; configuration has no UI.
+//! `/internal/checks/{id}`, with draft incidents at the top. Checks are
+//! read-only, configuration has no UI; a draft's Publish and Discard
+//! buttons post to the admin routes.
 //!
 //! - **Who sees it**: a signed-in operator ([`Operator`]), proven the way
 //!   the admin pages prove one. Every refusal is a 403, auth off included.
@@ -39,8 +41,8 @@ use tocsin_core::probe::AssertionVerdict;
 use tocsin_core::status::{CheckKind, CheckResult, CheckState};
 use tocsin_engine::MISSED_PING;
 use tocsin_store::{
-    Checks, ComponentScope, HistoryPage, Newest, Order, Projects, ResultFilter, ResultSlice,
-    TimelineQuery,
+    Checks, ComponentScope, Drafts, HistoryPage, Newest, Order, Projects, ResultFilter,
+    ResultSlice, TimelineQuery,
 };
 
 use super::identity::Operator;
@@ -216,8 +218,23 @@ struct BoardPage {
     chrome: Chrome,
     events: &'static str,
     operator: String,
+    /// For the draft forms, which post to the admin routes.
+    csrf: String,
+    drafts: Vec<Draft>,
     summary: Summary,
     sections: Vec<Section>,
+}
+
+/// An incident nobody has published yet, newest first at the top of the
+/// board.
+struct Draft {
+    id: i64,
+    title: String,
+    kind: &'static str,
+    status: &'static str,
+    impact: &'static str,
+    created_at: String,
+    created_by: String,
 }
 
 #[derive(Template)]
@@ -258,12 +275,30 @@ struct Detail {
 async fn board(State(state): State<AppState>, operator: Operator) -> Result<Response, HtmlError> {
     let config = &state.config;
     let (summary, sections) = sections(&state).await?;
+    let drafts = state
+        .store
+        .draft_incidents()
+        .await
+        .map_err(|error| HtmlError::internal(&error))?
+        .iter()
+        .map(|incident| Draft {
+            id: incident.id,
+            title: incident.title.clone(),
+            kind: incident.kind.as_str(),
+            status: incident.status.as_str(),
+            impact: incident.impact.as_str(),
+            created_at: incident.created_at.to_string(),
+            created_by: incident.created_by.to_string(),
+        })
+        .collect();
     let page = BoardPage {
         layout: Layout::public(format!("Internal board · {}", config.page.title))
             .themed(&config.page),
         chrome: Chrome::private(config).live(),
         events: EVENTS,
+        csrf: operator.csrf_token(),
         operator: operator.email,
+        drafts,
         summary,
         sections,
     };
@@ -847,6 +882,7 @@ async fn detail(state: &AppState, id: &str) -> Result<Detail, HtmlError> {
                 checks: vec![id.to_owned()],
                 projects,
             }),
+            drafts: Drafts::Include,
         })
         .await
         .map_err(|error| HtmlError::internal(&error))?;

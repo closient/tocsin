@@ -192,6 +192,13 @@ fn notify_by_default() -> bool {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct DiscardInput {
+    /// The draft's id.
+    id: i64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct DeployInput {
     /// A configured `[[project]]` id.
     project: String,
@@ -374,7 +381,8 @@ impl Server {
         }
     }
 
-    /// Incidents and maintenance, newest first, with every update.
+    /// Incidents and maintenance, newest first, with every update; with
+    /// the `status:read` scope, drafts too.
     #[tool(name = "list_incidents")]
     async fn list_incidents(
         &self,
@@ -385,9 +393,10 @@ impl Server {
         match &self.backend {
             Backend::Local(state) => local(
                 async {
-                    caller(&extensions)?;
+                    let viewer = caller(&extensions)?.viewer();
                     incidents::list(
                         state,
+                        viewer,
                         incidents::ListQuery {
                             before: input.before,
                             limit: Some(limit),
@@ -438,20 +447,24 @@ impl Server {
         }
     }
 
-    /// Open an incident, or announce maintenance with `kind` set to
-    /// `maintenance`. Subscribers hear about it unless `notify` is `false`.
-    /// Needs the `incident` scope.
+    /// Draft an incident, or maintenance with `kind` set to `maintenance`.
+    /// It is a draft unless `draft` is `false`: seen only by signed-in
+    /// people and `status:read` tokens, announced to nobody, until a person
+    /// publishes it from the admin or the internal board. Needs the
+    /// `incident:draft` scope; `draft: false` publishes at once and needs
+    /// `incident`.
     #[tool(name = "create_incident")]
     async fn create_incident(
         &self,
         extensions: Extensions,
-        Parameters(new): Parameters<NewIncident>,
+        Parameters(mut new): Parameters<NewIncident>,
     ) -> CallToolResult {
+        new.draft.get_or_insert(true);
         match &self.backend {
             Backend::Local(state) => local(
                 async {
-                    let actor = caller(&extensions)?.grant::<scope::Incident>()?;
-                    incidents::open(state, new, actor).await
+                    let writer = caller(&extensions)?.incident_writer()?;
+                    incidents::open(state, new, &writer).await
                 }
                 .await,
             ),
@@ -460,7 +473,8 @@ impl Server {
     }
 
     /// Post an update to an incident, moving it to a new status. Subscribers
-    /// hear about it unless `notify` is `false`. Needs the `incident` scope.
+    /// hear about it unless `notify` is `false` or it is a draft. Needs the
+    /// `incident` scope, or `incident:draft` for a draft.
     #[tool(name = "update_incident")]
     async fn update_incident(
         &self,
@@ -475,8 +489,8 @@ impl Server {
         match &self.backend {
             Backend::Local(state) => local(
                 async {
-                    let actor = caller(&extensions)?.grant::<scope::Incident>()?;
-                    incidents::append(state, input.id, update, actor).await
+                    let writer = caller(&extensions)?.incident_writer()?;
+                    incidents::append(state, input.id, update, &writer).await
                 }
                 .await,
             ),
@@ -484,6 +498,30 @@ impl Server {
                 let id = input.id.to_string();
                 let segments = ["api", "v1", "incidents", id.as_str(), "updates"];
                 remote(post(api, &segments, &update).await)
+            }
+        }
+    }
+
+    /// Delete a draft incident and its updates. A published incident stays.
+    /// Needs the `incident` or `incident:draft` scope.
+    #[tool(name = "discard_incident")]
+    async fn discard_incident(
+        &self,
+        extensions: Extensions,
+        Parameters(input): Parameters<DiscardInput>,
+    ) -> CallToolResult {
+        match &self.backend {
+            Backend::Local(state) => local(
+                async {
+                    let writer = caller(&extensions)?.incident_writer()?;
+                    incidents::discard(state, input.id, &writer.actor).await
+                }
+                .await,
+            ),
+            Backend::Remote(api) => {
+                let id = input.id.to_string();
+                let url = api.url(&["api", "v1", "incidents", id.as_str()]);
+                remote(api.send(&Method::DELETE, url, &[], None::<&()>, true).await)
             }
         }
     }

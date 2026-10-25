@@ -21,7 +21,7 @@ use tocsin_core::release::{
 use crate::FUTURE_TOLERANCE;
 use crate::error::{Error, Result};
 use crate::history::{Checks, SHOWN, ending, subject_kind};
-use crate::incident::{actor, snapshot, text};
+use crate::incident::{Drafts, actor, snapshot, text};
 use crate::rollup::parse_column;
 
 const RELEASE_COLUMNS: &str = "id, project_id, version, environment, title, notes, url, \
@@ -97,6 +97,8 @@ pub struct TimelineQuery {
     pub limit: u32,
     /// Only events touching one component.
     pub component: Option<ComponentScope>,
+    /// Whether draft incidents count, for a trusted reader.
+    pub drafts: Drafts,
 }
 
 /// What touching a component means, resolved from the configuration by
@@ -521,11 +523,12 @@ fn incident_events(
     let incidents = conn
         .prepare_cached(&format!(
             "SELECT id, created_at, kind, title, impact, status FROM incident \
-             WHERE created_at >= :since AND {} \
+             WHERE created_at >= :since AND {} AND {} \
              AND (:component IS NULL OR EXISTS (SELECT 1 FROM incident_component \
                   WHERE incident_id = incident.id AND component_id = :component)) \
              ORDER BY created_at {direction}, id {direction} LIMIT :limit",
             window.after("created_at", "1"),
+            query.drafts.condition(),
         ))?
         .query_map(
             rusqlite::named_params! {

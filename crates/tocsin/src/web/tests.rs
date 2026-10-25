@@ -29,6 +29,7 @@ use tower::ServiceExt;
 
 use super::access::{Rejection, TOKEN_HEADER, Verifier};
 use super::identity::AdminAuth;
+use crate::http::auth::IncidentWriter;
 use crate::http::events::{Event, EventBus};
 use crate::http::{self, AppState, incidents};
 
@@ -1080,8 +1081,9 @@ async fn the_resolve_form_starts_from_wording_for_the_kind() {
                 scheduled_start: scheduled.map(|(start, _)| start),
                 scheduled_end: scheduled.map(|(_, end)| end),
                 notify: true,
+                draft: None,
             },
-            Actor::person(ALICE),
+            &IncidentWriter::publishing(Actor::person(ALICE)),
         )
         .await
         .unwrap();
@@ -1189,8 +1191,9 @@ async fn script_in_a_title_or_body_never_renders_live() {
             scheduled_start: None,
             scheduled_end: None,
             notify: true,
+            draft: None,
         },
-        Actor::person("<b>mallory</b>@example.com"),
+        &IncidentWriter::publishing(Actor::person("<b>mallory</b>@example.com")),
     )
     .await
     .unwrap();

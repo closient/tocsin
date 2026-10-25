@@ -18,13 +18,13 @@ use tocsin_core::status::{
     CheckKind, CheckList, CheckState, ComponentDetail, ComponentState, StatusDocument, overall,
 };
 use tocsin_engine::Snapshot;
+use tocsin_store::Drafts;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use super::auth::Viewer;
 use super::error::{ApiError, ErrorBody};
-use super::public;
-use super::{AppState, now};
+use super::{AppState, incidents, now, public};
 
 /// The OpenAPI tag for these routes.
 pub const TAG: &str = "status";
@@ -101,7 +101,7 @@ pub async fn component_detail(
     let snapshot = state.live.snapshot();
     let incidents = state
         .store
-        .unresolved_incidents()
+        .unresolved_incidents(incidents::drafts_for(viewer))
         .await?
         .into_iter()
         .filter(|incident| incident.components.iter().any(|named| named == id))
@@ -137,9 +137,10 @@ pub async fn list_checks(State(state): State<AppState>, viewer: Viewer) -> Json<
 }
 
 /// The status document: every component `viewer` may see, in
-/// configuration order, joined with the live state, and the incidents not
-/// yet resolved. The overall status rolls up the components shown, so a
-/// component that is not public never moves the public page's.
+/// configuration order, joined with the live state, and the published
+/// incidents not yet resolved. The overall status rolls up the components
+/// shown, so a component that is not public never moves the public page's.
+/// No viewer sees a draft here.
 ///
 /// # Errors
 ///
@@ -153,7 +154,7 @@ pub async fn document(state: &AppState, viewer: Viewer) -> Result<StatusDocument
         .filter(|component| public::shows_component(&state.config, viewer, component.id.as_str()))
         .map(|component| component_state(component, &snapshot))
         .collect();
-    let incidents: Vec<Incident> = state.store.unresolved_incidents().await?;
+    let incidents: Vec<Incident> = state.store.unresolved_incidents(Drafts::Exclude).await?;
     Ok(StatusDocument {
         title: state.config.page.title.clone(),
         status: overall(components.iter().map(|component| component.status)),

@@ -47,6 +47,10 @@ pub enum Error {
     /// A write broke a rule that depends on what is already stored, such as
     /// an update whose status does not suit the incident's kind.
     Invalid(Vec<FieldError>),
+    /// The incident with this id is published, and the write is one only a
+    /// draft takes: publishing, discarding, or a drafts-only writer's
+    /// change.
+    Published(i64),
 }
 
 /// The result of a store operation.
@@ -77,6 +81,7 @@ impl fmt::Display for Error {
                 "a check result starts at {started_at_ms} ms, more than an hour after now \
                  ({now_ms} ms); check the clock of the node that ran it"
             ),
+            Error::Published(id) => write!(f, "incident {id} is already published"),
             Error::Invalid(errors) => {
                 f.write_str("invalid write")?;
                 for (index, error) in errors.iter().enumerate() {

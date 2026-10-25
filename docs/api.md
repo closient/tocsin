@@ -71,6 +71,15 @@ on the internal board, it is listed under its group like any other. An
 incident or maintenance may not name a non-public component (422); a
 `[[project]]` may list one, since releases carry no component ids.
 
+### Draft incidents
+
+A [draft incident](incidents.md#drafts) is internal the same way until a
+person publishes it: the internal board and a `status:read` token see it,
+and no read without that scope names it. `incidents` and `timeline` leave
+it out, `incidents/{id}` is 404 for it, and `status.json`,
+`components/{id}`, `/llms.txt`, the feeds and the status page never list
+it or let it move a component's health.
+
 Likewise a `[[project]]` can be non-public. A non-public project is left
 out wholesale, not redacted: it is not in the release list, its deploys
 are not on the timeline, and `/llms.txt` does not mention it.
@@ -94,8 +103,8 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
 | `GET /api/v1/checks` | none, or `status:read` | 200, `{checks}` |
 | `GET /api/v1/checks/{id}/results?since=&before=&limit=` | `status:read` | 200, `{check_id, since, results, next_before}`, newest first |
 | `GET /api/v1/outages?since=&before=&limit=` | none, or `status:read` | 200, `{since, outages, next_before}`, newest start first |
-| `GET /api/v1/incidents?limit=&before=` | none | 200, `{incidents, next_before}`, newest first |
-| `GET /api/v1/incidents/{id}` | none | 200, the incident |
+| `GET /api/v1/incidents?limit=&before=` | none; `status:read` adds drafts | 200, `{incidents, next_before}`, newest first |
+| `GET /api/v1/incidents/{id}` | none; `status:read` for a draft | 200, the incident |
 | `GET /api/v1/releases?project=&since=&before=&limit=` | none, or `status:read` | 200, `{releases, truncated, next_before}`, newest first |
 | `GET /api/v1/timeline?component=&since=&after=&limit=` | none, or `status:read` | 200, `{since, events, truncated, next_after}`, oldest first |
 | `GET /api/v1/events` | none, or `status:read` | 200, an endless `text/event-stream` |
@@ -204,7 +213,8 @@ Errors are the same JSON every endpoint returns; the full table is in
 `GET /api/v1/events` streams every change from the moment you connect, as
 [server-sent events](https://html.spec.whatwg.org/multipage/server-sent-events.html).
 The event name is the change's `type` (`incident_created`,
-`incident_updated`, `incident_edited`, `release_published`,
+`incident_updated`, `incident_edited`, `incident_published`,
+`incident_discarded`, `release_published`,
 `release_deployed`, `check_changed`, `component_changed`) and the data is
 its JSON, as described in [incidents.md](incidents.md#events),
 [releases.md](releases.md#events) and [engine.md](engine.md#events).
@@ -219,9 +229,9 @@ The stream ends when the server shuts down; reconnect.
 Anyone sees incident events, changes of public components and of the
 checks on them, and the releases of public projects; a `status:read`
 token also sees non-public components, changes of checks on no
-component, and releases of private ones. A stream without `status:read`
-also ends when the configuration reloads, since a component may have
-changed sides; reconnect. The status page's live updates are this stream; the internal board
+component, releases of private ones, and events about draft incidents.
+A stream without `status:read` also ends when the configuration reloads,
+since a component may have changed sides; reconnect. The status page's live updates are this stream; the internal board
 has its own, `/internal/events`.
 
 ## `/llms.txt`

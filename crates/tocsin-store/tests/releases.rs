@@ -14,8 +14,8 @@ use tocsin_core::incident::{Actor, Impact, IncidentKind, NewIncident, Timestamp}
 use tocsin_core::release::{DeployStamp, NewRelease, ReleaseCursor, TimelineCursor, TimelineEvent};
 use tocsin_core::status::CheckKind;
 use tocsin_store::{
-    Checks, ComponentScope, Error, NewOutage, Order, Projects, ReleaseQuery, Store, SubjectKind,
-    TimelineQuery, Written,
+    Checks, ComponentScope, Drafts, Error, NewOutage, Order, Projects, ReleaseQuery, Store,
+    SubjectKind, TimelineQuery, Written,
 };
 
 struct Fixture {
@@ -433,6 +433,7 @@ async fn reads_see_only_the_projects_they_are_given() {
     let timeline = fixture
         .store
         .timeline(TimelineQuery {
+            drafts: Drafts::Include,
             visible: only(),
             shown: Checks::All,
             since: at(0),
@@ -622,6 +623,7 @@ fn incident(component: &str) -> NewIncident {
         scheduled_start: None,
         scheduled_end: None,
         notify: true,
+        draft: None,
     }
 }
 
@@ -692,6 +694,7 @@ async fn history(fixture: &Fixture) {
 
 fn window(since: i64, limit: u32) -> TimelineQuery {
     TimelineQuery {
+        drafts: Drafts::Include,
         visible: Projects::All,
         shown: Checks::All,
         since: at(since),
@@ -798,6 +801,7 @@ async fn the_timeline_filters_to_one_component() {
     let timeline = fixture
         .store
         .timeline(TimelineQuery {
+            drafts: Drafts::Include,
             component: Some(ComponentScope {
                 id: "api".into(),
                 checks: vec!["api-health".into(), "api-cron".into()],
@@ -859,6 +863,7 @@ async fn the_timeline_pages_through_one_instant_without_gaps_or_repeats() {
     let cursor: TimelineCursor = first.next_after.as_deref().unwrap().parse().unwrap();
     let second = store
         .timeline(TimelineQuery {
+            drafts: Drafts::Include,
             after: Some(cursor),
             ..window(0, 100)
         })
@@ -877,6 +882,7 @@ async fn the_newest_end_reads_backwards_through_the_same_order() {
     history(&fixture).await;
     let oldest_first = fixture.store.timeline(window(1_000, 100)).await.unwrap();
     let newest = |after| TimelineQuery {
+        drafts: Drafts::Include,
         order: Order::NewestFirst,
         after,
         ..window(1_000, 3)
@@ -920,4 +926,31 @@ async fn the_timeline_reads_incidents_by_creation_time_from_an_index() {
         plan.iter().any(|step| step.contains("incident_by_created")),
         "{plan:?}"
     );
+}
+
+#[tokio::test]
+async fn a_draft_incident_is_on_the_timeline_only_when_drafts_are_included() {
+    let fixture = open();
+    let store = &fixture.store;
+    store
+        .create_incident(
+            NewIncident {
+                draft: Some(true),
+                ..incident("api")
+            },
+            ci(),
+            at(2_000),
+        )
+        .await
+        .unwrap();
+    let included = store.timeline(window(1_000, 100)).await.unwrap();
+    assert_eq!(kinds(&included.events), [("incident", 2_000)]);
+    let excluded = store
+        .timeline(TimelineQuery {
+            drafts: Drafts::Exclude,
+            ..window(1_000, 100)
+        })
+        .await
+        .unwrap();
+    assert_eq!(kinds(&excluded.events), []);
 }

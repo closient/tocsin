@@ -30,6 +30,7 @@ pub fn run(command: IncidentCommand) -> Result<Report, Failure> {
             message,
             status,
             quiet,
+            draft,
         } => open_incident(
             &server,
             &NewIncident {
@@ -42,8 +43,11 @@ pub fn run(command: IncidentCommand) -> Result<Report, Failure> {
                 scheduled_start: None,
                 scheduled_end: None,
                 notify: !quiet,
+                draft: draft.then_some(true),
             },
         ),
+        IncidentCommand::Publish { server, id, quiet } => publish(&server, id, quiet),
+        IncidentCommand::Discard { server, id } => discard(&server, id),
         IncidentCommand::Update {
             server,
             id,
@@ -82,14 +86,7 @@ pub fn run(command: IncidentCommand) -> Result<Report, Failure> {
             };
             edit_incident(&server, id, &edit)
         }
-        IncidentCommand::Show { server, id } => {
-            let incident: Incident = Client::new(&server)?.get(&format!("{INCIDENTS}/{id}"))?;
-            Ok(Report {
-                exit: Exit::Ok,
-                json: to_json(&incident),
-                text: describe(&incident),
-            })
-        }
+        IncidentCommand::Show { server, id } => show(&server, id),
         IncidentCommand::List {
             server,
             limit,
@@ -99,7 +96,7 @@ pub fn run(command: IncidentCommand) -> Result<Report, Failure> {
             if let Some(before) = before {
                 let _ = write!(path, "&before={before}");
             }
-            let list: IncidentList = Client::new(&server)?.get(&path)?;
+            let list: IncidentList = Client::new(&server)?.read_as(&path)?;
             Ok(Report {
                 exit: Exit::Ok,
                 json: to_json(&list),
@@ -123,6 +120,34 @@ pub fn run(command: IncidentCommand) -> Result<Report, Failure> {
     }
 }
 
+/// `incident publish`: shows draft `id` publicly, telling subscribers
+/// unless `quiet`.
+fn publish(server: &ServerArgs, id: i64, quiet: bool) -> Result<Report, Failure> {
+    let incident: Incident = Client::new(server)?.write(
+        &Method::POST,
+        &format!("{INCIDENTS}/{id}/publish"),
+        &json!({ "notify": !quiet }),
+    )?;
+    Ok(written(&incident, "published"))
+}
+
+/// `incident discard`: deletes draft `id`.
+fn discard(server: &ServerArgs, id: i64) -> Result<Report, Failure> {
+    let incident: Incident =
+        Client::new(server)?.write(&Method::DELETE, &format!("{INCIDENTS}/{id}"), &json!({}))?;
+    Ok(written(&incident, "discarded"))
+}
+
+/// `incident show`: one incident with every update.
+fn show(server: &ServerArgs, id: i64) -> Result<Report, Failure> {
+    let incident: Incident = Client::new(server)?.read_as(&format!("{INCIDENTS}/{id}"))?;
+    Ok(Report {
+        exit: Exit::Ok,
+        json: to_json(&incident),
+        text: describe(&incident),
+    })
+}
+
 fn open_incident(server: &ServerArgs, new: &NewIncident) -> Result<Report, Failure> {
     let incident: Incident = Client::new(server)?.write(&Method::POST, INCIDENTS, new)?;
     Ok(written(&incident, "opened"))
@@ -140,7 +165,8 @@ fn edit_incident(server: &ServerArgs, id: i64, edit: &IncidentEdit) -> Result<Re
     Ok(written(&incident, "edited"))
 }
 
-/// One incident, printed or written to `out`.
+/// One published incident, printed or written to `out`. Read without the
+/// token, so a draft is a 404: the export is for publishing.
 fn export_one(client: &Client, id: i64, out: Option<&Path>) -> Result<Report, Failure> {
     let incident: Incident = client.get(&format!("{INCIDENTS}/{id}"))?;
     let markdown = export::markdown(&incident);
@@ -182,6 +208,7 @@ pub fn run_maintenance(command: MaintenanceCommand) -> Result<Report, Failure> {
                 scheduled_start: Some(start),
                 scheduled_end: Some(end),
                 notify: true,
+                draft: None,
             };
             let incident: Incident = Client::new(&server)?.write(&Method::POST, INCIDENTS, &new)?;
             Ok(written(&incident, "scheduled"))
@@ -189,7 +216,8 @@ pub fn run_maintenance(command: MaintenanceCommand) -> Result<Report, Failure> {
     }
 }
 
-/// Every incident, paging back from the newest, one file each.
+/// Every published incident, paging back from the newest, one file each.
+/// Read without the token, so drafts are never listed.
 fn export_all(client: &Client, out: &Path) -> Result<Report, Failure> {
     let mut files = Vec::new();
     let mut before = None;
@@ -237,11 +265,12 @@ fn write_file(out: &Path, incident: &Incident, markdown: &str) -> Result<String,
 }
 
 fn written(incident: &Incident, verb: &str) -> Report {
+    let draft = if incident.is_draft() { " draft" } else { "" };
     Report {
         exit: Exit::Ok,
         json: to_json(incident),
         text: format!(
-            "{} {} {verb}: {} ({})",
+            "{}{draft} {} {verb}: {} ({})",
             incident.kind, incident.id, incident.title, incident.status
         ),
     }
@@ -257,6 +286,9 @@ fn describe(incident: &Incident) -> String {
         "{} {}: {}\nstatus {}, impact {}",
         incident.kind, incident.id, incident.title, incident.status, incident.impact
     );
+    if incident.is_draft() {
+        let _ = write!(text, "\ndraft by {}: not public", incident.created_by);
+    }
     if !incident.components.is_empty() {
         let _ = write!(text, ", components {}", incident.components.join(", "));
     }
@@ -285,8 +317,13 @@ fn table(list: &IncidentList) -> String {
     for incident in &list.incidents {
         let _ = writeln!(
             text,
-            "{:>5}  {:<11}  {:<13}  {:<8}  {}",
-            incident.id, incident.kind, incident.status, incident.impact, incident.title
+            "{:>5}  {:<11}  {:<13}  {:<8}  {}{}",
+            incident.id,
+            incident.kind,
+            incident.status,
+            incident.impact,
+            incident.title,
+            if incident.is_draft() { " (draft)" } else { "" }
         );
     }
     if let Some(next) = list.next_before {

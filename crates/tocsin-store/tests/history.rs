@@ -8,8 +8,8 @@ use tocsin_core::incident::Timestamp;
 use tocsin_core::release::TimelineEvent;
 use tocsin_core::status::{CheckKind, OutageEnding};
 use tocsin_store::{
-    Checks, HistoryPage, NewCheckResult, NewOutage, Newest, Order, Projects, ResultFilter, Store,
-    SubjectKind, TimelineQuery,
+    Checks, Drafts, HistoryPage, NewCheckResult, NewOutage, Newest, Order, Projects, ResultFilter,
+    Store, SubjectKind, TimelineQuery,
 };
 
 fn result(check: &str, started_at_ms: i64, health: Health) -> NewCheckResult {
@@ -235,6 +235,7 @@ async fn outages_narrow_to_the_checks_shown() {
 
     let timeline = store
         .timeline(TimelineQuery {
+            drafts: Drafts::Include,
             visible: Projects::All,
             shown: shown(),
             since: Timestamp::from_millis(0),
@@ -291,6 +292,7 @@ async fn an_outage_reads_back_how_it_ended() {
 
     let timeline = store
         .timeline(TimelineQuery {
+            drafts: Drafts::Include,
             visible: Projects::All,
             shown: Checks::All,
             since: Timestamp::from_millis(0),
@@ -579,6 +581,7 @@ async fn outages_of_removed_checks_follow_the_component_they_recorded() {
 
     let timeline = store
         .timeline(TimelineQuery {
+            drafts: Drafts::Include,
             visible: Projects::All,
             shown,
             since: Timestamp::from_millis(0),

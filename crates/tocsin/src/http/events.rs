@@ -70,6 +70,17 @@ pub enum Event {
         /// As stored after the edit.
         incident: Arc<Incident>,
     },
+    /// A draft was published: from now on it is public, as if just
+    /// opened.
+    IncidentPublished {
+        /// As stored, with `published_at` and `published_by`.
+        incident: Arc<Incident>,
+    },
+    /// A draft was discarded: deleted, never having been public.
+    IncidentDiscarded {
+        /// As it was before it was deleted.
+        incident: Arc<Incident>,
+    },
     /// A release was published, or published again with new fields.
     ReleasePublished {
         /// As stored.
@@ -101,6 +112,8 @@ impl Event {
             Event::IncidentCreated { .. } => "incident_created",
             Event::IncidentUpdated { .. } => "incident_updated",
             Event::IncidentEdited { .. } => "incident_edited",
+            Event::IncidentPublished { .. } => "incident_published",
+            Event::IncidentDiscarded { .. } => "incident_discarded",
             Event::ReleasePublished { .. } => "release_published",
             Event::ReleaseDeployed { .. } => "release_deployed",
             Event::CheckChanged(_) => "check_changed",
@@ -110,10 +123,11 @@ impl Event {
 
     /// Whether `viewer` may see this event under `config`: everything but
     /// a release of a project that is not public, a change of a component
-    /// that is not public, and a change of a check or heartbeat on no
-    /// component or on one that is not public, which only a trusted viewer
-    /// sees. The check change carries the component the engine's
-    /// configuration gave the check when it changed.
+    /// that is not public, a change of a check or heartbeat on no
+    /// component or on one that is not public, and anything about a draft
+    /// incident, which only a trusted viewer sees. The check change carries
+    /// the component the engine's configuration gave the check when it
+    /// changed.
     fn visible_to(&self, config: &Config, viewer: Viewer) -> bool {
         match self {
             Event::ReleasePublished { public, .. } | Event::ReleaseDeployed { public, .. } => {
@@ -126,9 +140,13 @@ impl Event {
                 viewer == Viewer::Trusted
                     || public::component_is_public(config, &change.component_id)
             }
-            Event::IncidentCreated { .. }
-            | Event::IncidentUpdated { .. }
-            | Event::IncidentEdited { .. } => true,
+            Event::IncidentCreated { incident }
+            | Event::IncidentUpdated { incident }
+            | Event::IncidentEdited { incident }
+            | Event::IncidentPublished { incident }
+            | Event::IncidentDiscarded { incident } => {
+                !incident.is_draft() || viewer == Viewer::Trusted
+            }
         }
     }
 }
@@ -337,12 +355,15 @@ pub async fn wake_on_incident_changes(
             Ok(
                 Event::IncidentCreated { .. }
                 | Event::IncidentUpdated { .. }
-                | Event::IncidentEdited { .. },
+                | Event::IncidentEdited { .. }
+                | Event::IncidentPublished { .. },
             )
             // Some of the events missed may have been incident changes.
             | Err(RecvError::Lagged(_)) => engine.notices_changed(),
             Ok(
-                Event::ReleasePublished { .. }
+                // A draft never counted toward a component's status.
+                Event::IncidentDiscarded { .. }
+                | Event::ReleasePublished { .. }
                 | Event::ReleaseDeployed { .. }
                 | Event::CheckChanged(_)
                 | Event::ComponentChanged(_),
@@ -397,6 +418,8 @@ pub(crate) mod tests {
             created_by: actor.clone(),
             updated_at: Timestamp::from_millis(0),
             updated_by: actor.clone(),
+            published_at: Some(Timestamp::from_millis(0)),
+            published_by: Some(actor.clone()),
             updates: Vec::new(),
         });
         let release = Arc::new(Release {
@@ -421,7 +444,13 @@ pub(crate) mod tests {
             Event::IncidentUpdated {
                 incident: incident.clone(),
             },
-            Event::IncidentEdited { incident },
+            Event::IncidentEdited {
+                incident: incident.clone(),
+            },
+            Event::IncidentPublished {
+                incident: incident.clone(),
+            },
+            Event::IncidentDiscarded { incident },
             Event::ReleasePublished {
                 release: release.clone(),
                 public,
@@ -537,5 +566,36 @@ pub(crate) mod tests {
         let config = config(true);
         assert!(event.visible_to(&config, Viewer::Trusted));
         assert!(!event.visible_to(&config, Viewer::Public));
+    }
+
+    #[test]
+    fn an_event_about_a_draft_reaches_only_a_trusted_viewer() {
+        let config = config(true);
+        let mut drafts = 0;
+        for mut event in every_event(true) {
+            let (Event::IncidentCreated { incident }
+            | Event::IncidentUpdated { incident }
+            | Event::IncidentEdited { incident }
+            | Event::IncidentPublished { incident }
+            | Event::IncidentDiscarded { incident }) = &mut event
+            else {
+                continue;
+            };
+            let draft = Arc::make_mut(incident);
+            draft.published_at = None;
+            draft.published_by = None;
+            drafts += 1;
+            assert!(
+                !event.visible_to(&config, Viewer::Public),
+                "{}",
+                event.name()
+            );
+            assert!(
+                event.visible_to(&config, Viewer::Trusted),
+                "{}",
+                event.name()
+            );
+        }
+        assert_eq!(drafts, 5);
     }
 }

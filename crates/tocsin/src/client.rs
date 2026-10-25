@@ -180,6 +180,13 @@ impl Client {
         self.request(&Method::GET, path, None::<&()>, self.api.has_token())
     }
 
+    /// `GET path` decoded as `T`, with the token when one is set: the
+    /// server answers without one as it does the public, and with a
+    /// `status:read` one includes what is not public, such as drafts.
+    pub fn read_as<T: DeserializeOwned>(&self, path: &str) -> Result<T, Failure> {
+        self.request(&Method::GET, path, None::<&()>, self.api.has_token())
+    }
+
     /// A write: `method path` with a JSON body and the token.
     pub fn write<B: Serialize, T: DeserializeOwned>(
         &self,

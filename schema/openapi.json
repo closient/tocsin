@@ -536,7 +536,7 @@
         "tags": [
           "incidents"
         ],
-        "summary": "List incidents and maintenance, newest first.",
+        "summary": "List incidents and maintenance, newest first. Drafts are listed only\nto a `status:read` token.",
         "operationId": "list_incidents",
         "parameters": [
           {
@@ -604,7 +604,7 @@
         "tags": [
           "incidents"
         ],
-        "summary": "Open an incident or announce scheduled maintenance.",
+        "summary": "Open an incident or announce scheduled maintenance, published or as a\ndraft. `draft` left out publishes for an `incident` token and drafts\nfor an `incident:draft` one.",
         "operationId": "create_incident",
         "requestBody": {
           "content": {
@@ -638,7 +638,7 @@
             }
           },
           "403": {
-            "description": "The token lacks the `incident` scope",
+            "description": "The token has neither incident scope, or asks to publish (`\"draft\": false`) with only `incident:draft`",
             "content": {
               "application/json": {
                 "schema": {
@@ -670,7 +670,7 @@
         "tags": [
           "incidents"
         ],
-        "summary": "One incident with every update.",
+        "summary": "One incident with every update. A draft is shown only to a\n`status:read` token.",
         "operationId": "get_incident",
         "parameters": [
           {
@@ -723,11 +723,87 @@
           }
         ]
       },
+      "delete": {
+        "tags": [
+          "incidents"
+        ],
+        "summary": "Discard a draft: delete it with its updates. A published incident is\nnever deleted. Answers the draft as it was.",
+        "operationId": "discard_incident",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Incident id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Discarded; the draft as it was",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Incident"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token has neither incident scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No incident has that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "It is published, and stays",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
       "patch": {
         "tags": [
           "incidents"
         ],
-        "summary": "Change the title, impact, components or schedule. Fields left out are\nunchanged; status changes only through an update.",
+        "summary": "Change the title, impact, components or schedule. Fields left out are\nunchanged; status changes only through an update. An `incident:draft`\ntoken may edit only a draft.",
         "operationId": "edit_incident",
         "parameters": [
           {
@@ -773,7 +849,7 @@
             }
           },
           "403": {
-            "description": "The token lacks the `incident` scope",
+            "description": "The token has neither incident scope, or only `incident:draft` and the incident is published",
             "content": {
               "application/json": {
                 "schema": {
@@ -810,12 +886,107 @@
         ]
       }
     },
+    "/api/v1/incidents/{id}/publish": {
+      "post": {
+        "tags": [
+          "incidents"
+        ],
+        "summary": "Publish a draft: show it publicly from now on and announce it to\nsubscribers once, as if it had just been opened. Needs the `incident`\nscope; `incident:draft` never publishes.",
+        "operationId": "publish_incident",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Incident id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional; left out, subscribers are notified",
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Publish"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Published; the incident with `published_at` and `published_by`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Incident"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks the `incident` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No incident has that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "It is already published",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/incidents/{id}/updates": {
       "post": {
         "tags": [
           "incidents"
         ],
-        "summary": "Append an update, moving the incident to its status.",
+        "summary": "Append an update, moving the incident to its status. An\n`incident:draft` token may update only a draft.",
         "operationId": "add_update",
         "parameters": [
           {
@@ -861,7 +1032,7 @@
             }
           },
           "403": {
-            "description": "The token lacks the `incident` scope",
+            "description": "The token has neither incident scope, or only `incident:draft` and the incident is published",
             "content": {
               "application/json": {
                 "schema": {
@@ -2038,7 +2209,7 @@
         "properties": {
           "error": {
             "type": "string",
-            "description": "Stable machine-readable code: `unauthorized`, `forbidden`,\n`not_found`, `method_not_allowed`, `bad_request`, `too_large`, `invalid`,\n`too_many_requests`, `unavailable` or `internal`."
+            "description": "Stable machine-readable code: `unauthorized`, `forbidden`,\n`not_found`, `method_not_allowed`, `conflict`, `bad_request`,\n`too_large`, `invalid`, `too_many_requests`, `unavailable` or\n`internal`."
           },
           "fields": {
             "type": "array",
@@ -2134,6 +2305,28 @@
           "kind": {
             "$ref": "#/components/schemas/IncidentKind",
             "description": "Incident or maintenance. Fixed at creation."
+          },
+          "published_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When it was published: shown publicly and announced to subscribers.\n`null` while it is a draft, which only trusted readers see."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "published_by": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Actor",
+                "description": "Who published it; `null` while it is a draft."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "resolved_at": {
             "oneOf": [
@@ -2344,6 +2537,13 @@
               "type": "string"
             },
             "description": "Ids of configured components. May be empty."
+          },
+          "draft": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true` saves it as a draft: internal only, announced to nobody, until\na person publishes it. Left out, it is published when the caller may\npublish (the `incident` scope, or a person) and a draft otherwise\n(the `incident:draft` scope); the MCP tool always defaults to a\ndraft."
           },
           "impact": {
             "$ref": "#/components/schemas/Impact",
@@ -2668,6 +2868,18 @@
           "up",
           "down"
         ]
+      },
+      "Publish": {
+        "type": "object",
+        "description": "`POST /api/v1/incidents/{id}/publish`: whether subscribers hear about\nit. The body may be left out.",
+        "properties": {
+          "notify": {
+            "type": "boolean",
+            "description": "`false` publishes it quietly: shown publicly, announced to nobody.",
+            "default": true
+          }
+        },
+        "additionalProperties": false
       },
       "Release": {
         "type": "object",

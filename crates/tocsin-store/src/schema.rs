@@ -24,6 +24,7 @@ static MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("../migrations/0008_outage_ending.sql")),
     M::up(include_str!("../migrations/0009_subscribers.sql")),
     M::up(include_str!("../migrations/0010_slack.sql")),
+    M::up(include_str!("../migrations/0011_incident_drafts.sql")),
 ];
 
 /// How long a connection waits for another process's lock before failing.
@@ -130,5 +131,51 @@ mod tests {
                 ("web".to_owned(), Some("recovered".to_owned()))
             ]
         );
+    }
+
+    #[test]
+    fn incidents_before_migration_11_are_published_by_their_creator() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let migrations = super::migrations();
+        migrations.to_version(&mut conn, 10).unwrap();
+        conn.execute_batch(
+            "INSERT INTO incident (kind, title, impact, status, created_at,
+                 created_by_kind, created_by, updated_at, updated_by_kind, updated_by)
+                 VALUES ('incident', 'Slow', 'minor', 'investigating', 1000,
+                 'token', 'deploy', 2000, 'person', 'ops@example.com');",
+        )
+        .unwrap();
+        migrations.to_latest(&mut conn).unwrap();
+        let published: (Option<i64>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT published_at, published_by_kind, published_by FROM incident",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            published,
+            (
+                Some(1000),
+                Some("token".to_owned()),
+                Some("deploy".to_owned())
+            )
+        );
+        let unpublish = conn.execute(
+            "UPDATE incident SET published_at = NULL, published_by_kind = NULL, published_by = NULL",
+            [],
+        );
+        assert!(
+            unpublish.is_err(),
+            "a published incident went back to draft"
+        );
+        let half = conn.execute(
+            "INSERT INTO incident (kind, title, impact, status, created_at,
+                 created_by_kind, created_by, updated_at, updated_by_kind, updated_by, published_at)
+                 VALUES ('incident', 'Half', 'minor', 'investigating', 1000,
+                 'token', 'deploy', 1000, 'token', 'deploy', 1000)",
+            [],
+        );
+        assert!(half.is_err(), "published_at was set without published_by");
     }
 }

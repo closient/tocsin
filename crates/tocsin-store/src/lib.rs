@@ -48,7 +48,7 @@ use crate::checkpoint::Checkpointer;
 pub use crate::day::Day;
 pub use crate::error::{Error, Result};
 pub use crate::history::{Checks, HistoryPage, Newest, ResultFilter, ResultSlice};
-pub use crate::incident::OpenIncident;
+pub use crate::incident::{Drafts, OpenIncident};
 pub use crate::outage::{LastUp, LatestResult, Outage};
 use crate::readers::Readers;
 pub use crate::release::{ComponentScope, Order, Projects, ReleaseQuery, TimelineQuery, Written};
@@ -594,8 +594,10 @@ impl Store {
     }
 
     /// Opens an incident (or announces maintenance) with its first update,
-    /// written by `actor` at `at`. The caller has validated `new`, including
-    /// that its components are configured.
+    /// written by `actor` at `at`: a draft when `new.draft` is `Some(true)`,
+    /// otherwise published by `actor` at once. The caller has validated
+    /// `new`, including that its components are configured, and that
+    /// `actor` may publish.
     ///
     /// # Errors
     ///
@@ -619,23 +621,28 @@ impl Store {
     }
 
     /// Appends an update to incident `id` and moves it to the update's
-    /// status. `None` if no incident has that id.
+    /// status. `None` if no incident has that id. With `drafts_only`, only
+    /// a draft takes it.
     ///
     /// # Errors
     ///
     /// [`Error::Invalid`] if the status does not suit the incident's kind;
+    /// [`Error::Published`] if `drafts_only` and it is published;
     /// otherwise the write fails.
     pub async fn add_incident_update(
         &self,
         id: i64,
         update: NewUpdate,
+        drafts_only: bool,
         actor: Actor,
         at: Timestamp,
     ) -> Result<Option<Incident>> {
         self.writer
             .run(move |conn| {
                 let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                if incident::add_update(&transaction, id, &update, &actor, at)?.is_none() {
+                if incident::add_update(&transaction, id, &update, drafts_only, &actor, at)?
+                    .is_none()
+                {
                     return Ok(None);
                 }
                 let incident = incident::load(&transaction, id)?;
@@ -647,26 +654,72 @@ impl Store {
 
     /// Changes incident `id`'s title, impact, components or schedule, and
     /// logs the edit with its author. `None` if no incident has that id.
+    /// With `drafts_only`, only a draft takes it.
     ///
     /// # Errors
     ///
     /// [`Error::Invalid`] if the result would break a rule (a schedule on
-    /// an incident, a window ending before it starts); otherwise the write
-    /// fails.
+    /// an incident, a window ending before it starts);
+    /// [`Error::Published`] if `drafts_only` and it is published;
+    /// otherwise the write fails.
     pub async fn edit_incident(
         &self,
         id: i64,
         edit: IncidentEdit,
+        drafts_only: bool,
         actor: Actor,
         at: Timestamp,
     ) -> Result<Option<Incident>> {
         self.writer
             .run(move |conn| {
                 let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                if incident::edit(&transaction, id, &edit, &actor, at)?.is_none() {
+                if incident::edit(&transaction, id, &edit, drafts_only, &actor, at)?.is_none() {
                     return Ok(None);
                 }
                 let incident = incident::load(&transaction, id)?;
+                transaction.commit()?;
+                Ok(incident)
+            })
+            .await
+    }
+
+    /// Publishes draft incident `id`: `actor` at `at`. `None` if no
+    /// incident has that id.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Published`] if it already is; otherwise the write fails.
+    pub async fn publish_incident(
+        &self,
+        id: i64,
+        actor: Actor,
+        at: Timestamp,
+    ) -> Result<Option<Incident>> {
+        self.writer
+            .run(move |conn| {
+                let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                if incident::publish(&transaction, id, &actor, at)?.is_none() {
+                    return Ok(None);
+                }
+                let incident = incident::load(&transaction, id)?;
+                transaction.commit()?;
+                Ok(incident)
+            })
+            .await
+    }
+
+    /// Deletes draft incident `id` with its updates, and returns it as it
+    /// was. `None` if no incident has that id.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Published`] if it is published, which is never deleted;
+    /// otherwise the write fails.
+    pub async fn discard_incident(&self, id: i64) -> Result<Option<Incident>> {
+        self.writer
+            .run(move |conn| {
+                let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let incident = incident::discard(&transaction, id)?;
                 transaction.commit()?;
                 Ok(incident)
             })
@@ -795,9 +848,23 @@ impl Store {
     /// # Errors
     ///
     /// The read fails.
-    pub async fn incidents(&self, before: Option<i64>, limit: u32) -> Result<Vec<Incident>> {
-        self.read(move |conn| incident::list(conn, before, limit))
+    pub async fn incidents(
+        &self,
+        drafts: Drafts,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<Incident>> {
+        self.read(move |conn| incident::list(conn, drafts, before, limit))
             .await
+    }
+
+    /// Every draft incident, resolved or not, newest first.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn draft_incidents(&self) -> Result<Vec<Incident>> {
+        self.read(incident::drafts).await
     }
 
     /// Up to `limit` incidents and maintenance naming `[[component]]`
@@ -806,15 +873,20 @@ impl Store {
     /// # Errors
     ///
     /// The read fails.
-    pub async fn incidents_naming(&self, component: &str, limit: u32) -> Result<Vec<Incident>> {
+    pub async fn incidents_naming(
+        &self,
+        drafts: Drafts,
+        component: &str,
+        limit: u32,
+    ) -> Result<Vec<Incident>> {
         let component = component.to_owned();
-        self.read(move |conn| incident::naming(conn, &component, limit))
+        self.read(move |conn| incident::naming(conn, drafts, &component, limit))
             .await
     }
 
-    /// Every incident not yet resolved and every maintenance not yet
-    /// completed, oldest first: what the engine needs to derive component
-    /// status. The schema keeps `resolved_at` set exactly when the status is
+    /// Every published incident not yet resolved and every published
+    /// maintenance not yet completed, oldest first: what the engine needs
+    /// to derive component status. A draft changes no status. The schema keeps `resolved_at` set exactly when the status is
     /// `resolved` or `completed`.
     ///
     /// # Errors
@@ -831,8 +903,9 @@ impl Store {
     /// # Errors
     ///
     /// The read fails.
-    pub async fn unresolved_incidents(&self) -> Result<Vec<Incident>> {
-        self.read(incident::unresolved).await
+    pub async fn unresolved_incidents(&self, drafts: Drafts) -> Result<Vec<Incident>> {
+        self.read(move |conn| incident::unresolved(conn, drafts))
+            .await
     }
 
     /// One page of `check_id`'s raw results, newest first.

@@ -33,6 +33,7 @@ use tocsin_store::{Day, NewCheckResult, NewOutage, Store, SubjectKind};
 use tower::ServiceExt;
 
 use super::status::{FRAGMENT_CACHE, PAGE_CACHE};
+use crate::http::auth::IncidentWriter;
 use crate::http::events::tests::every_event;
 use crate::http::events::{Event, EventBus, RESYNC};
 use crate::http::{self, AppState, incidents, now, releases};
@@ -227,8 +228,9 @@ impl Site {
                 scheduled_start: scheduled.map(|(start, _)| start),
                 scheduled_end: scheduled.map(|(_, end)| end),
                 notify: true,
+                draft: None,
             },
-            Actor::person("alice@example.com"),
+            &IncidentWriter::publishing(Actor::person("alice@example.com")),
         )
         .await
         .unwrap()
@@ -244,7 +246,7 @@ impl Site {
                 message: "Fixed.".to_owned(),
                 notify: true,
             },
-            Actor::person("alice@example.com"),
+            &IncidentWriter::publishing(Actor::person("alice@example.com")),
         )
         .await
         .unwrap();
@@ -384,20 +386,20 @@ async fn the_index_page_refreshes_each_section_on_the_events_that_change_it() {
     let expected = [
         (
             "/fragments/banner",
-            "sse:component_changed, sse:incident_created, sse:incident_updated, sse:incident_edited, sse:resync, every 60s",
+            "sse:component_changed, sse:incident_created, sse:incident_published, sse:incident_updated, sse:incident_edited, sse:resync, every 60s",
         ),
         (
             "/fragments/incidents",
-            "sse:incident_created, sse:incident_updated, sse:incident_edited, sse:resync, every 60s",
+            "sse:incident_created, sse:incident_published, sse:incident_updated, sse:incident_edited, sse:resync, every 60s",
         ),
         (
             "/fragments/components",
-            "sse:component_changed, sse:incident_created, sse:incident_updated, sse:incident_edited, sse:resync, every 60s",
+            "sse:component_changed, sse:incident_created, sse:incident_published, sse:incident_updated, sse:incident_edited, sse:resync, every 60s",
         ),
         ("/fragments/uptime", "sse:resync, every 600s"),
         (
             "/fragments/resolved",
-            "sse:incident_updated, sse:incident_edited, sse:resync, every 60s",
+            "sse:incident_published, sse:incident_updated, sse:incident_edited, sse:resync, every 60s",
         ),
         (
             "/fragments/releases",

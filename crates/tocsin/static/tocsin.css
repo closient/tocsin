@@ -105,6 +105,8 @@ a.name, a.item-title { color: var(--fg); }
 .muted { color: var(--muted); }
 .notice { padding: 0.75rem 1rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
 .notice.error { border-color: var(--bad); }
+.notice.draft { border-color: var(--warn); }
+.notice.draft form + form { margin-top: 0.5rem; }
 
 /* A surface: the quiet card groups, lists and bars sit on. */
 .surface {
@@ -118,6 +120,9 @@ a.name, a.item-title { color: var(--fg); }
 .items > li { padding: 0.75rem 0; border-bottom: 1px solid var(--line); }
 .items > li:last-child { border-bottom: 0; }
 .items.surface > li { padding: 1rem 1.25rem; }
+.drafts .items { margin: 0; }
+.drafts .items > li { padding: 0.75rem 1.25rem; }
+.drafts form.inline + form.inline { margin-left: 0.5rem; }
 .item-title { display: inline-block; font-weight: 600; overflow-wrap: anywhere; }
 .meta { display: flex; flex-wrap: wrap; gap: 0.375rem 0.5rem; align-items: center; margin-top: 0.25rem; color: var(--muted); font-size: var(--step--1); }
 .items .markdown { margin-top: 0.5rem; }
@@ -143,6 +148,8 @@ a.name, a.item-title { color: var(--fg); }
 .badge.minor::before, .badge.monitoring::before, .badge.identified::before, .badge.degraded::before { background: var(--warn); }
 .badge.major::before, .badge.critical::before, .badge.investigating::before, .badge.down::before { background: var(--bad); }
 .badge.maintenance::before, .badge.scheduled::before, .badge.in_progress::before { background: var(--accent); }
+.badge.draft { border-style: dashed; }
+.badge.draft::before { background: var(--warn); }
 
 .markdown :first-child { margin-top: 0; }
 .markdown :last-child { margin-bottom: 0; }

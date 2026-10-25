@@ -53,6 +53,7 @@ use super::page::{FeedLink, HtmlError, when_in};
 use super::releases::{ProjectFilter, Stamp, href as release_href, project_name, versions};
 use super::status::{PAGE_CACHE, cached, component_name, status_text, zone};
 use crate::http::AppState;
+use crate::http::auth::Viewer;
 use crate::http::incidents::{self, ListQuery};
 
 /// Entries in a feed.
@@ -354,6 +355,7 @@ async fn incident_feed(
     let site = Site::new(&state.config, &request);
     let listed = incidents::list(
         &state,
+        Viewer::Public,
         ListQuery {
             before: None,
             limit: Some(FEED_SIZE),
@@ -381,7 +383,7 @@ async fn component_feed(
     request: HeaderMap,
 ) -> Result<Response, HtmlError> {
     let id = stem(&file)?;
-    let listed = incidents::naming(&state, id, FEED_SIZE).await?;
+    let listed = incidents::naming(&state, Viewer::Public, id, FEED_SIZE).await?;
     let site = Site::new(&state.config, &request);
     let head = Head {
         id: format!("urn:tocsin:incidents:{id}"),

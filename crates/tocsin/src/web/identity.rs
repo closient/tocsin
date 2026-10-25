@@ -268,6 +268,15 @@ impl FromRequestParts<AppState> for Admin {
 pub struct Operator {
     /// Their email address, lowercased.
     pub email: String,
+    auth: Arc<AdminAuth>,
+}
+
+impl Operator {
+    /// A CSRF token for the admin forms on the board, such as publishing a
+    /// draft.
+    pub fn csrf_token(&self) -> String {
+        self.auth.csrf.issue(&self.email, SystemTime::now())
+    }
 }
 
 impl FromRequestParts<AppState> for Operator {
@@ -279,7 +288,7 @@ impl FromRequestParts<AppState> for Operator {
             return Err(forbidden());
         }
         match Admin::from_request_parts(parts, state).await {
-            Ok(Admin { email, .. }) => Ok(Operator { email }),
+            Ok(Admin { email, auth }) => Ok(Operator { email, auth }),
             Err(_) => Err(forbidden()),
         }
     }

@@ -173,7 +173,8 @@ pub struct ServerArgs {
     pub url: String,
 
     /// A `[[token]]` secret with the scope the command needs: `incident`
-    /// for incidents and maintenance, `release` for releases, `heartbeat`
+    /// (or `incident:draft`, for drafts only) for incidents and
+    /// maintenance, `release` for releases, `heartbeat`
     /// for pings, `status:read` to read what is not public and for
     /// `config status`. Prefer the environment variable: arguments show in
     /// `ps`.
@@ -216,6 +217,33 @@ pub enum IncidentCommand {
         /// Open it without emailing subscribers.
         #[arg(long)]
         quiet: bool,
+
+        /// Save it as a draft: seen only by signed-in people and
+        /// `status:read` tokens, announced to nobody, until `tocsin
+        /// incident publish`. An `incident:draft` token always drafts.
+        #[arg(long)]
+        draft: bool,
+    },
+    /// Publish a draft: show it publicly and tell subscribers once. Needs
+    /// the `incident` scope.
+    Publish {
+        #[command(flatten)]
+        server: ServerArgs,
+
+        /// The draft's id.
+        id: i64,
+
+        /// Publish it without emailing subscribers.
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Delete a draft and its updates. A published incident stays.
+    Discard {
+        #[command(flatten)]
+        server: ServerArgs,
+
+        /// The draft's id.
+        id: i64,
     },
     /// Post an update, moving the incident to a status.
     Update {
@@ -275,7 +303,8 @@ pub enum IncidentCommand {
         #[arg(long, value_name = "TIME")]
         end: Option<Timestamp>,
     },
-    /// Show one incident with every update.
+    /// Show one incident with every update. A draft needs a token with
+    /// the `status:read` scope.
     Show {
         #[command(flatten)]
         server: ServerArgs,
@@ -283,7 +312,8 @@ pub enum IncidentCommand {
         /// The incident's id.
         id: i64,
     },
-    /// List incidents and maintenance, newest first.
+    /// List incidents and maintenance, newest first; with a `status:read`
+    /// token, drafts too.
     List {
         #[command(flatten)]
         server: ServerArgs,
@@ -297,7 +327,8 @@ pub enum IncidentCommand {
         #[arg(long, value_name = "ID")]
         before: Option<i64>,
     },
-    /// Write incidents as markdown with front matter.
+    /// Write published incidents as markdown with front matter. Drafts are
+    /// skipped by `--all` and refused by id.
     Export {
         #[command(flatten)]
         server: ServerArgs,

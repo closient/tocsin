@@ -463,6 +463,73 @@ fn the_cli_round_trips_against_a_live_server() {
     assert_eq!(exit.code(), Some(0), "stderr:\n{log}");
 }
 
+#[test]
+fn the_cli_drafts_publishes_and_discards() {
+    let server = Server::start();
+    let oncall = Some(ONCALL);
+    let new = |title: &str| {
+        ok(&server.cli(
+            oncall,
+            &[
+                "incident",
+                "new",
+                "--draft",
+                "--title",
+                title,
+                "--component",
+                "api",
+                "--message",
+                "Checking.",
+            ],
+        ))
+    };
+
+    let drafted = new("Maybe trouble");
+    let id_arg = drafted["id"].as_i64().unwrap().to_string();
+    assert!(drafted["published_at"].is_null(), "{drafted}");
+    // Nobody without a token sees a draft.
+    let (code, error) = failed(&server.cli(None, &["incident", "show", &id_arg]));
+    assert_eq!(code, Some(2));
+    assert!(
+        error["message"].as_str().unwrap().contains("404"),
+        "{error}"
+    );
+    let list = ok(&server.cli(None, &["incident", "list"]));
+    assert_eq!(list["incidents"], serde_json::json!([]));
+
+    let published = ok(&server.cli(oncall, &["incident", "publish", &id_arg, "--quiet"]));
+    let author = serde_json::json!({ "kind": "token", "id": "oncall" });
+    assert!(published["published_at"].is_string(), "{published}");
+    assert_eq!(published["published_by"], author);
+    assert_eq!(
+        ok(&server.cli(None, &["incident", "show", &id_arg])),
+        published
+    );
+    // Published once: again is 409, and a published incident stays.
+    let (code, error) = failed(&server.cli(oncall, &["incident", "publish", &id_arg]));
+    assert_eq!(code, Some(2));
+    assert!(
+        error["message"].as_str().unwrap().contains("409"),
+        "{error}"
+    );
+    let (code, error) = failed(&server.cli(oncall, &["incident", "discard", &id_arg]));
+    assert_eq!(code, Some(2));
+    assert!(
+        error["message"].as_str().unwrap().contains("409"),
+        "{error}"
+    );
+
+    let scrapped = new("False alarm");
+    let scrapped_arg = scrapped["id"].as_i64().unwrap().to_string();
+    let discarded = ok(&server.cli(oncall, &["incident", "discard", &scrapped_arg]));
+    assert_eq!(discarded["title"], "False alarm");
+    let (code, _) = failed(&server.cli(oncall, &["incident", "discard", &scrapped_arg]));
+    assert_eq!(code, Some(2), "gone after a discard");
+
+    let (exit, _, log) = server.stop("-TERM");
+    assert_eq!(exit.code(), Some(0), "stderr:\n{log}");
+}
+
 /// `maintenance schedule`, announced ahead with the default title.
 fn schedule_maintenance(server: &Server) -> Value {
     let scheduled = ok(&server.cli(

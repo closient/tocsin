@@ -18,7 +18,7 @@ use crate::checkpoint::{self, Checkpointer, Nudge};
 use crate::rollup;
 use crate::stats::CheckpointEvent;
 use crate::writer::Writer;
-use crate::{DB_FILE, Day, Error, NewCheckResult, Retention, Store, now_ms, schema};
+use crate::{DB_FILE, Day, Drafts, Error, NewCheckResult, Retention, Store, now_ms, schema};
 
 fn open() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
@@ -269,6 +269,7 @@ fn outage(title: &str) -> NewIncident {
         scheduled_start: None,
         scheduled_end: None,
         notify: true,
+        draft: None,
     }
 }
 
@@ -363,12 +364,13 @@ async fn an_incident_is_read_from_one_snapshot() {
                 message: "Found it.".into(),
                 notify: true,
             },
+            false,
             Actor::token("oncall"),
             Timestamp::from_millis(1500),
         )
         .await
         .unwrap();
-    let listed = crate::incident::list(&reader, None, 10).unwrap();
+    let listed = crate::incident::list(&reader, Drafts::Include, None, 10).unwrap();
     assert_untorn(&listed[0]);
     assert_eq!(listed[0].status, IncidentStatus::Identified);
     // The racing writes did land; the reads just did not straddle them.
@@ -398,7 +400,13 @@ async fn listing_a_page_does_not_query_per_incident() {
     );
     let mut costs = Vec::new();
     for page in [1, 5] {
-        while store.incidents(None, 100).await.unwrap().len() < page {
+        while store
+            .incidents(Drafts::Include, None, 100)
+            .await
+            .unwrap()
+            .len()
+            < page
+        {
             store
                 .create_incident(
                     outage("API errors"),
@@ -409,7 +417,7 @@ async fn listing_a_page_does_not_query_per_incident() {
                 .unwrap();
         }
         STATEMENTS.with(|statements| statements.set(0));
-        let listed = crate::incident::list(&reader, None, 100).unwrap();
+        let listed = crate::incident::list(&reader, Drafts::Include, None, 100).unwrap();
         assert_eq!(listed.len(), page);
         assert!(
             listed.iter().all(
@@ -456,14 +464,30 @@ async fn incidents_naming_a_component_skip_the_others() {
             named.push(incident.id);
         }
     }
-    let found = store.incidents_naming("db", 10).await.unwrap();
+    let found = store
+        .incidents_naming(Drafts::Include, "db", 10)
+        .await
+        .unwrap();
     let ids: Vec<i64> = found.iter().map(|incident| incident.id).collect();
     named.reverse();
     assert_eq!(ids, named);
     assert!(found.iter().all(|incident| incident.updates.len() == 1));
     assert_eq!(found[0].components, ["api", "db"]);
-    assert_eq!(store.incidents_naming("db", 1).await.unwrap().len(), 1);
-    assert_eq!(store.incidents_naming("cache", 10).await.unwrap(), []);
+    assert_eq!(
+        store
+            .incidents_naming(Drafts::Include, "db", 1)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .incidents_naming(Drafts::Include, "cache", 10)
+            .await
+            .unwrap(),
+        []
+    );
     store.close().await.unwrap();
 }
 

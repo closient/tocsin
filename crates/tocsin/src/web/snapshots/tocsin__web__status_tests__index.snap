@@ -36,9 +36,9 @@ expression: normalize(&page)
 <p class="lede">Live status of Example&#39;s services.</p>
 </div>
 <div class="live" hx-ext="sse" sse-connect="/api/v1/events">
-<div id="banner" role="status" hx-get="/fragments/banner" hx-trigger="sse:component_changed, sse:incident_created, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML"><p class="hero down"><span class="hero-mark" aria-hidden="true">✕</span> <span class="hero-text">Some systems are down</span></p>
+<div id="banner" role="status" hx-get="/fragments/banner" hx-trigger="sse:component_changed, sse:incident_created, sse:incident_published, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML"><p class="hero down"><span class="hero-mark" aria-hidden="true">✕</span> <span class="hero-text">Some systems are down</span></p>
 </div>
-<section id="incidents" aria-labelledby="incidents-heading" hx-get="/fragments/incidents" hx-trigger="sse:incident_created, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML"><h2 id="incidents-heading">Active incidents and maintenance</h2>
+<section id="incidents" aria-labelledby="incidents-heading" hx-get="/fragments/incidents" hx-trigger="sse:incident_created, sse:incident_published, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML"><h2 id="incidents-heading">Active incidents and maintenance</h2>
 <ul class="items surface"><li class="card">
   <a class="item-title" href="/incidents/2">Database upgrade</a>
   <div class="meta">
@@ -60,7 +60,7 @@ expression: normalize(&page)
 </li>
 </ul>
 </section>
-<section id="components" aria-labelledby="components-heading" hx-get="/fragments/components" hx-trigger="sse:component_changed, sse:incident_created, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML"><h2 id="components-heading">Components</h2>
+<section id="components" aria-labelledby="components-heading" hx-get="/fragments/components" hx-trigger="sse:component_changed, sse:incident_created, sse:incident_published, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML"><h2 id="components-heading">Components</h2>
 <div class="surface group">
   <ul class="components"><li class="component">
   <div class="component-line">
@@ -491,7 +491,7 @@ expression: normalize(&page)
   </li>
 </ul>
 </section>
-<section id="resolved" aria-labelledby="resolved-heading" hx-get="/fragments/resolved" hx-trigger="sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML"><h2 id="resolved-heading">Recently resolved</h2>
+<section id="resolved" aria-labelledby="resolved-heading" hx-get="/fragments/resolved" hx-trigger="sse:incident_published, sse:incident_updated, sse:incident_edited, sse:resync, every 60s" hx-swap="innerHTML"><h2 id="resolved-heading">Recently resolved</h2>
 <ul class="items surface"><li class="card">
   <a class="item-title" href="/incidents/3">Slow page loads</a>
   <div class="meta">

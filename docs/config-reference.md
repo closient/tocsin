@@ -718,7 +718,8 @@ What a token may do.
 | Value | Meaning |
 |-------|---------|
 | `"heartbeat"` | Heartbeat pings. |
-| `"incident"` | Incidents and maintenance. |
+| `"incident"` | Incidents and maintenance: open, update, edit, publish and discard them. Includes everything `incident:draft` may do. |
+| `"incident:draft"` | Draft incidents only: open an incident as a draft, and update, edit or discard a draft. Never publishes and never changes a published incident, so whoever holds it (an AI seat, a script) cannot put anything in front of the public or subscribers without a person. |
 | `"release"` | Releases and deploys. |
 | `"status:read"` | Reading what is not public in the read API: non-public components, checks and heartbeats on no component or a non-public one, non-public projects' releases and deploys, check targets, raw check results, and how the configuration last reloaded. The internal board behind proxy auth reads the same. |
 | `"subscribers:admin"` | Listing, counting and removing email subscribers. |

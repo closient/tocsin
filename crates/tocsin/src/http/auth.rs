@@ -48,6 +48,8 @@ pub mod scope {
 
     /// `incident`: incidents and maintenance.
     pub struct Incident;
+    /// `incident:draft`: draft incidents only.
+    pub struct IncidentDraft;
     /// `heartbeat`: heartbeat pings.
     pub struct Heartbeat;
     /// `release`: releases and deploys.
@@ -61,6 +63,10 @@ pub mod scope {
     impl super::Scope for Incident {
         const SCOPE: TokenScope = TokenScope::Incident;
         const NAME: &'static str = "incident";
+    }
+    impl super::Scope for IncidentDraft {
+        const SCOPE: TokenScope = TokenScope::IncidentDraft;
+        const NAME: &'static str = "incident:draft";
     }
     impl super::Scope for Heartbeat {
         const SCOPE: TokenScope = TokenScope::Heartbeat;
@@ -123,6 +129,78 @@ fn authorize<S: Scope>(parts: &Parts, state: &AppState) -> Result<Authorized<S>,
     })
 }
 
+/// A writer of incidents, and whether it may publish: a token with
+/// `incident`, or a person in the admin, may; a token with only
+/// `incident:draft` writes drafts and nothing else. The incident routes
+/// and MCP tools that take drafts take this instead of one scope.
+#[derive(Debug, Clone)]
+pub struct IncidentWriter {
+    /// Who is writing, to record with the change.
+    pub actor: Actor,
+    /// Whether it may publish, and change what is published.
+    pub publishes: bool,
+}
+
+impl IncidentWriter {
+    /// A writer who may publish, such as a person in the admin.
+    #[must_use]
+    pub fn publishing(actor: Actor) -> Self {
+        IncidentWriter {
+            actor,
+            publishes: true,
+        }
+    }
+
+    /// 403 unless it may publish, worded as a route needing `incident`
+    /// words it.
+    ///
+    /// # Errors
+    ///
+    /// 403 for an `incident:draft` token.
+    pub fn may_publish(&self) -> Result<(), ApiError> {
+        if self.publishes {
+            Ok(())
+        } else {
+            grant::<scope::Incident>(&self.actor.id, &[]).map(drop)
+        }
+    }
+
+    /// The writer the token `id` holding `scopes` is; 403 with neither
+    /// incident scope.
+    fn holding(id: &str, scopes: &[TokenScope]) -> Result<Self, ApiError> {
+        if scopes.contains(&TokenScope::Incident) {
+            return Ok(IncidentWriter {
+                actor: Actor::token(id),
+                publishes: true,
+            });
+        }
+        grant::<scope::IncidentDraft>(id, scopes)
+            .map_err(|_| {
+                ApiError::forbidden(format!(
+                    "token {id} has neither the `incident` nor the `incident:draft` scope"
+                ))
+            })
+            .map(|actor| IncidentWriter {
+                actor,
+                publishes: false,
+            })
+    }
+}
+
+impl FromRequestParts<AppState> for IncidentWriter {
+    type Rejection = ApiError;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> impl Future<Output = Result<Self, ApiError>> + Send {
+        std::future::ready(
+            authenticate(parts, state)
+                .and_then(|token| IncidentWriter::holding(token.id.as_str(), &token.scopes)),
+        )
+    }
+}
+
 /// The actor for a write needing `S` by the token `id` holding `scopes`;
 /// 403 without the scope. Every route and MCP tool checks a scope here.
 fn grant<S: Scope>(id: &str, scopes: &[TokenScope]) -> Result<Actor, ApiError> {
@@ -165,6 +243,16 @@ impl Caller {
     /// 403 without the scope, worded as the routes word it.
     pub fn grant<S: Scope>(&self) -> Result<Actor, ApiError> {
         grant::<S>(&self.id, &self.scopes)
+    }
+
+    /// The incident writer the token is, as a route taking
+    /// [`IncidentWriter`] decides.
+    ///
+    /// # Errors
+    ///
+    /// 403 with neither `incident` nor `incident:draft`.
+    pub fn incident_writer(&self) -> Result<IncidentWriter, ApiError> {
+        IncidentWriter::holding(&self.id, &self.scopes)
     }
 
     /// What the token may read, as [`Viewer`] decides for a route.

@@ -15,10 +15,31 @@ use tocsin_core::incident::{
 use crate::error::{Error, Result};
 
 const INCIDENT_COLUMNS: &str = "id, kind, title, impact, status, scheduled_start, scheduled_end, \
-     resolved_at, created_at, created_by_kind, created_by, updated_at, updated_by_kind, updated_by";
+     resolved_at, created_at, created_by_kind, created_by, updated_at, updated_by_kind, updated_by, \
+     published_at, published_by_kind, published_by";
+
+/// Whether a read includes draft incidents, which only trusted readers see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Drafts {
+    /// Drafts and published incidents alike.
+    Include,
+    /// Published incidents only: what the public sees.
+    Exclude,
+}
+
+impl Drafts {
+    /// The condition a `WHERE` clause adds, after `AND`.
+    pub(crate) fn condition(self) -> &'static str {
+        match self {
+            Drafts::Include => "1",
+            Drafts::Exclude => "published_at IS NOT NULL",
+        }
+    }
+}
 
 /// Inserts a new incident with its components and first update; returns
-/// its id.
+/// its id. A draft (`new.draft` is `Some(true)`) is not published;
+/// otherwise `actor` publishes it at `at`.
 pub(crate) fn insert(
     transaction: &Transaction<'_>,
     new: &NewIncident,
@@ -26,10 +47,12 @@ pub(crate) fn insert(
     at: Timestamp,
 ) -> Result<i64> {
     let status = new.first_status();
+    let published = (new.draft != Some(true)).then_some(actor);
     transaction.execute(
         "INSERT INTO incident (kind, title, impact, status, scheduled_start, scheduled_end, \
          resolved_at, created_at, created_by_kind, created_by, updated_at, updated_by_kind, \
-         updated_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?8, ?9, ?10)",
+         updated_by, published_at, published_by_kind, published_by) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             new.kind.as_str(),
             new.title,
@@ -41,6 +64,9 @@ pub(crate) fn insert(
             at.as_millis(),
             actor.kind.as_str(),
             actor.id,
+            published.map(|_| at.as_millis()),
+            published.map(|actor| actor.kind.as_str()),
+            published.map(|actor| actor.id.as_str()),
         ],
     )?;
     let id = transaction.last_insert_rowid();
@@ -50,17 +76,22 @@ pub(crate) fn insert(
 }
 
 /// Appends `update` and moves the incident to its status. `None` if no
-/// incident has that id.
+/// incident has that id. With `drafts_only`, a published incident is
+/// [`Error::Published`].
 pub(crate) fn add_update(
     transaction: &Transaction<'_>,
     id: i64,
     update: &NewUpdate,
+    drafts_only: bool,
     actor: &Actor,
     at: Timestamp,
 ) -> Result<Option<()>> {
     let Some(incident) = load(transaction, id)? else {
         return Ok(None);
     };
+    if drafts_only && !incident.is_draft() {
+        return Err(Error::Published(id));
+    }
     incident.check_update(update).map_err(Error::Invalid)?;
     append_update(transaction, id, update.status, &update.message, actor, at)?;
     // `resolved_at` keeps the first resolution while the incident stays
@@ -90,17 +121,22 @@ pub(crate) fn add_update(
 }
 
 /// Applies `edit` to the incident row and logs it. `None` if no incident
-/// has that id.
+/// has that id. With `drafts_only`, a published incident is
+/// [`Error::Published`].
 pub(crate) fn edit(
     transaction: &Transaction<'_>,
     id: i64,
     edit: &IncidentEdit,
+    drafts_only: bool,
     actor: &Actor,
     at: Timestamp,
 ) -> Result<Option<()>> {
     let Some(mut incident) = load(transaction, id)? else {
         return Ok(None);
     };
+    if drafts_only && !incident.is_draft() {
+        return Err(Error::Published(id));
+    }
     incident.apply_edit(edit).map_err(Error::Invalid)?;
     transaction.execute(
         "UPDATE incident SET title = ?2, impact = ?3, scheduled_start = ?4, scheduled_end = ?5, \
@@ -126,6 +162,42 @@ pub(crate) fn edit(
         params![id, changes, at.as_millis(), actor.kind.as_str(), actor.id],
     )?;
     Ok(Some(()))
+}
+
+/// Publishes draft `id`: `actor` at `at`. `None` if no incident has that
+/// id; [`Error::Published`] if it already is.
+pub(crate) fn publish(
+    transaction: &Transaction<'_>,
+    id: i64,
+    actor: &Actor,
+    at: Timestamp,
+) -> Result<Option<()>> {
+    let Some(incident) = load(transaction, id)? else {
+        return Ok(None);
+    };
+    if !incident.is_draft() {
+        return Err(Error::Published(id));
+    }
+    transaction.execute(
+        "UPDATE incident SET published_at = ?2, published_by_kind = ?3, published_by = ?4 \
+         WHERE id = ?1",
+        params![id, at.as_millis(), actor.kind.as_str(), actor.id],
+    )?;
+    Ok(Some(()))
+}
+
+/// Deletes draft `id` with its components, updates and edits, and returns
+/// it as it was. `None` if no incident has that id; [`Error::Published`]
+/// if it is published, which is never deleted.
+pub(crate) fn discard(transaction: &Transaction<'_>, id: i64) -> Result<Option<Incident>> {
+    let Some(incident) = load(transaction, id)? else {
+        return Ok(None);
+    };
+    if !incident.is_draft() {
+        return Err(Error::Published(id));
+    }
+    transaction.execute("DELETE FROM incident WHERE id = ?1", [id])?;
+    Ok(Some(incident))
 }
 
 fn replace_components(transaction: &Transaction<'_>, id: i64, components: &[String]) -> Result<()> {
@@ -180,11 +252,18 @@ pub(crate) fn load(conn: &Connection, id: i64) -> Result<Option<Incident>> {
 
 /// Up to `limit` incidents, newest first, with ids below `before` when it
 /// is given.
-pub(crate) fn list(conn: &Connection, before: Option<i64>, limit: u32) -> Result<Vec<Incident>> {
+pub(crate) fn list(
+    conn: &Connection,
+    drafts: Drafts,
+    before: Option<i64>,
+    limit: u32,
+) -> Result<Vec<Incident>> {
     snapshot(conn, |conn| {
         let incidents = conn
             .prepare_cached(&format!(
-                "SELECT {INCIDENT_COLUMNS} FROM incident WHERE id < ?1 ORDER BY id DESC LIMIT ?2"
+                "SELECT {INCIDENT_COLUMNS} FROM incident WHERE id < ?1 AND {} \
+                 ORDER BY id DESC LIMIT ?2",
+                drafts.condition()
             ))?
             .query_map(params![before.unwrap_or(i64::MAX), limit], incident_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -194,13 +273,19 @@ pub(crate) fn list(conn: &Connection, before: Option<i64>, limit: u32) -> Result
 
 /// Up to `limit` incidents naming component `component`, newest first,
 /// complete.
-pub(crate) fn naming(conn: &Connection, component: &str, limit: u32) -> Result<Vec<Incident>> {
+pub(crate) fn naming(
+    conn: &Connection,
+    drafts: Drafts,
+    component: &str,
+    limit: u32,
+) -> Result<Vec<Incident>> {
     snapshot(conn, |conn| {
         let incidents = conn
             .prepare_cached(&format!(
                 "SELECT {INCIDENT_COLUMNS} FROM incident WHERE id IN \
                  (SELECT incident_id FROM incident_component WHERE component_id = ?1) \
-                 ORDER BY id DESC LIMIT ?2"
+                 AND {} ORDER BY id DESC LIMIT ?2",
+                drafts.condition()
             ))?
             .query_map(params![component, limit], incident_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -210,11 +295,26 @@ pub(crate) fn naming(conn: &Connection, component: &str, limit: u32) -> Result<V
 
 /// Every incident not yet resolved and every maintenance not yet
 /// completed, scheduled ones included, newest first, complete.
-pub(crate) fn unresolved(conn: &Connection) -> Result<Vec<Incident>> {
+pub(crate) fn unresolved(conn: &Connection, drafts: Drafts) -> Result<Vec<Incident>> {
     snapshot(conn, |conn| {
         let incidents = conn
             .prepare_cached(&format!(
-                "SELECT {INCIDENT_COLUMNS} FROM incident WHERE resolved_at IS NULL ORDER BY id DESC"
+                "SELECT {INCIDENT_COLUMNS} FROM incident WHERE resolved_at IS NULL AND {} \
+                 ORDER BY id DESC",
+                drafts.condition()
+            ))?
+            .query_map([], incident_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        complete(conn, incidents)
+    })
+}
+
+/// Every draft, resolved or not, newest first, complete.
+pub(crate) fn drafts(conn: &Connection) -> Result<Vec<Incident>> {
+    snapshot(conn, |conn| {
+        let incidents = conn
+            .prepare_cached(&format!(
+                "SELECT {INCIDENT_COLUMNS} FROM incident WHERE published_at IS NULL ORDER BY id DESC"
             ))?
             .query_map([], incident_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -240,14 +340,15 @@ pub struct OpenIncident {
     pub scheduled_end: Option<Timestamp>,
 }
 
-/// Every incident not yet resolved and every maintenance not yet
-/// completed, oldest first, in one query.
+/// Every published incident not yet resolved and every published
+/// maintenance not yet completed, oldest first, in one query. A draft
+/// changes no component's status until it is published.
 pub(crate) fn open(conn: &Connection) -> Result<Vec<OpenIncident>> {
     let mut statement = conn.prepare_cached(
         "SELECT incident.id, kind, impact, scheduled_start, scheduled_end, component_id
          FROM incident
          LEFT JOIN incident_component ON incident_component.incident_id = incident.id
-         WHERE resolved_at IS NULL
+         WHERE resolved_at IS NULL AND published_at IS NOT NULL
          ORDER BY incident.id, component_id",
     )?;
     let mut rows = statement.query([])?;
@@ -368,6 +469,11 @@ fn incident_row(row: &Row<'_>) -> rusqlite::Result<Incident> {
         created_by: actor(row, 9)?,
         updated_at: Timestamp::from_millis(row.get(11)?),
         updated_by: actor(row, 12)?,
+        published_at: instant(14)?,
+        published_by: match row.get::<_, Option<String>>(15)? {
+            Some(_) => Some(actor(row, 15)?),
+            None => None,
+        },
         updates: Vec::new(),
     })
 }

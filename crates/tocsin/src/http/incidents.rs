@@ -57,8 +57,8 @@ pub struct ListQuery {
     /// Page size, 1 to 100; default 20.
     pub limit: Option<u32>,
     /// Only the incidents given this `external_key` at creation, draft or
-    /// published, open or resolved, newest first and all on one page: at
-    /// most one is open, and each resolved one is an earlier episode.
+    /// published, open or resolved, newest first and paged like the rest:
+    /// at most one is open, and each resolved one is an earlier episode.
     /// Needs a `status:read` token.
     pub external_key: Option<String>,
 }
@@ -156,24 +156,24 @@ pub async fn list(
             format!("must be 1 to {MAX_LIMIT}"),
         )]));
     }
-    if let Some(key) = query.external_key {
+    // One more than the page holds says whether another page follows, so
+    // the last page carries no cursor even when it is exactly full.
+    let mut incidents = if let Some(key) = query.external_key {
         if viewer != Viewer::Trusted {
             return Err(ApiError::forbidden(
                 "external_key needs a token with the `status:read` scope",
             ));
         }
-        let found = state.store.incidents_keyed(key).await?;
-        return Ok(IncidentList {
-            incidents: revealed(state, viewer, found).await?,
-            next_before: None,
-        });
-    }
-    // One more than the page holds says whether another page follows, so
-    // the last page carries no cursor even when it is exactly full.
-    let mut incidents = state
-        .store
-        .incidents(drafts_for(viewer), query.before, limit + 1)
-        .await?;
+        state
+            .store
+            .incidents_keyed(key, query.before, limit + 1)
+            .await?
+    } else {
+        state
+            .store
+            .incidents(drafts_for(viewer), query.before, limit + 1)
+            .await?
+    };
     let more = incidents.len() > limit as usize;
     incidents.truncate(limit as usize);
     let next_before = incidents
@@ -269,7 +269,7 @@ pub async fn get_incident(
         (status = 200, description = "An open incident already has this `external_key`: that incident, unchanged; `Location` names it", body = Incident),
         (status = 401, description = "No token, or an unknown one", body = ErrorBody),
         (status = 403, description = "The token has neither incident scope, or asks to publish (`\"draft\": false`) with only `incident:draft`", body = ErrorBody),
-        (status = 422, description = "Invalid fields, by path", body = ErrorBody),
+        (status = 422, description = "Invalid fields, by path; an `external_key` with a terminal first `status`", body = ErrorBody),
     ),
 )]
 pub async fn create_incident(

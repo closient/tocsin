@@ -445,8 +445,9 @@ pub struct NewIncident {
     pub internal_note: Option<String>,
     /// The caller's own key for what it reports, such as an alert
     /// cluster's: one line, at most 200 characters, set at creation only.
-    /// A create repeating a key in use answers that incident with 200 and
-    /// changes nothing; discarding a draft frees its key.
+    /// A create repeating the key of an open incident answers that incident
+    /// with 200 and changes nothing; resolving it, or discarding a draft,
+    /// frees its key. A keyed incident must open non-terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(max_length = 200)]
     #[schemars(length(max = 200))]
@@ -716,6 +717,14 @@ impl NewIncident {
         // characters.
         if let Some(key) = &self.external_key {
             check_title("external_key", key, &mut errors);
+            // One that opened over would free its key as it was written, so
+            // a retry after a lost answer would open a second incident.
+            if self.first_status().is_terminal() {
+                errors.push(FieldError::new(
+                    "status",
+                    "an incident with an external_key must open non-terminal (not resolved or completed)",
+                ));
+            }
         }
         check_components("components", &self.components, known, &mut errors);
         check_status(self.kind, self.first_status(), &mut errors);
@@ -1057,6 +1066,29 @@ mod tests {
         assert_eq!(paths(new.validate(&known).unwrap_err()), ["external_key"]);
         new.external_key = Some("alert-cluster/website-down".into());
         assert_eq!(new.validate(&known), Ok(()));
+    }
+
+    #[test]
+    fn a_keyed_incident_must_open_non_terminal() {
+        let keyed = NewIncident {
+            status: Some(IncidentStatus::Resolved),
+            external_key: Some("alert-cluster/website-down".into()),
+            ..new_incident()
+        };
+        assert_eq!(paths(keyed.validate(&known).unwrap_err()), ["status"]);
+        let keyless = NewIncident {
+            external_key: None,
+            ..keyed.clone()
+        };
+        assert_eq!(keyless.validate(&known), Ok(()));
+        let completed = NewIncident {
+            kind: IncidentKind::Maintenance,
+            status: Some(IncidentStatus::Completed),
+            scheduled_start: Some(Timestamp::from_millis(1000)),
+            scheduled_end: Some(Timestamp::from_millis(2000)),
+            ..keyed
+        };
+        assert_eq!(paths(completed.validate(&known).unwrap_err()), ["status"]);
     }
 
     #[test]

@@ -878,15 +878,22 @@ impl Store {
         self.read(move |conn| incident::load(conn, id)).await
     }
 
-    /// Every incident given external key `key`, newest first, drafts and
-    /// resolved ones included: at most one is open, and each resolved one
-    /// is an earlier episode.
+    /// Up to `limit` incidents given external key `key`, newest first,
+    /// drafts and resolved ones included: at most one is open, and each
+    /// resolved one is an earlier episode. With `before`, only those with
+    /// a lower id, as [`Store::incidents`] pages.
     ///
     /// # Errors
     ///
     /// The read fails.
-    pub async fn incidents_keyed(&self, key: String) -> Result<Vec<Incident>> {
-        self.read(move |conn| incident::all_keyed(conn, &key)).await
+    pub async fn incidents_keyed(
+        &self,
+        key: String,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<Incident>> {
+        self.read(move |conn| incident::all_keyed(conn, &key, before, limit))
+            .await
     }
 
     /// The internal note and external key of each of `ids` that exists.

@@ -686,10 +686,19 @@ async fn a_second_create_with_a_key_answers_the_first_and_writes_nothing() {
     assert_eq!(opened, Opened::Created);
     assert_ne!(other.id, first.id);
     assert_eq!(
-        ids(&store.incidents_keyed("cluster-b".into()).await.unwrap()),
+        ids(&store
+            .incidents_keyed("cluster-b".into(), None, 100)
+            .await
+            .unwrap()),
         [other.id]
     );
-    assert_eq!(store.incidents_keyed("cluster-c".into()).await.unwrap(), []);
+    assert_eq!(
+        store
+            .incidents_keyed("cluster-c".into(), None, 100)
+            .await
+            .unwrap(),
+        []
+    );
 }
 
 fn ids(incidents: &[tocsin_core::incident::Incident]) -> Vec<i64> {
@@ -761,7 +770,10 @@ async fn resolving_frees_the_key_and_the_next_create_opens_a_new_incident() {
     assert_eq!(opened, Opened::Created);
     assert_ne!(second.id, first.id);
     assert_eq!(
-        ids(&store.incidents_keyed("cluster-a".into()).await.unwrap()),
+        ids(&store
+            .incidents_keyed("cluster-a".into(), None, 100)
+            .await
+            .unwrap()),
         [second.id, first.id]
     );
     // The new one holds the key while it is open.

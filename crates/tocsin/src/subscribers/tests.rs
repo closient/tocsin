@@ -1659,4 +1659,107 @@ async fn a_key_opens_one_incident_per_episode() {
     assert_eq!(refused["fields"][0]["path"], "status", "{refused}");
 }
 
+/// `?external_key=` pages like the unkeyed list: `limit=1` answers only
+/// the newest episode, with a cursor to the one before it.
+#[tokio::test]
+async fn the_keyed_list_pages_newest_first() {
+    const KEY: &str = "cluster/website-down";
+    let site = site();
+    let call = |method: Method, uri: String, token: &'static str, body: Option<Value>| {
+        let site = &site;
+        async move { site.api(method, &uri, Some(token), body, 1).await }
+    };
+    let new = json!({
+        "title": "Website unavailable",
+        "components": ["api"],
+        "message": "We are investigating.",
+        "external_key": KEY,
+    });
+    let mut episodes = Vec::new();
+    for _ in 0..2 {
+        let (status, _, opened) = call(
+            Method::POST,
+            "/api/v1/incidents".into(),
+            SWEEPER,
+            Some(new.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{opened}");
+        let id = opened["id"].as_i64().unwrap();
+        let resolve = json!({"status": "resolved", "message": "Fixed."});
+        let uri = format!("/api/v1/incidents/{id}/updates");
+        let (status, _, resolved) = call(Method::POST, uri, SWEEPER, Some(resolve)).await;
+        assert_eq!(status, StatusCode::CREATED, "{resolved}");
+        episodes.push(id);
+    }
+    let [old, newest] = episodes[..] else {
+        unreachable!()
+    };
+    let key = KEY.replace('/', "%2F");
+    let page = |query: String| {
+        call(
+            Method::GET,
+            format!("/api/v1/incidents?external_key={key}&limit=1{query}"),
+            READER,
+            None,
+        )
+    };
+    let ids = |list: &Value| -> Vec<Option<i64>> {
+        list["incidents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|incident| incident["id"].as_i64())
+            .collect()
+    };
+
+    let (status, _, first) = page(String::new()).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(ids(&first), [Some(newest)], "{first}");
+    assert_eq!(first["next_before"].as_i64(), Some(newest), "{first}");
+
+    let (status, _, second) = page(format!("&before={newest}")).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(ids(&second), [Some(old)], "{second}");
+    assert_eq!(second["next_before"], Value::Null, "{second}");
+}
+
+/// A keyed create that would open already resolved is refused, so a retry
+/// after a lost answer cannot open a second published incident and email
+/// subscribers twice: nothing is written either time.
+#[tokio::test]
+async fn a_keyed_incident_cannot_open_resolved() {
+    const KEY: &str = "cluster/website-blip";
+    let site = site();
+    let new = json!({
+        "title": "Website blip",
+        "components": ["api"],
+        "status": "resolved",
+        "message": "It was down for a minute.",
+        "external_key": KEY,
+    });
+    let mut answers = Vec::new();
+    for _attempt in ["first", "retry"] {
+        let (status, _, body) = site
+            .api(
+                Method::POST,
+                "/api/v1/incidents",
+                Some(ONCALL),
+                Some(new.clone()),
+                1,
+            )
+            .await;
+        answers.push((status, body["fields"][0]["path"].clone()));
+    }
+    let rows = site
+        .state
+        .store
+        .incidents_keyed(KEY.into(), None, 100)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 0, "{answers:?}");
+    let refused = (StatusCode::UNPROCESSABLE_ENTITY, json!("status"));
+    assert_eq!(answers, [refused.clone(), refused]);
+}
+
 mod slack;

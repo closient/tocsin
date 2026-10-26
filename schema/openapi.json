@@ -563,7 +563,7 @@
           {
             "name": "external_key",
             "in": "query",
-            "description": "Only the incidents given this `external_key` at creation, draft or\npublished, open or resolved, newest first and all on one page: at\nmost one is open, and each resolved one is an earlier episode.\nNeeds a `status:read` token.",
+            "description": "Only the incidents given this `external_key` at creation, draft or\npublished, open or resolved, newest first and paged like the rest:\nat most one is open, and each resolved one is an earlier episode.\nNeeds a `status:read` token.",
             "required": false,
             "schema": {
               "type": "string"
@@ -677,7 +677,7 @@
             }
           },
           "422": {
-            "description": "Invalid fields, by path",
+            "description": "Invalid fields, by path; an `external_key` with a terminal first `status`",
             "content": {
               "application/json": {
                 "schema": {
@@ -2600,7 +2600,7 @@
               "string",
               "null"
             ],
-            "description": "The caller's own key for what it reports, such as an alert\ncluster's: one line, at most 200 characters, set at creation only.\nA create repeating a key in use answers that incident with 200 and\nchanges nothing; discarding a draft frees its key.",
+            "description": "The caller's own key for what it reports, such as an alert\ncluster's: one line, at most 200 characters, set at creation only.\nA create repeating the key of an open incident answers that incident\nwith 200 and changes nothing; resolving it, or discarding a draft,\nfrees its key. A keyed incident must open non-terminal.",
             "maxLength": 200
           },
           "impact": {

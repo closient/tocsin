@@ -56,15 +56,25 @@ pub(crate) fn keyed(conn: &Connection, key: &str) -> Result<Option<i64>> {
         .optional()?)
 }
 
-/// Every incident ever given external key `key`, open or resolved, draft
-/// or published, newest first, complete.
-pub(crate) fn all_keyed(conn: &Connection, key: &str) -> Result<Vec<Incident>> {
+/// Up to `limit` incidents ever given external key `key`, open or
+/// resolved, draft or published, newest first, with ids below `before`
+/// when it is given; complete.
+pub(crate) fn all_keyed(
+    conn: &Connection,
+    key: &str,
+    before: Option<i64>,
+    limit: u32,
+) -> Result<Vec<Incident>> {
     snapshot(conn, |conn| {
         let incidents = conn
             .prepare_cached(&format!(
-                "SELECT {INCIDENT_COLUMNS} FROM incident WHERE external_key = ?1 ORDER BY id DESC"
+                "SELECT {INCIDENT_COLUMNS} FROM incident WHERE external_key = ?1 AND id < ?2 \
+                 ORDER BY id DESC LIMIT ?3"
             ))?
-            .query_map([key], incident_row)?
+            .query_map(
+                params![key, before.unwrap_or(i64::MAX), limit],
+                incident_row,
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         complete(conn, incidents)
     })

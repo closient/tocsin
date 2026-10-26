@@ -115,7 +115,9 @@ the trouble in the key.
   episode suffix of its own. A published incident holds its key until it
   is resolved. Reopening a resolved incident takes its key back, so an
   update that reopens it while another open incident holds the key is
-  422.
+  422. A create with a key must open non-terminal: one that opened
+  `resolved` (or `completed`) would free its key as it was written, so a
+  retry after a lost answer would open a second incident; it is 422.
 
 Both are **internal for the incident's whole life**, draft or published.
 They are returned only to a token with `status:read` (on any read, and on
@@ -174,8 +176,8 @@ served at `GET /api/v1/openapi.json` and committed as
   `next_before` is set when more incidents follow; pass it as `before` for
   the next page. It is `null` on the last page, even a full one.
   `external_key` finds every incident created with that key, draft or
-  published, open or resolved, newest first on one page (`next_before` is
-  `null`); without a `status:read` token it is 403.
+  published, open or resolved, newest first, paged the same way; without a
+  `status:read` token it is 403.
 - **Create** needs `title` and `message`; `kind` defaults to `incident`,
   `impact` to `none`, `components` to none, and `status` to the kind's first
   status. Maintenance needs `scheduled_start` and `scheduled_end`.

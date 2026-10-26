@@ -300,6 +300,13 @@ fn notify_test_sends_a_fire_and_its_resolve() {
         ),
     )
     .unwrap();
+    std::fs::write(
+        config.path().join("alerting.toml"),
+        "[alerting.labels.needs_human]\nrequired = true\nvalues = [\"false\", \"true\"]\n\n\
+         [alerting.labels.team]\n\n\
+         [alerting.annotations.ticket]\nrequired = true\n",
+    )
+    .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_tocsin"))
         .env("TOCSIN_TEST_SIGNING_SECRET", "whsec-test")
         .args(["--json", "notify", "test", "hook", "--config"])
@@ -326,6 +333,15 @@ fn notify_test_sends_a_fire_and_its_resolve() {
     assert_eq!(bodies[1]["event"], "resolve");
     assert_eq!(bodies[0]["identity"], "node-a/check/tocsin-test");
     assert_eq!(bodies[1]["identity"], bodies[0]["identity"]);
+    // What `[alerting]` requires is set, so the test routes as an alert
+    // would: the first allowed value, or `test` where any goes.
+    for body in &bodies {
+        assert_eq!(
+            body["labels"],
+            serde_json::json!({ "needs_human": "false" })
+        );
+        assert_eq!(body["annotations"], serde_json::json!({ "ticket": "test" }));
+    }
     assert_eq!(
         (&bodies[0]["test"], &bodies[1]["test"]),
         (&Value::Bool(true), &Value::Bool(true))
@@ -549,7 +565,7 @@ fn db_info_reports_rows_and_the_oldest_result() {
     let info = json_stdout(&output);
     assert_eq!(info["rows"]["check_result"], 4);
     assert_eq!(info["rows"]["daily_rollup"], 0);
-    assert_eq!(info["schema_version"], 14);
+    assert_eq!(info["schema_version"], 15);
     assert!(info["size_bytes"].as_u64().unwrap() > 0);
     assert_eq!(
         info["oldest_result"],
@@ -653,13 +669,13 @@ fn db_info_reports_a_newer_schema_without_touching_it() {
     );
     let info = json_stdout(&output);
     assert_eq!(info["schema_version"], 99);
-    assert_eq!(info["supported_schema_version"], 14);
+    assert_eq!(info["supported_schema_version"], 15);
     assert_eq!(info["rows"]["check_result"], 4);
     assert_eq!(user_version(&data), 99);
 
     let text = tocsin(&["db", "info", "--data", data_arg(&data)]);
     assert!(
-        String::from_utf8_lossy(&text.stdout).contains("newer than this build's 14"),
+        String::from_utf8_lossy(&text.stdout).contains("newer than this build's 15"),
         "{}",
         String::from_utf8_lossy(&text.stdout)
     );

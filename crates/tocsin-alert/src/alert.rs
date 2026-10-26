@@ -49,10 +49,10 @@ pub struct Alert {
     /// The check or heartbeat's display name.
     pub subject_name: String,
     /// The check or heartbeat's configured `labels`, as the configuration
-    /// has them when the message is sent.
+    /// had them when the alert opened: the same on every message of it.
     pub labels: BTreeMap<String, String>,
     /// The check or heartbeat's configured `annotations`, as the
-    /// configuration has them when the message is sent.
+    /// configuration had them when the alert opened.
     pub annotations: BTreeMap<String, String>,
     /// Its component, if it has one.
     pub component_id: Option<String>,

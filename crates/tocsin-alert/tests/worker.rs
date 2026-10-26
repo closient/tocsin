@@ -171,41 +171,117 @@ fn a_resolve_carries_its_fire_s_identity_and_the_outage_s_duration() {
     });
 }
 
+/// `monitored`'s check, given `labels` and `annotations`, repeating hourly.
+fn labelled(labels: &str, annotations: &str) -> Config {
+    config(&monitored(&["slack"], "repeat = \"1h\"").replace(
+        "component = \"web\"\n\n[[",
+        &format!("component = \"web\"\nlabels = {labels}\nannotations = {annotations}\n\n[["),
+    ))
+}
+
+/// `(name, value)` pairs.
+type Pairs = Vec<(String, String)>;
+
+/// The labels and annotations an attempt carried.
+fn carried(attempt: &Attempt) -> (Pairs, Pairs) {
+    let pairs = |map: &std::collections::BTreeMap<String, String>| {
+        map.iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect()
+    };
+    (
+        pairs(&attempt.alert.labels),
+        pairs(&attempt.alert.annotations),
+    )
+}
+
 #[test]
-fn the_fire_and_the_resolve_carry_the_check_s_configured_labels_and_annotations() {
+fn an_alert_keeps_the_labels_it_opened_with_through_a_reload_until_it_resolves() {
     paused(async {
         let fixture = Fixture::new();
-        let toml = monitored(&["slack"], "").replace(
-            "component = \"web\"\n\n[[",
-            "component = \"web\"\nlabels = { page_class = \"page\" }\n\
-             annotations = { ticket = \"OPS-1\" }\n\n[[",
-        );
-        let config = config(&toml);
         let (sender, mut receiver) = channel();
         let slack: Arc<dyn Notifier> = Fake::accepting("slack", &sender);
         let running = start(
             &fixture,
-            &config,
-            &[("slack", slack)],
+            &labelled(r#"{ page_class = "page" }"#, r#"{ ticket = "OPS-1" }"#),
+            &[("slack", Arc::clone(&slack))],
             &AlertMetrics::default(),
+        );
+        let opened = (
+            vec![("page_class".to_owned(), "page".to_owned())],
+            vec![("ticket".to_owned(), "OPS-1".to_owned())],
         );
 
         let id = running.change(down(T0)).await.unwrap();
-        let fire = next_from(&mut receiver, "slack").await.alert;
-        running.change(up(id, T0 + 90_000)).await;
-        let resolve = next_from(&mut receiver, "slack").await.alert;
+        let fire = next_from(&mut receiver, "slack").await;
+        assert_eq!(fire.event(), AlertEvent::Fire);
+        assert_eq!(carried(&fire), opened);
 
-        for alert in [&fire, &resolve] {
-            assert_eq!(
-                alert.labels.get("page_class").map(String::as_str),
-                Some("page")
-            );
-            assert_eq!(alert.labels.len(), 1);
-            assert_eq!(
-                alert.annotations.get("ticket").map(String::as_str),
-                Some("OPS-1")
-            );
-        }
+        // A reload changes the check's labels while its alert fires: the
+        // alert keeps the identity Alertmanager already knows it by.
+        reload(
+            &fixture,
+            &running,
+            &labelled(r#"{ page_class = "ticket" }"#, r#"{ ticket = "OPS-2" }"#),
+            &[("slack", Arc::clone(&slack))],
+        )
+        .await;
+        let repeat = next_from(&mut receiver, "slack").await;
+        assert_eq!(repeat.event(), AlertEvent::Repeat);
+        assert_eq!(repeat.alert.identity(), fire.alert.identity());
+        assert_eq!(carried(&repeat), opened);
+
+        running.change(up(id, T0 + HOUR_MS + 1_000)).await;
+        let resolve = next_from(&mut receiver, "slack").await;
+        assert_eq!(resolve.event(), AlertEvent::Resolve);
+        assert_eq!(carried(&resolve), opened);
+
+        // The change takes effect from the next episode.
+        running.change(down(T0 + 2 * HOUR_MS)).await;
+        let next = next_from(&mut receiver, "slack").await;
+        assert_eq!(next.event(), AlertEvent::Fire);
+        assert_eq!(
+            carried(&next),
+            (
+                vec![("page_class".to_owned(), "ticket".to_owned())],
+                vec![("ticket".to_owned(), "OPS-2".to_owned())],
+            )
+        );
+        running.alerter.stop().await;
+    });
+}
+
+#[test]
+fn a_resolve_for_a_check_a_reload_removed_keeps_its_labels() {
+    paused(async {
+        let fixture = Fixture::new();
+        let (sender, mut receiver) = channel();
+        let slack: Arc<dyn Notifier> = Fake::accepting("slack", &sender);
+        let running = start(
+            &fixture,
+            &labelled(r#"{ page_class = "page" }"#, "{}"),
+            &[("slack", Arc::clone(&slack))],
+            &AlertMetrics::default(),
+        );
+        let id = running.change(down(T0)).await.unwrap();
+        let fire = next_from(&mut receiver, "slack").await;
+
+        // The reload removes the check: the router knows nothing of it.
+        let toml = monitored(&["slack"], "");
+        let end = "component = \"web\"\n\n";
+        let check = &toml[toml.find("[[check]]").unwrap()..toml.find(end).unwrap() + end.len()];
+        reload(
+            &fixture,
+            &running,
+            &config(&toml.replace(check, "")),
+            &[("slack", Arc::clone(&slack))],
+        )
+        .await;
+        running.change(up(id, T0 + 1_000)).await;
+        let resolve = next_from(&mut receiver, "slack").await;
+        assert_eq!(resolve.event(), AlertEvent::Resolve);
+        assert_eq!(carried(&resolve), carried(&fire));
+        assert_eq!(resolve.alert.labels.len(), 1);
         running.alerter.stop().await;
     });
 }

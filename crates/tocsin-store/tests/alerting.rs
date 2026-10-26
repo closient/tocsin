@@ -42,7 +42,7 @@ fn target(notifier: &str, repeat_ms: Option<i64>) -> AlertTarget {
 fn routing(targets: Vec<AlertTarget>) -> AlertRouting {
     AlertRouting {
         targets,
-        ringing: Vec::new(),
+        ..AlertRouting::default()
     }
 }
 
@@ -51,6 +51,7 @@ fn ringing(targets: Vec<AlertTarget>, ringing: &[&str]) -> AlertRouting {
     AlertRouting {
         targets,
         ringing: ringing.iter().map(|id| (*id).to_owned()).collect(),
+        ..AlertRouting::default()
     }
 }
 

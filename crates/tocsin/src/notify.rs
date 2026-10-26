@@ -9,7 +9,7 @@ use std::sync::Arc;
 use serde_json::json;
 use tocsin_alert::{Alert, AlertEvent, HTTP_TIMEOUT, SendError, SlackHooks};
 use tocsin_core::Health;
-use tocsin_core::config::closest;
+use tocsin_core::config::{AlertingRule, Config, closest};
 use tocsin_engine::ports::BoxFuture;
 use tocsin_store::{DB_FILE, SlackHook, SubjectKind};
 
@@ -19,6 +19,43 @@ use crate::output::{Failure, Report};
 
 /// The subject id a test alert carries, so receivers can tell it apart.
 const TEST_SUBJECT: &str = "tocsin-test";
+
+/// The test alert's fire, at `started`.
+fn test_alert(configuration: &Config, started: i64) -> Alert {
+    let alerting = configuration.alerting.as_ref();
+    Alert {
+        event: AlertEvent::Fire,
+        node_id: configuration.server.node_id.clone().unwrap_or_default(),
+        subject_kind: SubjectKind::Check,
+        subject_id: TEST_SUBJECT.to_owned(),
+        subject_name: "tocsin notify test".to_owned(),
+        labels: required(alerting.map(|alerting| &alerting.labels)),
+        annotations: required(alerting.map(|alerting| &alerting.annotations)),
+        component_id: None,
+        component_name: None,
+        health: Health::Down,
+        started_at_ms: started,
+        ended_at_ms: None,
+        sent_at_ms: started,
+        delivery_id: None,
+        test: true,
+    }
+}
+
+/// What a test alert sets for each name `[alerting]` requires, so it routes
+/// as a real alert would: the first value the contract allows, or `test`
+/// when it allows any.
+fn required(rules: Option<&BTreeMap<String, AlertingRule>>) -> BTreeMap<String, String> {
+    rules
+        .into_iter()
+        .flatten()
+        .filter(|(_, rule)| rule.required)
+        .map(|(name, rule)| {
+            let value = rule.values.first().map_or("test", String::as_str);
+            (name.clone(), value.to_owned())
+        })
+        .collect()
+}
 
 /// `tocsin notify test`.
 pub fn test(notifier_id: &str, folder: &Path) -> Result<Report, Failure> {
@@ -62,26 +99,8 @@ pub fn test(notifier_id: &str, folder: &Path) -> Result<Report, Failure> {
         Some(&hooks),
     )
     .map_err(|error| Failure::new(Exit::Runtime, format!("notifier `{notifier_id}`: {error}")))?;
-    let node_id = configuration.server.node_id.clone().unwrap_or_default();
     let (fire, resolve) = runtime.block_on(async {
-        let started = tocsin_store::now_ms();
-        let mut alert = Alert {
-            event: AlertEvent::Fire,
-            node_id,
-            subject_kind: SubjectKind::Check,
-            subject_id: TEST_SUBJECT.to_owned(),
-            subject_name: "tocsin notify test".to_owned(),
-            labels: BTreeMap::new(),
-            annotations: BTreeMap::new(),
-            component_id: None,
-            component_name: None,
-            health: Health::Down,
-            started_at_ms: started,
-            ended_at_ms: None,
-            sent_at_ms: started,
-            delivery_id: None,
-            test: true,
-        };
+        let mut alert = test_alert(&configuration, tocsin_store::now_ms());
         let fire = built.send(&alert).await;
         // The resolve goes whatever happened to the fire: a fire that timed
         // out may still have arrived, and must not be left firing.

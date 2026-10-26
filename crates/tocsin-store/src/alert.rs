@@ -7,6 +7,7 @@
 //! durable the moment the outage is: a delivery worker that is behind, a
 //! lossy event channel or a restart can delay a message but never lose it.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
@@ -15,7 +16,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use tocsin_core::Health;
 use tocsin_core::status::OutageEnding;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::rollup::parse_column;
 use crate::writer::{apply_outage_change, insert_result};
 use crate::{NewCheckResult, NewOutage, OutageChange};
@@ -129,7 +130,7 @@ pub struct AlertTarget {
 
 /// Where an outage the engine decided alerts is sent, as handed to
 /// [`Store::change_outage_alerting`](crate::Store::change_outage_alerting).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AlertRouting {
     /// The notifiers that get a new alert.
     pub targets: Vec<AlertTarget>,
@@ -137,6 +138,11 @@ pub struct AlertRouting {
     /// until acknowledged (a Pushover emergency), target or not. An alert
     /// that rang on a notifier not in this list gets a cancel.
     pub ringing: Vec<String>,
+    /// The subject's configured labels, pinned on each alert this opens:
+    /// an alert already firing keeps the set it opened with.
+    pub labels: BTreeMap<String, String>,
+    /// The subject's configured annotations, pinned the same way.
+    pub annotations: BTreeMap<String, String>,
 }
 
 /// What [`Store::change_outage_alerting`](crate::Store::change_outage_alerting)
@@ -185,6 +191,11 @@ pub struct StoredAlert {
     /// came of it. Until one was, the receiver cannot have heard of the
     /// alert: a silence holds back its resolve, and its cancel is dropped.
     pub attempted: bool,
+    /// The subject's configured labels when it opened: every message of
+    /// it carries these, whatever the configuration says now.
+    pub labels: BTreeMap<String, String>,
+    /// The subject's configured annotations when it opened.
+    pub annotations: BTreeMap<String, String>,
 }
 
 /// A pending delivery that may be sent now: the oldest pending message of
@@ -526,8 +537,12 @@ fn fire_alerts(
         )?;
         queued += 1;
     }
-    let targets = routing.map_or(&[][..], |routing| &routing.targets[..]);
-    for target in targets {
+    let Some(routing) = routing else {
+        return Ok(queued);
+    };
+    let labels = serde_json::to_string(&routing.labels).map_err(Error::Encode)?;
+    let annotations = serde_json::to_string(&routing.annotations).map_err(Error::Encode)?;
+    for target in &routing.targets {
         if open_alerts
             .iter()
             .any(|alert| alert.notifier_id == target.notifier_id)
@@ -538,8 +553,8 @@ fn fire_alerts(
             .prepare_cached(
                 "INSERT INTO alert (node_id, subject_kind, subject_id, component_id,
                      notifier_id, route_id, outage_id, health, started_at, ringing,
-                     repeat_ms, next_repeat_at, notified, attempted)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12 + ?11, 0, 0)",
+                     repeat_ms, next_repeat_at, notified, attempted, labels, annotations)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12 + ?11, 0, 0, ?13, ?14)",
             )?
             .execute(params![
                 outage.identity.node_id,
@@ -554,6 +569,8 @@ fn fire_alerts(
                 rings(&target.notifier_id),
                 target.repeat_ms,
                 now_ms,
+                labels,
+                annotations,
             ])?;
         let alert_id = transaction.last_insert_rowid();
         queue(
@@ -674,7 +691,7 @@ fn drop_pending_repeats(conn: &Connection, alert_id: i64) -> Result<()> {
 
 const ALERT_COLUMNS: &str = "a.id, a.node_id, a.subject_kind, a.subject_id, a.component_id,
     a.notifier_id, a.route_id, a.health, a.started_at, a.ended_at, a.ringing, a.outage_id,
-    a.notified, a.attempted";
+    a.notified, a.attempted, a.labels, a.annotations";
 
 fn stored_alert(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<StoredAlert> {
     Ok(StoredAlert {
@@ -692,6 +709,19 @@ fn stored_alert(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<Store
         outage_id: row.get(first + 11)?,
         notified: row.get(first + 12)?,
         attempted: row.get(first + 13)?,
+        labels: json_map(row, first + 14)?,
+        annotations: json_map(row, first + 15)?,
+    })
+}
+
+/// A column holding a JSON object of strings.
+fn json_map(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<BTreeMap<String, String>> {
+    serde_json::from_str(&row.get::<_, String>(index)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
     })
 }
 

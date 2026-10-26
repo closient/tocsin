@@ -15,10 +15,11 @@
 //! health, is an annotation; a changed label would open a second alert.
 //!
 //! The check's or heartbeat's configured `labels` join the label set too,
-//! because routing is what labels are for. They change only when the
-//! configuration does: an alert firing across a reload that changes one is
-//! posted under its new label set, and the old one resolves on its own
-//! within [`FIRING_HOLD`]. Configured `annotations` join the annotations.
+//! because routing is what labels are for. They are pinned on the alert
+//! when it opens, with its configured `annotations`, and every fire, repeat
+//! and resolve posts that set, so every alert has a matching resolve with
+//! the same identity: a reload that changes a firing check's labels, or
+//! removes the check, takes effect from its next alert, never mid-episode.
 
 use std::time::Duration;
 
@@ -59,7 +60,8 @@ impl Alertmanager {
 }
 
 /// The alert's labels: its identity, the same on every post, and the
-/// subject's configured `labels`, which tocsin's own outrank. A test alert
+/// subject's configured `labels` as pinned when the alert opened, which
+/// tocsin's own outrank. A test alert
 /// has an `alertname` of its own, so it never pairs with a real one.
 #[must_use]
 pub fn labels(alert: &Alert) -> Map<String, Value> {

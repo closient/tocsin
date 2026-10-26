@@ -275,12 +275,11 @@ therefore still one alert in Alertmanager.
 
 The check's or heartbeat's configured
 [`labels`](config.md#alerting) join the label set, so Alertmanager can route
-on them, and its `annotations` join the annotations. Both are read from the
-configuration running when each post is sent. Labels are part of the
-identity, so a reload that changes a label on a check that is firing opens a
-second alert under the new labels, and the first resolves on its own within
-the five-minute `endsAt`. Changing an annotation changes nothing but the
-annotation.
+on them, and its `annotations` join the annotations. Labels are part of the
+identity, so both are pinned on the alert when it opens: every fire, repeat
+and resolve of it carries that set, even after a reload changes the
+check's labels or removes the check. A change takes effect from the
+check's next alert, after this one resolves.
 
 ## Slack
 
@@ -403,8 +402,8 @@ Each alert is a POST of this JSON:
 `event` is `fire`, `repeat` or `resolve`; `status` is `firing` or
 `resolved`. `ended_at_ms` and `duration_ms` are null until the resolve.
 `labels` and `annotations` are the check's or heartbeat's configured ones,
-as the configuration running when the message is sent has them, and are
-empty objects when it has none.
+as they were when the alert opened (the same on every message of one
+alert, across reloads), and are empty objects when it has none.
 `delivery_id` is the same on every retry of one delivery, so a receiver can
 drop duplicates. `version` changes only when a field changes meaning or goes
 away.
@@ -459,7 +458,11 @@ sends the notifier a test alert for the subject `tocsin-test`, then its
 resolve, directly rather than through the outbox, and reports whether each
 was accepted (exit 0 only if both were). Test alerts are titled `[TEST]`,
 and carry `"test": true` in the webhook payload and `tocsin_test="true"` in
-Alertmanager.
+Alertmanager. Each label and annotation [`[alerting]`](config.md#alerting)
+requires is set, so the test routes as a real alert would: to the first
+value its `values` lists, or `test` when it allows any. List the value a
+test should route as first, such as `values = ["false", "true"]` for a
+label that decides whether a person is paged.
 
 For a notifier naming a Slack `connection`, the test reads the connection
 from the database in `[server] data_dir` without writing to it. If Slack

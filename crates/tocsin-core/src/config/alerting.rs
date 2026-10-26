@@ -25,7 +25,8 @@ pub const OWN_ANNOTATIONS: &[&str] = &[
 ];
 
 /// `[alerting]`: the contract every check's and heartbeat's `labels` and
-/// `annotations` are held to. Without it, they are free-form.
+/// `annotations` are held to. Without it, none is required and any value
+/// goes; the name and non-empty rules apply either way.
 ///
 /// A receiver such as Alertmanager routes on labels, and a label that is
 /// missing or misspelt routes by default without anyone noticing. Declared
@@ -38,11 +39,13 @@ pub struct Alerting {
     /// `[alerting.labels.<name>]` table. Labels it does not name are
     /// allowed and unchecked.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(extend("propertyNames" = { "pattern": LABEL_NAME_PATTERN }))]
     pub labels: BTreeMap<String, AlertingRule>,
     /// The annotations the contract covers, by name, each a
     /// `[alerting.annotations.<name>]` table. Annotations it does not name
     /// are allowed and unchecked.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(extend("propertyNames" = { "pattern": LABEL_NAME_PATTERN }))]
     pub annotations: BTreeMap<String, AlertingRule>,
 }
 
@@ -55,8 +58,13 @@ pub struct AlertingRule {
     pub required: bool,
     /// The values it may take, matched exactly. Empty allows any value.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(inner(length(min = 1)))]
     pub values: Vec<String>,
 }
+
+/// [`is_label_name`] as a JSON Schema `pattern`, for the schema's
+/// `propertyNames`: without lookahead, which not every validator has.
+pub const LABEL_NAME_PATTERN: &str = "^([A-Za-z][A-Za-z0-9_]*|_([A-Za-z0-9][A-Za-z0-9_]*)?)$";
 
 /// Whether `name` can be a label: letters, digits and underscores, not
 /// starting with a digit, as Prometheus and Alertmanager require. Names
@@ -73,7 +81,7 @@ pub fn is_label_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_label_name;
+    use super::{LABEL_NAME_PATTERN, is_label_name};
 
     #[test]
     fn label_names_are_prometheus_names() {
@@ -82,6 +90,31 @@ mod tests {
         }
         for name in ["", "1st", "needs-human", "needs human", "__name__", "é"] {
             assert!(!is_label_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_schema_pattern_takes_the_names_the_loader_does() {
+        let pattern = regex::Regex::new(LABEL_NAME_PATTERN).unwrap();
+        for name in [
+            "needs_human",
+            "_private",
+            "a1",
+            "PageClass",
+            "_",
+            "_1",
+            "a__b",
+            "a_",
+            "",
+            "1st",
+            "needs-human",
+            "needs human",
+            "__name__",
+            "__",
+            "é",
+            "a\n",
+        ] {
+            assert_eq!(pattern.is_match(name), is_label_name(name), "{name:?}");
         }
     }
 }

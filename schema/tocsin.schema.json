@@ -4,13 +4,16 @@
   "definitions": {
     "Alerting": {
       "additionalProperties": false,
-      "description": "`[alerting]`: the contract every check's and heartbeat's `labels` and\n`annotations` are held to. Without it, they are free-form.\n\nA receiver such as Alertmanager routes on labels, and a label that is\nmissing or misspelt routes by default without anyone noticing. Declared\nhere, the same mistake fails `tocsin config check`, and a reload that\nmakes it keeps the last good configuration.",
+      "description": "`[alerting]`: the contract every check's and heartbeat's `labels` and\n`annotations` are held to. Without it, none is required and any value\ngoes; the name and non-empty rules apply either way.\n\nA receiver such as Alertmanager routes on labels, and a label that is\nmissing or misspelt routes by default without anyone noticing. Declared\nhere, the same mistake fails `tocsin config check`, and a reload that\nmakes it keeps the last good configuration.",
       "properties": {
         "annotations": {
           "additionalProperties": {
             "$ref": "#/definitions/AlertingRule"
           },
           "description": "The annotations the contract covers, by name, each a\n`[alerting.annotations.<name>]` table. Annotations it does not name\nare allowed and unchecked.",
+          "propertyNames": {
+            "pattern": "^([A-Za-z][A-Za-z0-9_]*|_([A-Za-z0-9][A-Za-z0-9_]*)?)$"
+          },
           "type": "object"
         },
         "labels": {
@@ -18,6 +21,9 @@
             "$ref": "#/definitions/AlertingRule"
           },
           "description": "The labels the contract covers, by name, each a\n`[alerting.labels.<name>]` table. Labels it does not name are\nallowed and unchecked.",
+          "propertyNames": {
+            "pattern": "^([A-Za-z][A-Za-z0-9_]*|_([A-Za-z0-9][A-Za-z0-9_]*)?)$"
+          },
           "type": "object"
         }
       },
@@ -35,6 +41,7 @@
         "values": {
           "description": "The values it may take, matched exactly. Empty allows any value.",
           "items": {
+            "minLength": 1,
             "type": "string"
           },
           "type": "array"
@@ -303,9 +310,13 @@
       "properties": {
         "annotations": {
           "additionalProperties": {
+            "minLength": 1,
             "type": "string"
           },
           "description": "Annotations on the check's alerts, such as a runbook: shown, not\nrouted on. `[alerting]` can require some and limit their values.",
+          "propertyNames": {
+            "pattern": "^([A-Za-z][A-Za-z0-9_]*|_([A-Za-z0-9][A-Za-z0-9_]*)?)$"
+          },
           "type": "object"
         },
         "assert": {
@@ -374,9 +385,13 @@
         },
         "labels": {
           "additionalProperties": {
+            "minLength": 1,
             "type": "string"
           },
           "description": "Labels on the check's alerts, such as `{ team = \"ops\" }`: a receiver\nlike Alertmanager routes on them. `[alerting]` can require some and\nlimit their values.",
+          "propertyNames": {
+            "pattern": "^([A-Za-z][A-Za-z0-9_]*|_([A-Za-z0-9][A-Za-z0-9_]*)?)$"
+          },
           "type": "object"
         },
         "link": {
@@ -754,9 +769,13 @@
       "properties": {
         "annotations": {
           "additionalProperties": {
+            "minLength": 1,
             "type": "string"
           },
           "description": "Annotations on the heartbeat's alerts, such as a runbook: shown, not\nrouted on. `[alerting]` can require some and limit their values.",
+          "propertyNames": {
+            "pattern": "^([A-Za-z][A-Za-z0-9_]*|_([A-Za-z0-9][A-Za-z0-9_]*)?)$"
+          },
           "type": "object"
         },
         "component": {
@@ -797,9 +816,13 @@
         },
         "labels": {
           "additionalProperties": {
+            "minLength": 1,
             "type": "string"
           },
           "description": "Labels on the heartbeat's alerts, such as `{ team = \"ops\" }`: a\nreceiver like Alertmanager routes on them. `[alerting]` can require\nsome and limit their values.",
+          "propertyNames": {
+            "pattern": "^([A-Za-z][A-Za-z0-9_]*|_([A-Za-z0-9][A-Za-z0-9_]*)?)$"
+          },
           "type": "object"
         },
         "link": {

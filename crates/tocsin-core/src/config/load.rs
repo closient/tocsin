@@ -1163,11 +1163,15 @@ impl<'a> Loader<'a> {
                     self.report(&origin, format!("{subject}: {message}"), Some(hint));
                 }
                 if value.is_empty() {
+                    // The one diagnostic for it: the contract's value check
+                    // skips an empty value, and its allowed values join here.
+                    let rule = alerting.and_then(|alerting| field.rules(alerting).get(name));
                     self.report(
                         &origin,
                         format!("{subject}: {noun} `{name}` is empty"),
                         Some(format!(
-                            "Alertmanager drops an empty {noun}: give it a value or remove it"
+                            "Alertmanager drops an empty {noun}: give it a value or remove it{}",
+                            rule.map(allowed).unwrap_or_default()
                         )),
                     );
                 }
@@ -1204,7 +1208,11 @@ impl<'a> Loader<'a> {
                             Some(hint),
                         );
                     }
-                    Some(value) if !rule.values.is_empty() && !rule.values.contains(value) => {
+                    Some(value)
+                        if !value.is_empty()
+                            && !rule.values.is_empty()
+                            && !rule.values.contains(value) =>
+                    {
                         let hint = closest(value, rule.values.iter().map(String::as_str))
                             .map_or_else(
                                 || format!("it must be one of {}", list(&rule.values)),

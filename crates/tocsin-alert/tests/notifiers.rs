@@ -469,10 +469,6 @@ fn alertmanager_routes_on_configured_labels_and_keeps_its_own() {
     assert_eq!(labels.as_object().unwrap().len(), 6);
     assert_eq!(posted[0]["annotations"]["ticket"], "OPS-1");
     assert_eq!(posted[0]["annotations"]["name"], "Public API");
-
-    // The resolve carries the same label set, so it ends the same alert.
-    let resolved = alertmanager::payload(&labelled(AlertEvent::Resolve));
-    assert_eq!(resolved[0]["labels"], *labels);
 }
 
 #[test]

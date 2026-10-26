@@ -613,12 +613,8 @@ impl Worker {
             subject_name: self
                 .router
                 .subject_name(stored.subject_kind, &stored.subject_id),
-            labels: self
-                .router
-                .subject_labels(stored.subject_kind, &stored.subject_id),
-            annotations: self
-                .router
-                .subject_annotations(stored.subject_kind, &stored.subject_id),
+            labels: stored.labels.clone(),
+            annotations: stored.annotations.clone(),
             component_id: stored.component_id.clone(),
             component_name: stored
                 .component_id

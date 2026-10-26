@@ -184,30 +184,6 @@ impl Router {
             .map_or_else(|| subject_id.to_owned(), |subject| subject.name.clone())
     }
 
-    /// The check or heartbeat's configured `labels`; none for a subject the
-    /// configuration no longer has.
-    #[must_use]
-    pub fn subject_labels(&self, kind: SubjectKind, subject_id: &str) -> BTreeMap<String, String> {
-        self.subjects
-            .get(&(kind, subject_id.to_owned()))
-            .map(|subject| subject.labels.clone())
-            .unwrap_or_default()
-    }
-
-    /// The check or heartbeat's configured `annotations`; none for a
-    /// subject the configuration no longer has.
-    #[must_use]
-    pub fn subject_annotations(
-        &self,
-        kind: SubjectKind,
-        subject_id: &str,
-    ) -> BTreeMap<String, String> {
-        self.subjects
-            .get(&(kind, subject_id.to_owned()))
-            .map(|subject| subject.annotations.clone())
-            .unwrap_or_default()
-    }
-
     /// The most deliveries `notifier_id` may send at once; one for a
     /// notifier the configuration no longer has.
     #[must_use]
@@ -277,6 +253,16 @@ impl Router {
             .map(|(id, _)| id.clone())
             .collect();
         ringing.sort();
-        AlertRouting { targets, ringing }
+        let subject = self.subjects.get(&(kind, subject_id.to_owned()));
+        AlertRouting {
+            targets,
+            ringing,
+            labels: subject
+                .map(|subject| subject.labels.clone())
+                .unwrap_or_default(),
+            annotations: subject
+                .map(|subject| subject.annotations.clone())
+                .unwrap_or_default(),
+        }
     }
 }

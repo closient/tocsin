@@ -472,7 +472,7 @@ async fn an_alerting_result_is_stored_with_its_change_and_deliveries_or_not_at_a
             route_id: "ops".into(),
             repeat_ms: None,
         }],
-        ringing: Vec::new(),
+        ..AlertRouting::default()
     };
     let down = NewOutage {
         node_id: "node-a".into(),

@@ -1583,6 +1583,16 @@ fn a_label_value_outside_the_contract_is_located_at_the_value() {
 }
 
 #[test]
+fn an_empty_value_the_contract_covers_is_one_error_naming_the_values_it_allows() {
+    let text = LABELLED.replace("needs_human = \"false\"", "needs_human = \"\"");
+    let diagnostic = only_error(&[("alerting.toml", CONTRACT), ("checks.toml", &text)]);
+    assert_eq!(
+        diagnostic.to_string(),
+        "checks.toml:8:15: check `api`: label `needs_human` is empty (check[0].labels.needs_human)\n  hint: Alertmanager drops an empty label: give it a value or remove it; it must be one of `true`, `false`"
+    );
+}
+
+#[test]
 fn the_contract_holds_heartbeats_and_annotations_too() {
     let text = LABELLED
         .replace(r#"page_class = "digest""#, r#"page_class = "pager""#)

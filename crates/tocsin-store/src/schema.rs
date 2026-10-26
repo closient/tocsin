@@ -28,6 +28,7 @@ static MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("../migrations/0012_incident_internals.sql")),
     M::up(include_str!("../migrations/0013_open_external_key.sql")),
     M::up(include_str!("../migrations/0014_silences.sql")),
+    M::up(include_str!("../migrations/0015_alert_labels.sql")),
 ];
 
 /// How long a connection waits for another process's lock before failing.

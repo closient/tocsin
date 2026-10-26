@@ -26,7 +26,9 @@ use std::path::PathBuf;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-pub use alerting::{Alerting, AlertingRule, IDENTITY_LABELS, OWN_ANNOTATIONS, is_label_name};
+pub use alerting::{
+    Alerting, AlertingRule, IDENTITY_LABELS, LABEL_NAME_PATTERN, OWN_ANNOTATIONS, is_label_name,
+};
 pub use assertion::{
     Assertion, CONDITION_KEYS, Comparison, Condition, FailureState, HeaderAssertion, JsonAssertion,
     RecordsAssertion, TextAssertion,
@@ -484,10 +486,18 @@ pub struct Heartbeat {
     /// receiver like Alertmanager routes on them. `[alerting]` can require
     /// some and limit their values.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(extend(
+        "propertyNames" = { "pattern": LABEL_NAME_PATTERN },
+        "additionalProperties" = { "type": "string", "minLength": 1 },
+    ))]
     pub labels: BTreeMap<String, String>,
     /// Annotations on the heartbeat's alerts, such as a runbook: shown, not
     /// routed on. `[alerting]` can require some and limit their values.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(extend(
+        "propertyNames" = { "pattern": LABEL_NAME_PATTERN },
+        "additionalProperties" = { "type": "string", "minLength": 1 },
+    ))]
     pub annotations: BTreeMap<String, String>,
 }
 

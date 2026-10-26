@@ -15,7 +15,7 @@ A **required** key must be set in its table. A key with no default and not requi
 
 ### `[alerting]`
 
-`[alerting]`: the contract every check's and heartbeat's `labels` and `annotations` are held to. Without it, they are free-form.
+`[alerting]`: the contract every check's and heartbeat's `labels` and `annotations` are held to. Without it, none is required and any value goes; the name and non-empty rules apply either way.
 
 A receiver such as Alertmanager routes on labels, and a label that is missing or misspelt routes by default without anyone noticing. Declared here, the same mistake fails `tocsin config check`, and a reload that makes it keeps the last good configuration.
 

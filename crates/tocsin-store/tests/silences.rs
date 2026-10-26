@@ -35,6 +35,7 @@ fn routing(notifiers: &[&str], ringing: &[&str]) -> AlertRouting {
             })
             .collect(),
         ringing: ringing.iter().map(|id| (*id).to_owned()).collect(),
+        ..AlertRouting::default()
     }
 }
 

@@ -274,6 +274,9 @@ pub async fn expire(state: &AppState, id: i64, actor: Actor) -> Result<Silence, 
         .end_silence(id, actor.clone(), now())
         .await?
         .ok_or_else(|| missing(id))?;
+    // An alert it kept quiet may need a fresh fire now; the worker would
+    // otherwise see that only on its next idle tick, up to a minute away.
+    state.alert_wake.notify_one();
     tracing::info!(silence = silence.id, state = %silence.state, %actor, "silence expired");
     Ok(silence)
 }

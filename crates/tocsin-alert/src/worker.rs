@@ -276,8 +276,8 @@ impl Alerter {
         self.setup.send_replace(Setup { notifiers, router });
     }
 
-    /// What wakes the worker when a delivery is queued; hand it to
-    /// [`AlertingHistory`](crate::AlertingHistory).
+    /// What wakes the worker when a delivery is queued, or a silence is
+    /// ended early; hand it to [`AlertingHistory`](crate::AlertingHistory).
     #[must_use]
     pub fn waker(&self) -> Arc<Notify> {
         Arc::clone(&self.wake)

@@ -623,6 +623,7 @@ scopes = ["release"]
                 admin: None,
                 live: Arc::new(monitor.status_handle()),
                 heartbeats: monitor.heartbeats(),
+                alert_wake: monitor.alert_waker(),
                 config_status: status.clone(),
                 metrics: Arc::clone(&metrics),
                 subscribers: None,

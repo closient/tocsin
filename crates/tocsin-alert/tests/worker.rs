@@ -1025,11 +1025,18 @@ fn an_outage_that_outlives_a_silence_ended_early_fires_when_it_ends() {
                 .unwrap()
         })
         .await;
+        // What `POST /api/v1/silences/{id}/expire` does after ending it.
+        let ended_at = tokio::time::Instant::now();
+        running.alerter.waker().notify_one();
 
-        // Seen at the worker's next look, an idle wake at the latest.
+        // At once, not at the worker's idle wake an hour away.
         let fire = next_from(&mut receiver, "slack").await;
         assert_eq!(fire.event(), AlertEvent::Fire);
-        assert!(fire.alert.sent_at_ms - T0 <= HOUR_MS + 60_000, "{fire:?}");
+        assert!(
+            ended_at.elapsed() < Duration::from_secs(1),
+            "the fire waited {:?} for the idle wake",
+            ended_at.elapsed()
+        );
         running.change(up(outage, T0 + 2 * HOUR_MS)).await;
         let resolve = next_from(&mut receiver, "slack").await;
         running.alerter.stop().await;

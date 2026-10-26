@@ -88,6 +88,7 @@ fn api() -> Api {
         admin: None,
         live: Arc::new(tocsin_engine::Snapshot::default()),
         heartbeats: HeartbeatHandle::default(),
+        alert_wake: Arc::default(),
         config_status: crate::reload::steady_status(),
         metrics: Arc::new(crate::metrics::Metrics::new()),
         subscribers: None,
@@ -457,6 +458,15 @@ async fn a_silence_ends_early_once_and_is_listed_newest_first() {
             .await;
         ids.push(silence["id"].as_i64().unwrap());
     }
+    let woken = || {
+        let wake = Arc::clone(&api.state.alert_wake);
+        async move {
+            tokio::time::timeout(std::time::Duration::from_millis(50), wake.notified())
+                .await
+                .is_ok()
+        }
+    };
+    assert!(!woken().await, "making a silence woke the alert worker");
 
     let (status, _, ended) = api
         .send(
@@ -469,6 +479,11 @@ async fn a_silence_ends_early_once_and_is_listed_newest_first() {
     assert_eq!(status, StatusCode::OK, "{ended}");
     assert_eq!(ended["state"], "ended");
     assert_eq!(ended["ended_by"], json!({"kind": "token", "id": "pager"}));
+    // So an alert it kept quiet fires now, not at the worker's next tick.
+    assert!(
+        woken().await,
+        "ending a silence did not wake the alert worker"
+    );
     let (status, _, again) = api
         .send(
             Method::POST,

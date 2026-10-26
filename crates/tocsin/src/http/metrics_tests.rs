@@ -185,6 +185,7 @@ fn api() -> Api {
         admin: None,
         live: Arc::new(snapshot()),
         heartbeats: HeartbeatHandle::default(),
+        alert_wake: Arc::default(),
         config_status: crate::reload::steady_status(),
         metrics: Arc::new(Metrics::new()),
         subscribers: None,

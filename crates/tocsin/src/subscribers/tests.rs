@@ -131,6 +131,7 @@ fn site_from(
         admin: admin.map(Arc::new),
         live: Arc::new(tocsin_engine::Snapshot::default()),
         heartbeats: tocsin_engine::HeartbeatHandle::default(),
+        alert_wake: Arc::default(),
         config_status: crate::reload::steady_status(),
         metrics: Arc::new(crate::metrics::Metrics::new()),
         subscribers: subscriptions,

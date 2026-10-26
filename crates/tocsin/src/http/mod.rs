@@ -50,7 +50,7 @@ use tocsin_core::config::Config;
 use tocsin_core::incident::Timestamp;
 use tocsin_engine::{HeartbeatHandle, Snapshot, StatusHandle};
 use tocsin_store::Store;
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 
 pub use self::error::ApiError;
 use self::events::EventBus;
@@ -73,6 +73,9 @@ pub struct AppState {
     pub admin: Option<Arc<AdminAuth>>,
     /// Takes heartbeat pings to the running engine.
     pub heartbeats: HeartbeatHandle,
+    /// Wakes the alert delivery worker, for a change it would otherwise
+    /// only see on its next idle tick, such as a silence ended early.
+    pub alert_wake: Arc<Notify>,
     /// The checks' and components' current state.
     pub live: Arc<dyn LiveStatus>,
     /// How the configuration last reloaded.

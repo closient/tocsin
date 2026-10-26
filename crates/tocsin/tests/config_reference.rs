@@ -171,10 +171,17 @@ impl<'a> Tables<'a> {
     /// Records, depth first, every table reachable from `properties`.
     fn collect(&mut self, parent: &TablePath, properties: &'a Map<String, Value>) {
         for (key, property) in properties {
-            let Some((name, array)) = table_of(self.schema, property) else {
+            let (name, path) = if let Some((name, array)) = table_of(self.schema, property) {
+                (name, parent.child(key, array))
+            } else if let Some((name, array)) = property
+                .get("additionalProperties")
+                .and_then(|values| table_of(self.schema, values))
+            {
+                // A table of tables by name: `[alerting.labels.<name>]`.
+                (name, parent.child(key, false).child("<name>", array))
+            } else {
                 continue;
             };
-            let path = parent.child(key, array);
             if let Some(&index) = self.by_definition.get(name) {
                 self.order[index].paths.push(path);
                 continue;
@@ -197,7 +204,9 @@ impl<'a> Tables<'a> {
     fn render(&self, page: &mut String, table: &Table<'_>) {
         let definition = &definitions(self.schema)[table.definition];
         let first = &table.paths[0];
-        let level = "#".repeat((first.keys.len() + 2).min(6));
+        // A `<name>` placeholder is not a level of its own.
+        let depth = first.keys.iter().filter(|key| *key != "<name>").count();
+        let level = "#".repeat((depth + 2).min(6));
         writeln!(
             page,
             "<a id=\"{}\"></a>\n\n{level} {}\n",

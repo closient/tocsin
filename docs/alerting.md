@@ -264,14 +264,25 @@ acknowledged or it expires: pick a lower priority unless that is wanted.
 each post and re-posts every 60 seconds, whatever the route's `repeat`, so
 the alert stays firing while tocsin is up, and resolves by itself within
 five minutes if tocsin goes away. Alertmanager identifies an alert by its
-whole label set, so the labels are the identity and nothing else:
+whole label set, so tocsin's own labels are the identity and nothing else:
 `alertname` (`TocsinCheckFailing`, `TocsinHeartbeatFailing`, or
 `TocsinTestAlert` for `tocsin notify test`), `node`, `subject_kind` and
-`subject_id`. Everything that can change while an alert fires is an
-annotation: `summary`, `description`, `health`, `name`, `component` and
+`subject_id`. Everything of tocsin's that can change while an alert fires is
+an annotation: `summary`, `description`, `health`, `name`, `component` and
 `component_name` when there is one, and `tocsin_test` on a test alert. A
 check that moves to another component, or from degraded to down, is
 therefore still one alert in Alertmanager.
+
+The check's or heartbeat's configured
+[`labels`](config.md#alerting) join the label set, so Alertmanager can route
+on them, and its `annotations` join the annotations. Labels are part of the
+identity, so both are pinned on the alert when it opens: every fire, repeat
+and resolve of it carries that set, even after a reload changes the
+check's labels. A change takes effect from the check's next alert, after
+this one resolves. A resolve already queued when a reload removes the
+check still carries the pinned labels; a check removed while it fires is
+withdrawn without a resolve, and Alertmanager expires its alert at
+`endsAt`.
 
 ## Slack
 
@@ -377,6 +388,8 @@ Each alert is a POST of this JSON:
   "node_id": "node-a",
   "subject": { "kind": "check", "id": "api", "name": "Public API" },
   "component_id": "web",
+  "labels": { "page_class": "page" },
+  "annotations": { "ticket": "OPS-12" },
   "health": "down",
   "started_at_ms": 1800000000000,
   "ended_at_ms": 1800000090000,
@@ -391,6 +404,9 @@ Each alert is a POST of this JSON:
 
 `event` is `fire`, `repeat` or `resolve`; `status` is `firing` or
 `resolved`. `ended_at_ms` and `duration_ms` are null until the resolve.
+`labels` and `annotations` are the check's or heartbeat's configured ones,
+as they were when the alert opened (the same on every message of one
+alert, across reloads), and are empty objects when it has none.
 `delivery_id` is the same on every retry of one delivery, so a receiver can
 drop duplicates. `version` changes only when a field changes meaning or goes
 away.
@@ -445,7 +461,11 @@ sends the notifier a test alert for the subject `tocsin-test`, then its
 resolve, directly rather than through the outbox, and reports whether each
 was accepted (exit 0 only if both were). Test alerts are titled `[TEST]`,
 and carry `"test": true` in the webhook payload and `tocsin_test="true"` in
-Alertmanager.
+Alertmanager. Each label and annotation [`[alerting]`](config.md#alerting)
+requires is set, so the test routes as a real alert would: to the first
+value its `values` lists, or `test` when it allows any. List the value a
+test should route as first, such as `values = ["false", "true"]` for a
+label that decides whether a person is paged.
 
 For a notifier naming a Slack `connection`, the test reads the connection
 from the database in `[server] data_dir` without writing to it. If Slack

@@ -8,11 +8,20 @@
 //! it every [`REPOST_INTERVAL`], well inside that hold; the resolve sets
 //! `endsAt` to when the outage ended.
 //!
-//! Alertmanager identifies an alert by its whole label set, so the labels
-//! hold the identity and nothing else: `alertname`, `node`, `subject_kind`
-//! and `subject_id`, fixed when the alert opens. Anything that can change
-//! while it fires, such as the component or the health, is an annotation;
-//! a changed label would open a second alert and strand the first.
+//! Alertmanager identifies an alert by its whole label set, so tocsin's own
+//! labels hold the identity and nothing else: `alertname`, `node`,
+//! `subject_kind` and `subject_id`, fixed when the alert opens. Anything of
+//! tocsin's that can change while it fires, such as the component or the
+//! health, is an annotation; a changed label would open a second alert.
+//!
+//! The check's or heartbeat's configured `labels` join the label set too,
+//! because routing is what labels are for. They are pinned on the alert
+//! when it opens, with its configured `annotations`, and every fire, repeat
+//! and resolve posts that set: a reload that changes a firing check's
+//! labels takes effect from its next alert, never mid-episode. A resolve
+//! already queued when a reload removes the check still carries the pinned
+//! labels; a check removed while it fires is withdrawn without a resolve,
+//! and Alertmanager expires its alert at `endsAt`.
 
 use std::time::Duration;
 
@@ -52,7 +61,9 @@ impl Alertmanager {
     }
 }
 
-/// The alert's labels: its identity, the same on every post. A test alert
+/// The alert's labels: its identity, the same on every post, and the
+/// subject's configured `labels` as pinned when the alert opened, which
+/// tocsin's own outrank. A test alert
 /// has an `alertname` of its own, so it never pairs with a real one.
 #[must_use]
 pub fn labels(alert: &Alert) -> Map<String, Value> {
@@ -61,7 +72,11 @@ pub fn labels(alert: &Alert) -> Map<String, Value> {
         (false, SubjectKind::Check) => "TocsinCheckFailing",
         (false, SubjectKind::Heartbeat) => "TocsinHeartbeatFailing",
     };
-    let mut labels = Map::new();
+    let mut labels: Map<String, Value> = alert
+        .labels
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone().into()))
+        .collect();
     labels.insert("alertname".into(), alertname.into());
     labels.insert("node".into(), alert.node_id.clone().into());
     labels.insert("subject_kind".into(), alert.subject_kind.as_str().into());
@@ -73,7 +88,11 @@ pub fn labels(alert: &Alert) -> Map<String, Value> {
 /// fires.
 #[must_use]
 pub fn annotations(alert: &Alert) -> Map<String, Value> {
-    let mut annotations = Map::new();
+    let mut annotations: Map<String, Value> = alert
+        .annotations
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone().into()))
+        .collect();
     annotations.insert("summary".into(), alert.title().into());
     annotations.insert("description".into(), alert.body().into());
     annotations.insert("health".into(), alert.health.as_str().into());

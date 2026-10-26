@@ -586,7 +586,7 @@ impl Run {
                 run.deadline_ms = anchor_ms.saturating_add(run.allowance_ms);
                 run.retry = None;
                 run.tracker.component = spec.component();
-                run.heartbeat = heartbeat.clone();
+                run.heartbeat = Box::new(heartbeat.clone());
                 Run::Heartbeat(run)
             }
             (run, _) => run,
@@ -836,7 +836,8 @@ struct CheckRun {
 
 /// A heartbeat's private state, owned by its task.
 struct HeartbeatRun {
-    heartbeat: Heartbeat,
+    /// Boxed so that a `Run` stays the size of a check's.
+    heartbeat: Box<Heartbeat>,
     tracker: Tracker,
     /// `interval + grace`, in milliseconds.
     allowance_ms: i64,
@@ -913,7 +914,7 @@ fn new_run(
             let anchor = anchors.get(&tracker.id).copied();
             let anchor_ms = anchor.unwrap_or(start_ms);
             let run = HeartbeatRun {
-                heartbeat: heartbeat.clone(),
+                heartbeat: Box::new(heartbeat.clone()),
                 tracker,
                 allowance_ms,
                 deadline_ms: anchor_ms.saturating_add(allowance_ms),

@@ -3,6 +3,7 @@
 //! What a notifier is handed: one message about one alert, and the wording
 //! every chat-style notifier shares.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use tocsin_core::Health;
@@ -47,6 +48,12 @@ pub struct Alert {
     pub subject_id: String,
     /// The check or heartbeat's display name.
     pub subject_name: String,
+    /// The check or heartbeat's configured `labels`, as the configuration
+    /// had them when the alert opened: the same on every message of it.
+    pub labels: BTreeMap<String, String>,
+    /// The check or heartbeat's configured `annotations`, as the
+    /// configuration had them when the alert opened.
+    pub annotations: BTreeMap<String, String>,
     /// Its component, if it has one.
     pub component_id: Option<String>,
     /// The component's display name.
@@ -214,6 +221,8 @@ mod tests {
             subject_kind: SubjectKind::Check,
             subject_id: "api".into(),
             subject_name: "API\r\nBcc: x@example.com".into(),
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
             component_id: Some("web".into()),
             component_name: Some("Website".into()),
             health: Health::Down,

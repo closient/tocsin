@@ -11,6 +11,32 @@ A **required** key must be set in its table. A key with no default and not requi
 
 ## Tables
 
+<a id="table-alerting"></a>
+
+### `[alerting]`
+
+`[alerting]`: the contract every check's and heartbeat's `labels` and `annotations` are held to. Without it, none is required and any value goes; the name and non-empty rules apply either way.
+
+A receiver such as Alertmanager routes on labels, and a label that is missing or misspelt routes by default without anyone noticing. Declared here, the same mistake fails `tocsin config check`, and a reload that makes it keeps the last good configuration.
+
+| Key | Type | Required | Default | Description |
+|-----|------|----------|---------|-------------|
+| `annotations` | table of [table](#table-alertingrule) |  |  | The annotations the contract covers, by name, each a `[alerting.annotations.<name>]` table. Annotations it does not name are allowed and unchecked. |
+| `labels` | table of [table](#table-alertingrule) |  |  | The labels the contract covers, by name, each a `[alerting.labels.<name>]` table. Labels it does not name are allowed and unchecked. |
+
+<a id="table-alertingrule"></a>
+
+#### `[alerting.annotations.<name>]`
+
+Also `[alerting.labels.<name>]`.
+
+What `[alerting]` asks of one label or annotation.
+
+| Key | Type | Required | Default | Description |
+|-----|------|----------|---------|-------------|
+| `required` | boolean |  | `false` | Whether every check and heartbeat must set it. |
+| `values` | array of string |  |  | The values it may take, matched exactly. Empty allows any value. |
+
 <a id="table-check"></a>
 
 ### `[[check]]`
@@ -19,6 +45,7 @@ A probe run on an interval, whose result sets a component's health.
 
 | Key | Type | Required | Default | Description |
 |-----|------|----------|---------|-------------|
+| `annotations` | table of string |  |  | Annotations on the check's alerts, such as a runbook: shown, not routed on. `[alerting]` can require some and limit their values. |
 | `assert` | [array of tables](#table-assertion) |  |  | Conditions a result must meet, each `[[check.assert]]` table holding one. With none, a probe that completes counts as up, except that `http` needs a 2xx or 3xx status, `dns` a `NOERROR` response and `tls` a certificate that verifies for the host. |
 | `component` | [`Id`](#type-id) |  |  | The `[[component]]` whose health this check sets. |
 | `confirm` | integer |  | `1` | Consecutive results that disagree with the current state before the state changes. |
@@ -26,6 +53,7 @@ A probe run on an interval, whose result sets a component's health.
 | `http` | [table](#table-httpsettings) |  |  | Settings for `http` checks. |
 | `id` | [`Id`](#type-id) | yes |  | Unique among checks and heartbeats in every file: they share one history. |
 | `interval` | [`Duration`](#type-duration) |  | `"1m"` | How often the probe runs. |
+| `labels` | table of string |  |  | Labels on the check's alerts, such as `{ team = "ops" }`: a receiver like Alertmanager routes on them. `[alerting]` can require some and limit their values. |
 | `link` | [array of tables](#table-link) |  |  | Links shown with the check, such as its dashboard or runbook, each a `[[check.link]]` table. |
 | `name` | string |  |  | Display name; the id is shown when it is absent. |
 | `target` | string | yes |  | What is probed. Its form depends on the type: a URL for `http`, `host:port` for `tcp`, `host` or `host:port` for `tls`, a domain name for `dns` and a host for `icmp`. |
@@ -230,10 +258,12 @@ A `[[check.link]]` or `[[heartbeat.link]]`: a named link to somewhere an operato
 
 | Key | Type | Required | Default | Description |
 |-----|------|----------|---------|-------------|
+| `annotations` | table of string |  |  | Annotations on the heartbeat's alerts, such as a runbook: shown, not routed on. `[alerting]` can require some and limit their values. |
 | `component` | [`Id`](#type-id) |  |  | The `[[component]]` whose health this heartbeat sets. |
 | `grace` | [`Duration`](#type-duration) |  | `"1m"` | How late a ping may be before the heartbeat is down: it is down once `interval + grace` passes without one. |
 | `id` | [`Id`](#type-id) | yes |  | Unique among checks and heartbeats in every file: they share one history. |
 | `interval` | [`Duration`](#type-duration) | yes |  | How often a ping is expected. |
+| `labels` | table of string |  |  | Labels on the heartbeat's alerts, such as `{ team = "ops" }`: a receiver like Alertmanager routes on them. `[alerting]` can require some and limit their values. |
 | `link` | [array of tables](#table-link) |  |  | Links shown with the heartbeat, such as the job's logs or runbook, each a `[[heartbeat.link]]` table. |
 | `name` | string |  |  | Display name; the id is shown when it is absent. |
 

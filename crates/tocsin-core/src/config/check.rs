@@ -64,6 +64,23 @@ pub struct Check {
     /// `[[check.link]]` table.
     #[serde(default, rename = "link", skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
+    /// Labels on the check's alerts, such as `{ team = "ops" }`: a receiver
+    /// like Alertmanager routes on them. `[alerting]` can require some and
+    /// limit their values.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(extend(
+        "propertyNames" = { "pattern": super::LABEL_NAME_PATTERN },
+        "additionalProperties" = { "type": "string", "minLength": 1 },
+    ))]
+    pub labels: BTreeMap<String, String>,
+    /// Annotations on the check's alerts, such as a runbook: shown, not
+    /// routed on. `[alerting]` can require some and limit their values.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(extend(
+        "propertyNames" = { "pattern": super::LABEL_NAME_PATTERN },
+        "additionalProperties" = { "type": "string", "minLength": 1 },
+    ))]
+    pub annotations: BTreeMap<String, String>,
 }
 
 fn default_interval() -> Duration {

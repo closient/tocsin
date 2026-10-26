@@ -16,6 +16,7 @@ use serde::de::DeserializeOwned;
 use toml::Spanned;
 use toml::de::{DeTable, DeValue, ValueDeserializer};
 
+use super::alerting::{Alerting, AlertingRule, IDENTITY_LABELS, OWN_ANNOTATIONS, is_label_name};
 use super::assertion::{Condition, TextAssertion};
 use super::check::{CheckType, MAX_BODY_CEILING};
 use super::colour::{AA_TEXT, DARK, LIGHT};
@@ -63,6 +64,7 @@ pub(crate) const TOP_LEVEL_KEYS: &[&str] = &[
     "subscribers",
     "slack",
     "telemetry",
+    "alerting",
 ];
 
 /// Parses, merges and validates configuration files, given in merge order.
@@ -175,6 +177,7 @@ struct Items {
     subscribers: Option<Item<Subscribers>>,
     slack: Option<Item<Slack>>,
     telemetry: Option<Item<Telemetry>>,
+    alerting: Option<Item<Alerting>>,
 }
 
 struct ParsedFile<'a> {
@@ -356,6 +359,9 @@ impl<'a> Loader<'a> {
                     "telemetry" => {
                         items.telemetry =
                             self.singleton(&origin, "telemetry", items.telemetry.take());
+                    }
+                    "alerting" => {
+                        items.alerting = self.singleton(&origin, "alerting", items.alerting.take());
                     }
                     _ => {
                         let hint = closest(&key, TOP_LEVEL_KEYS.iter().copied()).map_or_else(
@@ -618,12 +624,30 @@ impl<'a> Loader<'a> {
                 self.url(&project.origin.key("url"), url);
             }
         }
+        let alerting = items.alerting.as_ref().map(|alerting| &alerting.value);
+        if let Some(alerting) = &items.alerting {
+            self.validate_alerting(alerting);
+        }
         for check in &mut items.checks {
             self.validate_check(check);
             self.validate_links(&check.origin, &check.value.links);
+            let value = &check.value;
+            self.validate_alert_fields(
+                &check.origin,
+                &format!("check `{}`", value.id),
+                [&value.labels, &value.annotations],
+                alerting,
+            );
         }
         for heartbeat in &items.heartbeats {
             self.validate_links(&heartbeat.origin, &heartbeat.value.links);
+            let value = &heartbeat.value;
+            self.validate_alert_fields(
+                &heartbeat.origin,
+                &format!("heartbeat `{}`", value.id),
+                [&value.labels, &value.annotations],
+                alerting,
+            );
             if heartbeat.value.interval.get() < std::time::Duration::from_secs(1) {
                 self.report(
                     &heartbeat.origin.key("interval"),
@@ -1087,6 +1111,128 @@ impl<'a> Loader<'a> {
                             .to_owned(),
                     ),
                 );
+            }
+        }
+    }
+
+    /// `[alerting]`: each name it covers must be one a check could set, and
+    /// each allowed value one it could hold.
+    fn validate_alerting(&mut self, alerting: &Item<Alerting>) {
+        let value = &alerting.value;
+        for (field, rules) in [
+            (AlertField::Labels, &value.labels),
+            (AlertField::Annotations, &value.annotations),
+        ] {
+            for (name, rule) in rules {
+                let origin = alerting.origin.keys(&[field.key(), name]);
+                if let Some((message, hint)) = field.name_problem(name) {
+                    self.report(&origin, message, Some(hint));
+                }
+                if rule.values.iter().any(String::is_empty) {
+                    self.report(
+                        &origin.key("values"),
+                        format!("{} `{name}` cannot allow an empty value", field.noun()),
+                        Some(format!(
+                            "Alertmanager drops an empty {}, so it would never arrive",
+                            field.noun()
+                        )),
+                    );
+                }
+            }
+        }
+    }
+
+    /// A check's or heartbeat's `labels` and `annotations`: names a receiver
+    /// takes and tocsin does not set itself, and, with `[alerting]`, every
+    /// one it requires, with a value it allows.
+    fn validate_alert_fields(
+        &mut self,
+        origin: &Origin,
+        subject: &str,
+        fields: [&BTreeMap<String, String>; 2],
+        alerting: Option<&Alerting>,
+    ) {
+        for (field, set) in [AlertField::Labels, AlertField::Annotations]
+            .into_iter()
+            .zip(fields)
+        {
+            let noun = field.noun();
+            for (name, value) in set {
+                let origin = origin.keys(&[field.key(), name]);
+                if let Some((message, hint)) = field.name_problem(name) {
+                    self.report(&origin, format!("{subject}: {message}"), Some(hint));
+                }
+                if value.is_empty() {
+                    // The one diagnostic for it: the contract's value check
+                    // skips an empty value, and its allowed values join here.
+                    let rule = alerting.and_then(|alerting| field.rules(alerting).get(name));
+                    self.report(
+                        &origin,
+                        format!("{subject}: {noun} `{name}` is empty"),
+                        Some(format!(
+                            "Alertmanager drops an empty {noun}: give it a value or remove it{}",
+                            rule.map(allowed).unwrap_or_default()
+                        )),
+                    );
+                }
+            }
+            let Some(alerting) = alerting else {
+                continue;
+            };
+            for (name, rule) in field.rules(alerting) {
+                let origin = origin.keys(&[field.key(), name]);
+                match set.get(name) {
+                    None if rule.required => {
+                        // A misspelling is the likely cause: name it.
+                        let hint = closest(
+                            name,
+                            set.keys()
+                                .map(String::as_str)
+                                .filter(|given| !field.rules(alerting).contains_key(*given)),
+                        )
+                        .map_or_else(
+                            || {
+                                format!(
+                                    "add `{name} = \"...\"` to its `{}`{}",
+                                    field.key(),
+                                    allowed(rule)
+                                )
+                            },
+                            |near| format!("`{near}` is set: did you mean `{name}`?"),
+                        );
+                        self.report(
+                            &origin,
+                            format!(
+                                "{subject} is missing {noun} `{name}`, which `[alerting]` requires"
+                            ),
+                            Some(hint),
+                        );
+                    }
+                    Some(value)
+                        if !value.is_empty()
+                            && !rule.values.is_empty()
+                            && !rule.values.contains(value) =>
+                    {
+                        let hint = closest(value, rule.values.iter().map(String::as_str))
+                            .map_or_else(
+                                || format!("it must be one of {}", list(&rule.values)),
+                                |near| {
+                                    format!(
+                                        "did you mean `{near}`? It must be one of {}",
+                                        list(&rule.values)
+                                    )
+                                },
+                            );
+                        self.report(
+                            &origin,
+                            format!(
+                                "{subject}: {noun} `{name}` is `{value}`, which `[alerting]` does not allow"
+                            ),
+                            Some(hint),
+                        );
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -1892,7 +2038,75 @@ impl<'a> Loader<'a> {
             subscribers: items.subscribers.map(|item| item.value),
             slack: items.slack.map(|item| item.value),
             telemetry: items.telemetry.map(|item| item.value),
+            alerting: items.alerting.map(|item| item.value),
         })
+    }
+}
+
+/// The two maps a check or heartbeat carries onto its alerts.
+#[derive(Debug, Clone, Copy)]
+enum AlertField {
+    Labels,
+    Annotations,
+}
+
+impl AlertField {
+    fn key(self) -> &'static str {
+        match self {
+            AlertField::Labels => "labels",
+            AlertField::Annotations => "annotations",
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            AlertField::Labels => "label",
+            AlertField::Annotations => "annotation",
+        }
+    }
+
+    /// What tocsin sets itself, which configuration may not.
+    fn reserved(self) -> &'static [&'static str] {
+        match self {
+            AlertField::Labels => IDENTITY_LABELS,
+            AlertField::Annotations => OWN_ANNOTATIONS,
+        }
+    }
+
+    fn rules(self, alerting: &Alerting) -> &BTreeMap<String, AlertingRule> {
+        match self {
+            AlertField::Labels => &alerting.labels,
+            AlertField::Annotations => &alerting.annotations,
+        }
+    }
+
+    /// Why `name` cannot be one, with a hint, if it cannot.
+    fn name_problem(self, name: &str) -> Option<(String, String)> {
+        let noun = self.noun();
+        if !is_label_name(name) {
+            return Some((
+                format!("`{name}` is not a valid {noun} name"),
+                "use letters, digits and underscores, not starting with a digit or `__`, as Alertmanager requires".to_owned(),
+            ));
+        }
+        self.reserved().contains(&name).then(|| {
+            (
+                format!("{noun} `{name}` is set by tocsin"),
+                format!(
+                    "tocsin sets {} on every alert; choose another name",
+                    list(self.reserved())
+                ),
+            )
+        })
+    }
+}
+
+/// `; it must be one of ...` when a rule limits the values, else nothing.
+fn allowed(rule: &AlertingRule) -> String {
+    if rule.values.is_empty() {
+        String::new()
+    } else {
+        format!("; it must be one of {}", list(&rule.values))
     }
 }
 
@@ -2212,6 +2426,7 @@ mod tests {
                 "[slack]\nclient_id = \"${ENV:ID}\"\nclient_secret = \"${ENV:SECRET}\"\n",
             ),
             ("telemetry", "[telemetry.otlp]\n"),
+            ("alerting", "[alerting.labels.team]\n"),
         ];
         let kinds: BTreeSet<&str> = TOP_LEVEL_KEYS.iter().copied().collect();
         let covered: BTreeSet<&str> = samples.iter().map(|(kind, _)| *kind).collect();

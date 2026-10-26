@@ -887,6 +887,67 @@ scopes = ["release"]
         assert_eq!(history.len(), 1, "{history:?}");
     }
 
+    /// The label contract the alert sweep routes on.
+    const CONTRACT: &str = r#"
+[alerting.labels.needs_human]
+required = true
+values = ["false", "true"]
+"#;
+
+    #[tokio::test]
+    async fn a_reload_that_breaks_the_label_contract_keeps_the_last_good_configuration() {
+        let (target, _accepting) = target().await;
+        let mut served = Served::start(&target).await;
+        let labelled = |value: &str| {
+            BASE.replace("TARGET", &target).replace(
+                "confirm = 1\n",
+                &format!("confirm = 1\nlabels = {{ needs_human = \"{value}\" }}\n"),
+            )
+        };
+        let names = |status: &ConfigStatus, path: &str, message: &str| {
+            assert!(
+                status.errors.iter().any(|error| {
+                    error
+                        .file
+                        .as_deref()
+                        .is_some_and(|file| file.ends_with("/base.toml"))
+                        && error.path.as_deref() == Some(path)
+                        && error.message.contains(message)
+                }),
+                "{status:?}"
+            );
+        };
+
+        // A contract the running check does not meet is refused.
+        let status = served.change("alerting.toml", Some(CONTRACT)).await;
+        assert!(!status.ok, "{status:?}");
+        names(
+            &status,
+            "check[0].labels.needs_human",
+            "check `kept` is missing label `needs_human`",
+        );
+
+        // Meeting it loads both.
+        let status = served.change("base.toml", Some(&labelled("false"))).await;
+        assert!(status.ok, "{status:?}");
+        let loaded_at = status.loaded_at;
+
+        // A value outside it is refused, and the last good configuration
+        // keeps running.
+        let status = served.change("base.toml", Some(&labelled("ture"))).await;
+        assert!(!status.ok, "{status:?}");
+        assert_eq!(status.loaded_at, loaded_at, "the old configuration runs");
+        names(
+            &status,
+            "check[0].labels.needs_human",
+            "check `kept`: label `needs_human` is `ture`",
+        );
+        assert_eq!(served.status_over_http().await, status);
+        let monitor = served.reloader.into_monitor().await;
+        assert_eq!(running(&monitor), ["kept"]);
+        monitor.stop().await;
+    }
+
     #[tokio::test]
     async fn the_status_page_follows_a_reload() {
         let (target, _accepting) = target().await;

@@ -7,6 +7,7 @@
 //! problem as a [`Diagnostic`] with its file, line and column. The field
 //! reference is `docs/config.md`; the JSON Schema comes from [`schema`].
 
+mod alerting;
 mod assertion;
 mod check;
 mod colour;
@@ -18,12 +19,16 @@ mod subscribers;
 mod telemetry;
 mod values;
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub use alerting::{
+    Alerting, AlertingRule, IDENTITY_LABELS, LABEL_NAME_PATTERN, OWN_ANNOTATIONS, is_label_name,
+};
 pub use assertion::{
     Assertion, CONDITION_KEYS, Comparison, Condition, FailureState, HeaderAssertion, JsonAssertion,
     RecordsAssertion, TextAssertion,
@@ -99,6 +104,11 @@ pub struct ConfigFile {
     /// one file may hold `[telemetry]`; without it, nothing is sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<Telemetry>,
+    /// The labels and annotations every check and heartbeat must carry. At
+    /// most one file may hold `[alerting]`; without it, they are not
+    /// checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alerting: Option<Alerting>,
 }
 
 /// The merged, validated configuration of a whole folder.
@@ -141,6 +151,8 @@ pub struct Config {
     pub slack: Option<Slack>,
     /// `[telemetry]`, if any telemetry is sent.
     pub telemetry: Option<Telemetry>,
+    /// `[alerting]`, if the labels and annotations are held to a contract.
+    pub alerting: Option<Alerting>,
 }
 
 /// `[server]`.
@@ -470,6 +482,23 @@ pub struct Heartbeat {
     /// each a `[[heartbeat.link]]` table.
     #[serde(default, rename = "link", skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
+    /// Labels on the heartbeat's alerts, such as `{ team = "ops" }`: a
+    /// receiver like Alertmanager routes on them. `[alerting]` can require
+    /// some and limit their values.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(extend(
+        "propertyNames" = { "pattern": LABEL_NAME_PATTERN },
+        "additionalProperties" = { "type": "string", "minLength": 1 },
+    ))]
+    pub labels: BTreeMap<String, String>,
+    /// Annotations on the heartbeat's alerts, such as a runbook: shown, not
+    /// routed on. `[alerting]` can require some and limit their values.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(extend(
+        "propertyNames" = { "pattern": LABEL_NAME_PATTERN },
+        "additionalProperties" = { "type": "string", "minLength": 1 },
+    ))]
+    pub annotations: BTreeMap<String, String>,
 }
 
 /// A `[[check.link]]` or `[[heartbeat.link]]`: a named link to somewhere an

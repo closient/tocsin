@@ -1477,3 +1477,195 @@ url = "support.example.com"
         ]
     );
 }
+
+/// The contract Closient's alert sweep routes on, as a configuration would
+/// declare it.
+const CONTRACT: &str = r#"
+[alerting.labels.needs_human]
+required = true
+values = ["true", "false"]
+
+[alerting.labels.page_class]
+required = true
+values = ["page", "digest"]
+
+[alerting.labels.remediation_action]
+
+[alerting.annotations.ticket]
+required = true
+"#;
+
+/// A check and a heartbeat carrying everything [`CONTRACT`] asks for.
+const LABELLED: &str = r#"
+[[check]]
+id = "api"
+type = "http"
+target = "https://api.example.com/health"
+
+[check.labels]
+needs_human = "false"
+page_class = "page"
+team = "web"
+
+[check.annotations]
+ticket = "OPS-1"
+
+[[heartbeat]]
+id = "backup"
+interval = "1h"
+labels = { needs_human = "true", page_class = "digest" }
+annotations = { ticket = "OPS-2", runbook = "https://example.com/backup" }
+"#;
+
+#[test]
+fn labels_and_annotations_load_free_form_without_a_contract() {
+    let config = run(&[("checks.toml", LABELLED)]).expect("valid");
+    assert_eq!(config.alerting, None);
+    let check = &config.checks[0];
+    assert_eq!(check.labels["page_class"], "page");
+    assert_eq!(check.labels["team"], "web");
+    assert_eq!(check.annotations["ticket"], "OPS-1");
+    assert_eq!(config.heartbeats[0].labels["needs_human"], "true");
+
+    // Unlabelled subjects, and a label the contract would refuse, are
+    // fine while no contract is declared.
+    let loose = LABELLED.replace(r#"needs_human = "false""#, r#"needs_human = "ture""#);
+    run(&[("checks.toml", &loose)]).expect("no contract, no check");
+}
+
+#[test]
+fn a_contract_the_subjects_meet_loads() {
+    let config = run(&[("alerting.toml", CONTRACT), ("checks.toml", LABELLED)]).expect("valid");
+    let alerting = config.alerting.expect("declared");
+    assert!(alerting.labels["needs_human"].required);
+    assert_eq!(alerting.labels["page_class"].values, ["page", "digest"]);
+    assert!(!alerting.labels["remediation_action"].required);
+    assert!(alerting.annotations["ticket"].required);
+}
+
+#[test]
+fn a_missing_required_label_names_the_file_the_check_and_the_label() {
+    let text = LABELLED.replace("needs_human = \"false\"\n", "");
+    let diagnostic = only_error(&[("alerting.toml", CONTRACT), ("checks.toml", &text)]);
+    assert_eq!(
+        diagnostic.to_string(),
+        "checks.toml:7:1: check `api` is missing label `needs_human`, which `[alerting]` requires (check[0].labels.needs_human)\n  hint: add `needs_human = \"...\"` to its `labels`; it must be one of `true`, `false`"
+    );
+}
+
+#[test]
+fn a_misspelt_required_label_is_named_with_the_spelling_found() {
+    let text = LABELLED.replace("needs_human = \"false\"", "neds_human = \"false\"");
+    let diagnostic = only_error(&[("alerting.toml", CONTRACT), ("checks.toml", &text)]);
+    assert_eq!(diagnostic.file.as_deref(), Some("checks.toml"));
+    assert_eq!(
+        diagnostic.path.as_deref(),
+        Some("check[0].labels.needs_human")
+    );
+    assert_eq!(
+        diagnostic.message,
+        "check `api` is missing label `needs_human`, which `[alerting]` requires"
+    );
+    assert_eq!(
+        diagnostic.hint.as_deref(),
+        Some("`neds_human` is set: did you mean `needs_human`?")
+    );
+}
+
+#[test]
+fn a_label_value_outside_the_contract_is_located_at_the_value() {
+    let text = LABELLED.replace("needs_human = \"false\"", "needs_human = \"ture\"");
+    let diagnostic = only_error(&[("alerting.toml", CONTRACT), ("checks.toml", &text)]);
+    assert_eq!(
+        diagnostic.to_string(),
+        "checks.toml:8:15: check `api`: label `needs_human` is `ture`, which `[alerting]` does not allow (check[0].labels.needs_human)\n  hint: did you mean `true`? It must be one of `true`, `false`"
+    );
+}
+
+#[test]
+fn the_contract_holds_heartbeats_and_annotations_too() {
+    let text = LABELLED
+        .replace(r#"page_class = "digest""#, r#"page_class = "pager""#)
+        .replace(r#"ticket = "OPS-2", "#, "");
+    let shown: Vec<String> = run(&[("alerting.toml", CONTRACT), ("checks.toml", &text)])
+        .expect_err("invalid")
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            "checks.toml:18:47: heartbeat `backup`: label `page_class` is `pager`, which `[alerting]` does not allow (heartbeat[0].labels.page_class)\n  hint: did you mean `page`? It must be one of `page`, `digest`",
+            "checks.toml:19:15: heartbeat `backup` is missing annotation `ticket`, which `[alerting]` requires (heartbeat[0].annotations.ticket)\n  hint: add `ticket = \"...\"` to its `annotations`",
+        ]
+    );
+}
+
+#[test]
+fn a_subject_with_no_labels_at_all_fails_every_required_one() {
+    let text = "[[check]]\nid = \"bare\"\ntype = \"icmp\"\ntarget = \"192.0.2.1\"\n";
+    let errors = errors(&[("alerting.toml", CONTRACT), ("checks.toml", text)]);
+    assert_eq!(
+        errors,
+        [
+            "checks.toml:1:1: check `bare` is missing label `needs_human`, which `[alerting]` requires",
+            "checks.toml:1:1: check `bare` is missing label `page_class`, which `[alerting]` requires",
+            "checks.toml:1:1: check `bare` is missing annotation `ticket`, which `[alerting]` requires",
+        ]
+    );
+}
+
+#[test]
+fn label_names_must_be_names_alertmanager_takes_and_tocsin_does_not_set() {
+    let text = r#"
+[[check]]
+id = "api"
+type = "icmp"
+target = "192.0.2.1"
+labels = { "needs-human" = "true", subject_id = "other", team = "" }
+annotations = { summary = "mine" }
+"#;
+    let shown: Vec<String> = run(&[("checks.toml", text)])
+        .expect_err("invalid")
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            "checks.toml:6:28: check `api`: `needs-human` is not a valid label name (check[0].labels.needs-human)\n  hint: use letters, digits and underscores, not starting with a digit or `__`, as Alertmanager requires",
+            "checks.toml:6:49: check `api`: label `subject_id` is set by tocsin (check[0].labels.subject_id)\n  hint: tocsin sets `alertname`, `node`, `subject_kind`, `subject_id` on every alert; choose another name",
+            "checks.toml:6:65: check `api`: label `team` is empty (check[0].labels.team)\n  hint: Alertmanager drops an empty label: give it a value or remove it",
+            "checks.toml:7:27: check `api`: annotation `summary` is set by tocsin (check[0].annotations.summary)\n  hint: tocsin sets `summary`, `description`, `health`, `name`, `component`, `component_name`, `tocsin_test` on every alert; choose another name",
+        ]
+    );
+}
+
+#[test]
+fn the_contract_itself_is_checked() {
+    let text = r#"
+[alerting.labels.node]
+required = true
+
+[alerting.labels.page_class]
+values = ["page", ""]
+
+[alerting.annotations."run book"]
+"#;
+    let errors = errors(&[("alerting.toml", text)]);
+    assert_eq!(
+        errors,
+        [
+            "alerting.toml:2:1: label `node` is set by tocsin",
+            "alerting.toml:6:10: label `page_class` cannot allow an empty value",
+            "alerting.toml:8:1: `run book` is not a valid annotation name",
+        ]
+    );
+    let twice = only_error(&[("one.toml", CONTRACT), ("two.toml", CONTRACT)]);
+    assert!(
+        twice
+            .message
+            .starts_with("`[alerting]` is already defined at one.toml"),
+        "{twice}"
+    );
+}

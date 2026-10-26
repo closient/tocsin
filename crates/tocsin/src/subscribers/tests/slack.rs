@@ -8,7 +8,7 @@
 //! The fake hands out webhook URLs holding [`MARKER`], so a leak anywhere
 //! is a plain substring search.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -445,6 +445,8 @@ fn alert(event: AlertEvent) -> Alert {
         subject_kind: SubjectKind::Check,
         subject_id: "api-health".to_owned(),
         subject_name: "API health".to_owned(),
+        labels: BTreeMap::new(),
+        annotations: BTreeMap::new(),
         component_id: Some("api".to_owned()),
         component_name: Some("API".to_owned()),
         health: Health::Down,

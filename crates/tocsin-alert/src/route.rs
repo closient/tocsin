@@ -2,7 +2,7 @@
 
 //! Which notifiers an alert goes to, from the `[[route]]`s.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use tocsin_core::Health;
@@ -54,12 +54,21 @@ impl CompiledRoute {
     }
 }
 
+/// What the configuration says about a check or heartbeat that its alerts
+/// carry.
+#[derive(Debug, Clone, Default)]
+struct Subject {
+    name: String,
+    labels: BTreeMap<String, String>,
+    annotations: BTreeMap<String, String>,
+}
+
 /// Routes alerts, and names their subjects and components.
 #[derive(Debug, Clone, Default)]
 pub struct Router {
-    /// Display names by kind and id, as an alert's identity names its
-    /// subject.
-    subjects: HashMap<(SubjectKind, String), String>,
+    /// Each check and heartbeat by kind and id, as an alert's identity
+    /// names its subject.
+    subjects: HashMap<(SubjectKind, String), Subject>,
     components: HashMap<String, (String, Option<String>)>,
     notifier_types: HashMap<String, NotifierType>,
     /// Each Pushover notifier's priorities, which say what keeps ringing.
@@ -80,13 +89,21 @@ impl Router {
         let mut subjects = HashMap::new();
         for heartbeat in &config.heartbeats {
             let id = heartbeat.id.as_str().to_owned();
-            let name = heartbeat.name.clone().unwrap_or_else(|| id.clone());
-            subjects.insert((SubjectKind::Heartbeat, id), name);
+            let subject = Subject {
+                name: heartbeat.name.clone().unwrap_or_else(|| id.clone()),
+                labels: heartbeat.labels.clone(),
+                annotations: heartbeat.annotations.clone(),
+            };
+            subjects.insert((SubjectKind::Heartbeat, id), subject);
         }
         for check in &config.checks {
             let id = check.id.as_str().to_owned();
-            let name = check.name.clone().unwrap_or_else(|| id.clone());
-            subjects.insert((SubjectKind::Check, id), name);
+            let subject = Subject {
+                name: check.name.clone().unwrap_or_else(|| id.clone()),
+                labels: check.labels.clone(),
+                annotations: check.annotations.clone(),
+            };
+            subjects.insert((SubjectKind::Check, id), subject);
         }
         let components = config
             .components
@@ -164,7 +181,31 @@ impl Router {
     pub fn subject_name(&self, kind: SubjectKind, subject_id: &str) -> String {
         self.subjects
             .get(&(kind, subject_id.to_owned()))
-            .map_or_else(|| subject_id.to_owned(), Clone::clone)
+            .map_or_else(|| subject_id.to_owned(), |subject| subject.name.clone())
+    }
+
+    /// The check or heartbeat's configured `labels`; none for a subject the
+    /// configuration no longer has.
+    #[must_use]
+    pub fn subject_labels(&self, kind: SubjectKind, subject_id: &str) -> BTreeMap<String, String> {
+        self.subjects
+            .get(&(kind, subject_id.to_owned()))
+            .map(|subject| subject.labels.clone())
+            .unwrap_or_default()
+    }
+
+    /// The check or heartbeat's configured `annotations`; none for a
+    /// subject the configuration no longer has.
+    #[must_use]
+    pub fn subject_annotations(
+        &self,
+        kind: SubjectKind,
+        subject_id: &str,
+    ) -> BTreeMap<String, String> {
+        self.subjects
+            .get(&(kind, subject_id.to_owned()))
+            .map(|subject| subject.annotations.clone())
+            .unwrap_or_default()
     }
 
     /// The most deliveries `notifier_id` may send at once; one for a

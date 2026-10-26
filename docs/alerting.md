@@ -264,14 +264,23 @@ acknowledged or it expires: pick a lower priority unless that is wanted.
 each post and re-posts every 60 seconds, whatever the route's `repeat`, so
 the alert stays firing while tocsin is up, and resolves by itself within
 five minutes if tocsin goes away. Alertmanager identifies an alert by its
-whole label set, so the labels are the identity and nothing else:
+whole label set, so tocsin's own labels are the identity and nothing else:
 `alertname` (`TocsinCheckFailing`, `TocsinHeartbeatFailing`, or
 `TocsinTestAlert` for `tocsin notify test`), `node`, `subject_kind` and
-`subject_id`. Everything that can change while an alert fires is an
-annotation: `summary`, `description`, `health`, `name`, `component` and
+`subject_id`. Everything of tocsin's that can change while an alert fires is
+an annotation: `summary`, `description`, `health`, `name`, `component` and
 `component_name` when there is one, and `tocsin_test` on a test alert. A
 check that moves to another component, or from degraded to down, is
 therefore still one alert in Alertmanager.
+
+The check's or heartbeat's configured
+[`labels`](config.md#alerting) join the label set, so Alertmanager can route
+on them, and its `annotations` join the annotations. Both are read from the
+configuration running when each post is sent. Labels are part of the
+identity, so a reload that changes a label on a check that is firing opens a
+second alert under the new labels, and the first resolves on its own within
+the five-minute `endsAt`. Changing an annotation changes nothing but the
+annotation.
 
 ## Slack
 
@@ -377,6 +386,8 @@ Each alert is a POST of this JSON:
   "node_id": "node-a",
   "subject": { "kind": "check", "id": "api", "name": "Public API" },
   "component_id": "web",
+  "labels": { "page_class": "page" },
+  "annotations": { "ticket": "OPS-12" },
   "health": "down",
   "started_at_ms": 1800000000000,
   "ended_at_ms": 1800000090000,
@@ -391,6 +402,9 @@ Each alert is a POST of this JSON:
 
 `event` is `fire`, `repeat` or `resolve`; `status` is `firing` or
 `resolved`. `ended_at_ms` and `duration_ms` are null until the resolve.
+`labels` and `annotations` are the check's or heartbeat's configured ones,
+as the configuration running when the message is sent has them, and are
+empty objects when it has none.
 `delivery_id` is the same on every retry of one delivery, so a receiver can
 drop duplicates. `version` changes only when a field changes meaning or goes
 away.

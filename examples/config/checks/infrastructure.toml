@@ -8,6 +8,9 @@ type = "tcp"
 target = "db.internal.example.com:5432"
 interval = "30s"
 timeout = "3s"
+# Alertmanager routes on labels; annotations are shown with the alert.
+labels = { team = "platform" }
+annotations = { runbook = "https://wiki.example.com/runbooks/database" }
 
 [[check]]
 id = "dns-apex"

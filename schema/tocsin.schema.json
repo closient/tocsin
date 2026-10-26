@@ -2,6 +2,46 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "Alerting": {
+      "additionalProperties": false,
+      "description": "`[alerting]`: the contract every check's and heartbeat's `labels` and\n`annotations` are held to. Without it, they are free-form.\n\nA receiver such as Alertmanager routes on labels, and a label that is\nmissing or misspelt routes by default without anyone noticing. Declared\nhere, the same mistake fails `tocsin config check`, and a reload that\nmakes it keeps the last good configuration.",
+      "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "$ref": "#/definitions/AlertingRule"
+          },
+          "description": "The annotations the contract covers, by name, each a\n`[alerting.annotations.<name>]` table. Annotations it does not name\nare allowed and unchecked.",
+          "type": "object"
+        },
+        "labels": {
+          "additionalProperties": {
+            "$ref": "#/definitions/AlertingRule"
+          },
+          "description": "The labels the contract covers, by name, each a\n`[alerting.labels.<name>]` table. Labels it does not name are\nallowed and unchecked.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "AlertingRule": {
+      "additionalProperties": false,
+      "description": "What `[alerting]` asks of one label or annotation.",
+      "properties": {
+        "required": {
+          "default": false,
+          "description": "Whether every check and heartbeat must set it.",
+          "type": "boolean"
+        },
+        "values": {
+          "description": "The values it may take, matched exactly. Empty allows any value.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "AlertmanagerSettings": {
       "additionalProperties": false,
       "description": "`[notifier.alertmanager]`.",
@@ -261,6 +301,13 @@
       "additionalProperties": false,
       "description": "A probe run on an interval, whose result sets a component's health.",
       "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Annotations on the check's alerts, such as a runbook: shown, not\nrouted on. `[alerting]` can require some and limit their values.",
+          "type": "object"
+        },
         "assert": {
           "description": "Conditions a result must meet, each `[[check.assert]]` table holding\none. With none, a probe that completes counts as up, except that\n`http` needs a 2xx or 3xx status, `dns` a `NOERROR` response and\n`tls` a certificate that verifies for the host.",
           "items": {
@@ -324,6 +371,13 @@
           ],
           "default": "1m",
           "description": "How often the probe runs."
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Labels on the check's alerts, such as `{ team = \"ops\" }`: a receiver\nlike Alertmanager routes on them. `[alerting]` can require some and\nlimit their values.",
+          "type": "object"
         },
         "link": {
           "description": "Links shown with the check, such as its dashboard or runbook, each a\n`[[check.link]]` table.",
@@ -698,6 +752,13 @@
       "additionalProperties": false,
       "description": "`[[heartbeat]]`: a ping tocsin expects to receive, such as a cron job\nreporting in. Pings are sent to the write API with a token that has the\n`heartbeat` scope. A heartbeat with no ping for `interval + grace` is\ndown; it is a member of its component exactly as a check is.",
       "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Annotations on the heartbeat's alerts, such as a runbook: shown, not\nrouted on. `[alerting]` can require some and limit their values.",
+          "type": "object"
+        },
         "component": {
           "anyOf": [
             {
@@ -733,6 +794,13 @@
             }
           ],
           "description": "How often a ping is expected."
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Labels on the heartbeat's alerts, such as `{ team = \"ops\" }`: a\nreceiver like Alertmanager routes on them. `[alerting]` can require\nsome and limit their values.",
+          "type": "object"
         },
         "link": {
           "description": "Links shown with the heartbeat, such as the job's logs or runbook,\neach a `[[heartbeat.link]]` table.",
@@ -2040,6 +2108,17 @@
   },
   "description": "One configuration file. Every key is optional in a single file; rules\nthat span files (unique ids, references, required settings) are checked\nafter merging.\n\nThis is the type the JSON Schema describes.",
   "properties": {
+    "alerting": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Alerting"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The labels and annotations every check and heartbeat must carry. At\nmost one file may hold `[alerting]`; without it, they are not\nchecked."
+    },
     "check": {
       "description": "Probes run on an interval.",
       "items": {

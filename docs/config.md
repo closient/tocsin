@@ -241,6 +241,8 @@ A probe run on an interval.
 | `interval` | duration | `"60s"` | Time between probes. At least `1s`. |
 | `timeout` | duration | `"10s"` | Must be shorter than `interval`. |
 | `confirm` | integer | `1` | Consecutive results needed before the state changes. At least 1. |
+| `labels` | table of strings | `{}` | Labels its alerts carry, for a receiver to route on. See [`[alerting]`](#alerting). |
+| `annotations` | table of strings | `{}` | Annotations its alerts carry, such as a ticket or a runbook. See [`[alerting]`](#alerting). |
 
 `target` by type:
 
@@ -344,6 +346,8 @@ A ping tocsin expects to receive, such as a cron job reporting in. Pings arrive 
 | `component` | component id | none | The component whose state this heartbeat sets. |
 | `interval` | duration | | Required. How often a ping is expected. At least `1s`. |
 | `grace` | duration | `"60s"` | How late a ping may be before the heartbeat is down: it is missed once `interval + grace` passes after its last result. |
+| `labels` | table of strings | `{}` | As on a [check](#check). |
+| `annotations` | table of strings | `{}` | As on a [check](#check). |
 
 A heartbeat takes `[[heartbeat.link]]` tables, the same as [check links](#links-checklink-and-heartbeatlink).
 
@@ -408,6 +412,37 @@ Sends alerts matching its filters to its notifiers. An empty filter matches ever
 | `repeat` | duration | `"4h"` | Re-send while the alert is still firing. At least `"1m"`, or `"0s"` to never repeat. |
 
 When several routes send one alert to the same notifier, it is sent once and repeats on the shortest of their intervals. Every alert is resolved; there is no `resolve` key, and a route that sets one is an error.
+
+## `[alerting]`
+
+The labels and annotations every check and heartbeat must carry. A receiver such as Alertmanager routes on labels, and a check that leaves one out or misspells a value is routed by default without anyone noticing; declared here, the same mistake fails `tocsin config check`, and a [reload](#reloading) that makes it keeps the last good configuration. At most one file may hold `[alerting]`. Without it, `labels` and `annotations` are free-form.
+
+Each `[alerting.labels.<name>]` or `[alerting.annotations.<name>]` table covers one name:
+
+| Key | Type | Default | |
+|-----|------|---------|-|
+| `required` | boolean | `false` | Every check and heartbeat must set it. |
+| `values` | strings | `[]` | The values it may take, matched exactly. Empty allows any value. |
+
+```toml
+[alerting.labels.page_class]
+required = true
+values = ["page", "digest"]
+
+[alerting.labels.team]            # optional, any value
+
+[alerting.annotations.ticket]
+required = true
+
+[[check]]
+id = "api"
+type = "http"
+target = "https://api.example.com/health"
+labels = { page_class = "page", team = "web" }
+annotations = { ticket = "OPS-12" }
+```
+
+Names the contract does not cover are allowed and unchecked. Whether or not `[alerting]` is declared, a label or annotation name must be letters, digits and underscores, not starting with a digit or `__`, as Alertmanager requires; its value may not be empty; and it may not be a name tocsin sets itself: the labels `alertname`, `node`, `subject_kind` and `subject_id`, and the annotations `summary`, `description`, `health`, `name`, `component`, `component_name` and `tocsin_test`. [`alerting.md`](alerting.md) shows where each notifier puts them.
 
 ## `[subscribers]`
 

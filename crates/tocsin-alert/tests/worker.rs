@@ -172,6 +172,45 @@ fn a_resolve_carries_its_fire_s_identity_and_the_outage_s_duration() {
 }
 
 #[test]
+fn the_fire_and_the_resolve_carry_the_check_s_configured_labels_and_annotations() {
+    paused(async {
+        let fixture = Fixture::new();
+        let toml = monitored(&["slack"], "").replace(
+            "component = \"web\"\n\n[[",
+            "component = \"web\"\nlabels = { page_class = \"page\" }\n\
+             annotations = { ticket = \"OPS-1\" }\n\n[[",
+        );
+        let config = config(&toml);
+        let (sender, mut receiver) = channel();
+        let slack: Arc<dyn Notifier> = Fake::accepting("slack", &sender);
+        let running = start(
+            &fixture,
+            &config,
+            &[("slack", slack)],
+            &AlertMetrics::default(),
+        );
+
+        let id = running.change(down(T0)).await.unwrap();
+        let fire = next_from(&mut receiver, "slack").await.alert;
+        running.change(up(id, T0 + 90_000)).await;
+        let resolve = next_from(&mut receiver, "slack").await.alert;
+
+        for alert in [&fire, &resolve] {
+            assert_eq!(
+                alert.labels.get("page_class").map(String::as_str),
+                Some("page")
+            );
+            assert_eq!(alert.labels.len(), 1);
+            assert_eq!(
+                alert.annotations.get("ticket").map(String::as_str),
+                Some("OPS-1")
+            );
+        }
+        running.alerter.stop().await;
+    });
+}
+
+#[test]
 fn failures_back_off_and_the_resolve_waits_for_its_fire() {
     paused(async {
         let fixture = Fixture::new();

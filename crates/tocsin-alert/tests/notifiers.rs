@@ -4,13 +4,14 @@
 //! and then its resolve, and the receiver can tell they are the same alert.
 //! Nothing here touches the network beyond the loopback interface.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tocsin_alert::notifiers::alertmanager::Alertmanager;
+use tocsin_alert::notifiers::alertmanager::{self, Alertmanager};
 use tocsin_alert::notifiers::discord::Discord;
 use tocsin_alert::notifiers::email::Email;
 use tocsin_alert::notifiers::ntfy::Ntfy;
@@ -19,7 +20,7 @@ use tocsin_alert::notifiers::slack::{Slack, SlackConnection};
 use tocsin_alert::notifiers::telegram::Telegram;
 use tocsin_alert::notifiers::webhook::{self, SIGNATURE_HEADER, TIMESTAMP_HEADER, Webhook};
 use tocsin_alert::{Alert, AlertEvent, Notifier, SlackHooks};
-use tocsin_core::Health;
+use tocsin_core::{Health, config};
 use tocsin_store::{
     NewSlackConnection, Preferences, SlackHook, SlackPurpose, Store, SubjectKind, WebhookUrl,
 };
@@ -40,6 +41,8 @@ fn alert(event: AlertEvent) -> Alert {
         subject_kind: SubjectKind::Check,
         subject_id: "api".into(),
         subject_name: "Public API".into(),
+        labels: BTreeMap::new(),
+        annotations: BTreeMap::new(),
         component_id: Some("web".into()),
         component_name: Some("Website".into()),
         health: Health::Down,
@@ -442,6 +445,75 @@ async fn alertmanager_labels_are_identity_only_and_survive_a_component_change() 
     assert_eq!(first[0]["annotations"]["component"], "web");
     assert_eq!(second[0]["annotations"]["component"], "api");
     assert_eq!(second[0]["annotations"]["health"], "degraded");
+}
+
+/// The alert as a check with `labels` and `annotations` configured sends it.
+fn labelled(event: AlertEvent) -> Alert {
+    Alert {
+        labels: BTreeMap::from([
+            ("needs_human".into(), "true".into()),
+            ("page_class".into(), "page".into()),
+        ]),
+        annotations: BTreeMap::from([("ticket".into(), "OPS-1".into())]),
+        ..alert(event)
+    }
+}
+
+#[test]
+fn alertmanager_routes_on_configured_labels_and_keeps_its_own() {
+    let posted = alertmanager::payload(&labelled(AlertEvent::Fire));
+    let labels = &posted[0]["labels"];
+    assert_eq!(labels["needs_human"], "true");
+    assert_eq!(labels["page_class"], "page");
+    assert_eq!(labels["subject_id"], "api");
+    assert_eq!(labels.as_object().unwrap().len(), 6);
+    assert_eq!(posted[0]["annotations"]["ticket"], "OPS-1");
+    assert_eq!(posted[0]["annotations"]["name"], "Public API");
+
+    // The resolve carries the same label set, so it ends the same alert.
+    let resolved = alertmanager::payload(&labelled(AlertEvent::Resolve));
+    assert_eq!(resolved[0]["labels"], *labels);
+}
+
+#[test]
+fn the_names_configuration_may_not_use_are_every_name_alertmanager_sets() {
+    // A test alert with a component sets every label and annotation
+    // tocsin has; the configuration is refused exactly these.
+    let alert = Alert {
+        test: true,
+        ..alert(AlertEvent::Fire)
+    };
+    let posted = alertmanager::payload(&alert);
+    let mut labels: Vec<&str> = posted[0]["labels"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let mut annotations: Vec<&str> = posted[0]["annotations"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    labels.sort_unstable();
+    annotations.sort_unstable();
+    let mut identity = config::IDENTITY_LABELS.to_vec();
+    let mut own = config::OWN_ANNOTATIONS.to_vec();
+    identity.sort_unstable();
+    own.sort_unstable();
+    assert_eq!(labels, identity);
+    assert_eq!(annotations, own);
+}
+
+#[test]
+fn a_webhook_carries_configured_labels_and_annotations() {
+    let body = webhook::payload(&labelled(AlertEvent::Fire));
+    assert_eq!(body["labels"]["page_class"], "page");
+    assert_eq!(body["annotations"]["ticket"], "OPS-1");
+    let bare = webhook::payload(&alert(AlertEvent::Fire));
+    assert_eq!(bare["labels"], serde_json::json!({}));
+    assert_eq!(bare["annotations"], serde_json::json!({}));
 }
 
 #[tokio::test]

@@ -2,6 +2,7 @@
 
 //! `tocsin notify test`: send one notifier a test alert, then its resolve.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -70,6 +71,8 @@ pub fn test(notifier_id: &str, folder: &Path) -> Result<Report, Failure> {
             subject_kind: SubjectKind::Check,
             subject_id: TEST_SUBJECT.to_owned(),
             subject_name: "tocsin notify test".to_owned(),
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
             component_id: None,
             component_name: None,
             health: Health::Down,

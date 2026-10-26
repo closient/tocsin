@@ -27,7 +27,7 @@ static MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("../migrations/0011_incident_drafts.sql")),
     M::up(include_str!("../migrations/0012_incident_internals.sql")),
     M::up(include_str!("../migrations/0013_open_external_key.sql")),
-    M::up(include_str!("../migrations/0013_silences.sql")),
+    M::up(include_str!("../migrations/0014_silences.sql")),
 ];
 
 /// How long a connection waits for another process's lock before failing.
@@ -274,15 +274,15 @@ mod tests {
         assert!(reopened.is_err(), "a reopen took a key another holds");
     }
 
-    /// Migration 13 rebuilds the outbox: every delivery comes through with
+    /// Migration 14 rebuilds the outbox: every delivery comes through with
     /// its state, alerts already there count as notified and attempted (so
     /// their resolves and cancels are sent), and a silenced delivery must name its silence.
     #[test]
-    fn deliveries_before_migration_13_are_kept() {
+    fn deliveries_before_migration_14_are_kept() {
         type Delivery = (i64, String, i64, Option<String>, Option<i64>);
         let mut conn = Connection::open_in_memory().unwrap();
         let migrations = super::migrations();
-        migrations.to_version(&mut conn, 12).unwrap();
+        migrations.to_version(&mut conn, 13).unwrap();
         conn.execute_batch(
             "INSERT INTO outage (id, node_id, check_id, health, started_at)
                  VALUES (1, 'node-a', 'web', 'down', 1000);

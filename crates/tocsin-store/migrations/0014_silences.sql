@@ -1,6 +1,6 @@
 -- SPDX-License-Identifier: AGPL-3.0-only
 --
--- Migration 13: silences. A silence holds back the messages for the alerts
+-- Migration 14: silences. A silence holds back the messages for the alerts
 -- its matchers name, never the alerts themselves: the outage, the alert
 -- and the delivery are still written, and the delivery is marked silenced
 -- with the silence's id instead of being sent.

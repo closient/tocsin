@@ -430,8 +430,8 @@ partial unique index (`alert_open`) allows at most one open alert
 | `started_at`, `ended_at` | integer | `ended_at` is null while it fires. |
 | `resolve` | integer | 1 if its end sends a resolve. |
 | `repeat_ms`, `next_repeat_at` | integer | The repeat interval (null never repeats) and when the next is due. |
-| `notified` | integer | 1 once a fire or repeat was delivered. While it is 0 and the latest fire or repeat was held, a lapsed [silence](alerting.md#silences) queues a fresh fire. Added by 0013; older rows are 1. |
-| `attempted` | integer | 1 once a fire or repeat send was started, set before the request goes out, whatever its outcome; never less than `notified`. While it is 0 a silence holds back the resolve and a pending cancel is deleted. Added by 0013; older rows are 1. |
+| `notified` | integer | 1 once a fire or repeat was delivered. While it is 0 and the latest fire or repeat was held, a lapsed [silence](alerting.md#silences) queues a fresh fire. Added by 0014; older rows are 1. |
+| `attempted` | integer | 1 once a fire or repeat send was started, set before the request goes out, whatever its outcome; never less than `notified`. While it is 0 a silence holds back the resolve and a pending cancel is deleted. Added by 0014; older rows are 1. |
 
 An `alert_delivery` is one message to send: `kind` (`fire`, `repeat`,
 `resolve` or `cancel`), the `health` it reports, `status` (`pending`,
@@ -445,7 +445,7 @@ deliveries are all gone and which has ended goes with them.
 
 ### `silence`
 
-[Silences](alerting.md#silences), added by 0013. History, not
+[Silences](alerting.md#silences), added by 0014. History, not
 configuration: a row is never deleted, and never changed except to set
 `ended_at`, `ended_by_kind` and `ended_by`, once (a trigger refuses
 anything else).

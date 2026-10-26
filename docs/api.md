@@ -80,6 +80,12 @@ it out, `incidents/{id}` is 404 for it, and `status.json`,
 `components/{id}`, `/llms.txt`, the feeds and the status page never list
 it or let it move a component's health.
 
+An incident's [internal note and external key](incidents.md#internal-note-and-external-key)
+are internal for good, draft or published: `incidents` and
+`incidents/{id}` include them only for a `status:read` token, no other
+read ever names them, and `incidents?external_key=` is 403 without that
+scope.
+
 Likewise a `[[project]]` can be non-public. A non-public project is left
 out wholesale, not redacted: it is not in the release list, its deploys
 are not on the timeline, and `/llms.txt` does not mention it.
@@ -103,8 +109,9 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
 | `GET /api/v1/checks` | none, or `status:read` | 200, `{checks}` |
 | `GET /api/v1/checks/{id}/results?since=&before=&limit=` | `status:read` | 200, `{check_id, since, results, next_before}`, newest first |
 | `GET /api/v1/outages?since=&before=&limit=` | none, or `status:read` | 200, `{since, outages, next_before}`, newest start first |
-| `GET /api/v1/incidents?limit=&before=` | none; `status:read` adds drafts | 200, `{incidents, next_before}`, newest first |
-| `GET /api/v1/incidents/{id}` | none; `status:read` for a draft | 200, the incident |
+| `GET /api/v1/incidents?limit=&before=` | none; `status:read` adds drafts and internals | 200, `{incidents, next_before}`, newest first |
+| `GET /api/v1/incidents?external_key=` | `status:read` | 200, `{incidents, next_before}`, the one incident with that key or none |
+| `GET /api/v1/incidents/{id}` | none; `status:read` for a draft and internals | 200, the incident |
 | `GET /api/v1/releases?project=&since=&before=&limit=` | none, or `status:read` | 200, `{releases, truncated, next_before}`, newest first |
 | `GET /api/v1/timeline?component=&since=&after=&limit=` | none, or `status:read` | 200, `{since, events, truncated, next_after}`, oldest first |
 | `GET /api/v1/events` | none, or `status:read` | 200, an endless `text/event-stream` |

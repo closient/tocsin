@@ -79,13 +79,18 @@ finds them all:
   rejected.
 - **Client commands are idempotent where it matters.** `release publish`,
   `release deployed` and `heartbeat ping` can be retried after a failure.
-  `incident new` cannot: check `incident list --json` first.
+  `incident new` is, given `--external-key`: a second create with a key
+  some incident has answers that incident and writes nothing. Without a
+  key, check `incident list --json` first.
 - **What an agent writes about an incident is a draft.** Pass `--draft` to
   `incident new` (MCP's `create_incident` drafts by default) and leave
   publishing to a person; a token with only `incident:draft` cannot
   publish. A draft is invisible to the public and tells nobody, and
-  `incident discard <id>` removes one written by mistake. See
-  [incidents.md](incidents.md#drafts).
+  `incident discard <id>` removes one written by mistake. Evidence, host
+  names and ticket links go in `--internal-note`, which no public surface
+  ever shows, never in the title or an update. See
+  [incidents.md](incidents.md#drafts) and
+  [its internal note](incidents.md#internal-note-and-external-key).
 - **`config show --json`** prints the merged configuration with secrets
   redacted, which is the safe way to show a person what tocsin sees.
 

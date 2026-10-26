@@ -359,6 +359,7 @@ async fn incident_feed(
         ListQuery {
             before: None,
             limit: Some(FEED_SIZE),
+            external_key: None,
         },
     )
     .await?

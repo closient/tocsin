@@ -335,6 +335,15 @@ pub struct Incident {
     /// Who published it; `null` while it is a draft.
     #[serde(default)]
     pub published_by: Option<Actor>,
+    /// Notes for the people who run it: evidence, links. Never public,
+    /// before or after publishing. Present only to a `status:read` token
+    /// and in the admin, and only when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_note: Option<String>,
+    /// The key its creator gave it, such as an alert cluster's. Present
+    /// only where `internal_note` would be, and only when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_key: Option<String>,
     /// Every update, oldest first. The first is the opening message.
     pub updates: Vec<IncidentUpdate>,
 }
@@ -345,6 +354,27 @@ impl Incident {
     pub fn is_draft(&self) -> bool {
         self.published_at.is_none()
     }
+
+    /// This incident with its internals filled in, for a reader trusted
+    /// with them.
+    #[must_use]
+    pub fn with_internals(mut self, internals: IncidentInternals) -> Self {
+        self.internal_note = internals.internal_note;
+        self.external_key = internals.external_key;
+        self
+    }
+}
+
+/// What an incident keeps for the people who run it, apart from what it
+/// says publicly. A store read of an [`Incident`] leaves these out; a
+/// caller trusted with them reads them separately and adds them with
+/// [`Incident::with_internals`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IncidentInternals {
+    /// The internal note.
+    pub internal_note: Option<String>,
+    /// The key given at creation.
+    pub external_key: Option<String>,
 }
 
 /// One entry in an incident's timeline. Updates are never changed.
@@ -408,6 +438,19 @@ pub struct NewIncident {
     /// draft.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft: Option<bool>,
+    /// Notes for whoever publishes it: evidence, links. Not empty. Never
+    /// shown publicly, before or after publishing; read back only with the
+    /// `status:read` scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_note: Option<String>,
+    /// The caller's own key for what it reports, such as an alert
+    /// cluster's: one line, at most 200 characters, set at creation only.
+    /// A create repeating a key in use answers that incident with 200 and
+    /// changes nothing; discarding a draft frees its key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(max_length = 200)]
+    #[schemars(length(max = 200))]
+    pub external_key: Option<String>,
 }
 
 fn default_kind() -> IncidentKind {
@@ -466,6 +509,10 @@ pub struct IncidentEdit {
     /// A new planned end. Maintenance only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_end: Option<Timestamp>,
+    /// A new internal note, replacing the old one; empty clears it. Never
+    /// shown publicly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_note: Option<String>,
 }
 
 impl IncidentEdit {
@@ -662,6 +709,14 @@ impl NewIncident {
         let mut errors = Vec::new();
         check_title("title", &self.title, &mut errors);
         check_text("message", &self.message, &mut errors);
+        if let Some(note) = &self.internal_note {
+            check_text("internal_note", note, &mut errors);
+        }
+        // A key is held to a title's rules: one line, at most 200
+        // characters.
+        if let Some(key) = &self.external_key {
+            check_title("external_key", key, &mut errors);
+        }
         check_components("components", &self.components, known, &mut errors);
         check_status(self.kind, self.first_status(), &mut errors);
         check_schedule(
@@ -702,7 +757,7 @@ impl IncidentEdit {
             errors.push(FieldError::new(
                 "",
                 "nothing to change: give at least one of title, impact, components, \
-                 scheduled_start, scheduled_end",
+                 scheduled_start, scheduled_end, internal_note",
             ));
         }
         if let Some(title) = &self.title {
@@ -796,6 +851,8 @@ mod tests {
             scheduled_end: None,
             notify: true,
             draft: None,
+            internal_note: None,
+            external_key: None,
         }
     }
 
@@ -987,6 +1044,32 @@ mod tests {
     }
 
     #[test]
+    fn a_note_must_say_something_and_a_key_is_one_line() {
+        let mut new = new_incident();
+        new.internal_note = Some("  ".into());
+        new.external_key = Some("alert\ncluster".into());
+        assert_eq!(
+            paths(new.validate(&known).unwrap_err()),
+            ["internal_note", "external_key"]
+        );
+        new.internal_note = Some("Evidence: production-01 load 40.".into());
+        new.external_key = Some("x".repeat(MAX_TITLE_LENGTH + 1));
+        assert_eq!(paths(new.validate(&known).unwrap_err()), ["external_key"]);
+        new.external_key = Some("alert-cluster/website-down".into());
+        assert_eq!(new.validate(&known), Ok(()));
+    }
+
+    #[test]
+    fn a_note_alone_is_an_edit() {
+        let edit = IncidentEdit {
+            internal_note: Some(String::new()),
+            ..IncidentEdit::default()
+        };
+        assert!(!edit.is_empty());
+        assert_eq!(edit.validate(&known), Ok(()));
+    }
+
+    #[test]
     fn an_empty_edit_is_refused() {
         assert_eq!(
             paths(IncidentEdit::default().validate(&known).unwrap_err()),
@@ -1014,6 +1097,8 @@ mod tests {
             updated_by: actor.clone(),
             published_at: Some(at),
             published_by: Some(actor),
+            internal_note: None,
+            external_key: None,
             updates: Vec::new(),
         }
     }

@@ -420,6 +420,8 @@ pub(crate) mod tests {
             updated_by: actor.clone(),
             published_at: Some(Timestamp::from_millis(0)),
             published_by: Some(actor.clone()),
+            internal_note: None,
+            external_key: None,
             updates: Vec::new(),
         });
         let release = Arc::new(Release {

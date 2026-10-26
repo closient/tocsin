@@ -104,6 +104,8 @@ mod tests {
             updated_by: oncall.clone(),
             published_at: Some(at("2026-10-23T14:05:00Z")),
             published_by: Some(Actor::token("ci")),
+            internal_note: None,
+            external_key: None,
             updates: vec![
                 IncidentUpdate {
                     id: 1,
@@ -177,6 +179,8 @@ Rolled back.
             updated_by: Actor::token("ci"),
             published_at: Some(at("2026-10-23T14:05:00Z")),
             published_by: Some(Actor::token("ci")),
+            internal_note: None,
+            external_key: None,
             updates: vec![],
         };
         let text = markdown(&incident);
@@ -213,6 +217,8 @@ Rolled back.
             updated_by: Actor::token("ci"),
             published_at: Some(at("2026-10-23T14:05:00Z")),
             published_by: Some(Actor::token("ci")),
+            internal_note: None,
+            external_key: None,
             updates: vec![],
         };
         let text = markdown(&incident);

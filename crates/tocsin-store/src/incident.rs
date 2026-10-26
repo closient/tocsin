@@ -8,8 +8,8 @@ use std::collections::HashMap;
 
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use tocsin_core::incident::{
-    Actor, ActorKind, Impact, Incident, IncidentEdit, IncidentKind, IncidentStatus, IncidentUpdate,
-    NewIncident, NewUpdate, Timestamp,
+    Actor, ActorKind, Impact, Incident, IncidentEdit, IncidentInternals, IncidentKind,
+    IncidentStatus, IncidentUpdate, NewIncident, NewUpdate, Timestamp,
 };
 
 use crate::error::{Error, Result};
@@ -37,9 +37,28 @@ impl Drafts {
     }
 }
 
+/// Whether a create made a new incident or found one already holding its
+/// external key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opened {
+    /// A new incident.
+    Created,
+    /// The incident already holding the key; nothing was written.
+    Existing,
+}
+
+/// The incident holding external key `key`, if any.
+pub(crate) fn keyed(conn: &Connection, key: &str) -> Result<Option<i64>> {
+    Ok(conn
+        .prepare_cached("SELECT id FROM incident WHERE external_key = ?1")?
+        .query_row([key], |row| row.get(0))
+        .optional()?)
+}
+
 /// Inserts a new incident with its components and first update; returns
 /// its id. A draft (`new.draft` is `Some(true)`) is not published;
-/// otherwise `actor` publishes it at `at`.
+/// otherwise `actor` publishes it at `at`. The caller has checked that no
+/// incident holds `new.external_key`.
 pub(crate) fn insert(
     transaction: &Transaction<'_>,
     new: &NewIncident,
@@ -51,8 +70,9 @@ pub(crate) fn insert(
     transaction.execute(
         "INSERT INTO incident (kind, title, impact, status, scheduled_start, scheduled_end, \
          resolved_at, created_at, created_by_kind, created_by, updated_at, updated_by_kind, \
-         updated_by, published_at, published_by_kind, published_by) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?8, ?9, ?10, ?11, ?12, ?13)",
+         updated_by, published_at, published_by_kind, published_by, internal_note, \
+         external_key) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             new.kind.as_str(),
             new.title,
@@ -67,6 +87,8 @@ pub(crate) fn insert(
             published.map(|_| at.as_millis()),
             published.map(|actor| actor.kind.as_str()),
             published.map(|actor| actor.id.as_str()),
+            new.internal_note,
+            new.external_key,
         ],
     )?;
     let id = transaction.last_insert_rowid();
@@ -154,6 +176,13 @@ pub(crate) fn edit(
     )?;
     if edit.components.is_some() {
         replace_components(transaction, id, &incident.components)?;
+    }
+    if let Some(note) = &edit.internal_note {
+        // Empty clears it.
+        transaction.execute(
+            "UPDATE incident SET internal_note = ?2 WHERE id = ?1",
+            params![id, Some(note).filter(|note| !note.trim().is_empty())],
+        )?;
     }
     let changes = serde_json::to_string(edit).map_err(Error::Encode)?;
     transaction.execute(
@@ -248,6 +277,29 @@ pub(crate) fn load(conn: &Connection, id: i64) -> Result<Option<Incident>> {
             .optional()?;
         Ok(complete(conn, incident.into_iter().collect())?.pop())
     })
+}
+
+/// The internal note and external key of each of `ids` that exists. Read
+/// apart from [`load`] and the lists, so an incident read for anyone else
+/// never carries them.
+pub(crate) fn internals(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, IncidentInternals>> {
+    let ids = serde_json::Value::from(ids).to_string();
+    let rows = conn
+        .prepare_cached(
+            "SELECT id, internal_note, external_key FROM incident \
+             WHERE id IN (SELECT value FROM json_each(?1))",
+        )?
+        .query_map([&ids], |row| {
+            Ok((
+                row.get(0)?,
+                IncidentInternals {
+                    internal_note: row.get(1)?,
+                    external_key: row.get(2)?,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+    Ok(rows)
 }
 
 /// Up to `limit` incidents, newest first, with ids below `before` when it
@@ -474,6 +526,8 @@ fn incident_row(row: &Row<'_>) -> rusqlite::Result<Incident> {
             Some(_) => Some(actor(row, 15)?),
             None => None,
         },
+        internal_note: None,
+        external_key: None,
         updates: Vec::new(),
     })
 }

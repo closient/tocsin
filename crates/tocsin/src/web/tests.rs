@@ -1082,11 +1082,14 @@ async fn the_resolve_form_starts_from_wording_for_the_kind() {
                 scheduled_end: scheduled.map(|(_, end)| end),
                 notify: true,
                 draft: None,
+                internal_note: None,
+                external_key: None,
             },
             &IncidentWriter::publishing(Actor::person(ALICE)),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .0;
         let request = from(
             PROXY,
             Method::GET,
@@ -1192,11 +1195,14 @@ async fn script_in_a_title_or_body_never_renders_live() {
             scheduled_end: None,
             notify: true,
             draft: None,
+            internal_note: None,
+            external_key: None,
         },
         &IncidentWriter::publishing(Actor::person("<b>mallory</b>@example.com")),
     )
     .await
-    .unwrap();
+    .unwrap()
+    .0;
     for uri in [
         "/admin/".to_owned(),
         format!("/admin/incidents/{}", incident.id),

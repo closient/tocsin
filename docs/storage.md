@@ -365,6 +365,18 @@ index on the drafts serves the internal board's list. Discarding a draft
 deletes its row, and its updates and edits cascade with it; a published
 incident is never deleted.
 
+**Internals** (migration 0012): `internal_note` and `external_key`, both
+optional, never an empty string. The note is Markdown for the people
+working the incident; an edit replaces it. The key is set at creation only
+(a trigger refuses changing it) and a partial unique index allows each
+non-`NULL` key once, so a create carrying a key some incident already has
+answers that incident instead of inserting. Discarding a draft deletes the
+row and so frees its key; a published incident holds its key for good.
+Ordinary reads leave both columns out; one read fetches them by incident
+id for the callers trusted with them (see
+[incidents.md](incidents.md#internal-note-and-external-key)). An edit's
+`incident_edit` row records a new note like any other field.
+
 ### `release`
 
 One release of a `[[project]]` to one environment, pushed by CI

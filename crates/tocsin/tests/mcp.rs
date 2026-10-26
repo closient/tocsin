@@ -450,12 +450,35 @@ async fn drives_every_tool(peer: &Peer<RoleClient>, node: &Node) {
     assert_eq!(incidents, node.rest(AGENT, "/api/v1/incidents").await);
     assert_eq!(incidents["incidents"][0]["id"], id);
 
-    let scratch = ok(
+    // With `status:read` the agent reads back its note and key, a second
+    // create with the key answers the first, and the key finds it.
+    let keyed = json!({
+        "title": "Scratch",
+        "message": "Never mind.",
+        "internal_note": "Evidence: db-01 swap.",
+        "external_key": "scratch-1",
+    });
+    let scratch = ok(peer, "create_incident", keyed.clone()).await;
+    assert_eq!(
+        scratch["internal_note"], "Evidence: db-01 swap.",
+        "{scratch}"
+    );
+    assert_eq!(scratch["external_key"], "scratch-1", "{scratch}");
+    let again = ok(peer, "create_incident", keyed).await;
+    assert_eq!(again, scratch);
+    let found = ok(
         peer,
-        "create_incident",
-        json!({ "title": "Scratch", "message": "Never mind." }),
+        "list_incidents",
+        json!({ "external_key": "scratch-1" }),
     )
     .await;
+    assert_eq!(
+        found,
+        node.rest(AGENT, "/api/v1/incidents?external_key=scratch-1&limit=20")
+            .await
+    );
+    assert_eq!(found["incidents"].as_array().unwrap().len(), 1, "{found}");
+    assert_eq!(found["incidents"][0]["id"], scratch["id"], "{found}");
     let discarded = ok(peer, "discard_incident", json!({ "id": scratch["id"] })).await;
     assert_eq!(discarded["title"], "Scratch", "{discarded}");
     let gone = refused(peer, "discard_incident", json!({ "id": scratch["id"] })).await;
@@ -702,14 +725,28 @@ async fn write_tools_refuse_a_token_without_their_scope_over_stdio() {
 /// own drafts, and is refused anything that would publish or touch a
 /// published incident.
 async fn drafts_only(drafter: &Peer<RoleClient>, writer: &Peer<RoleClient>) {
-    let draft = ok(
-        drafter,
-        "create_incident",
-        json!({ "title": "Agent draft", "message": "Looking into it." }),
-    )
-    .await;
+    // Without `status:read` it writes a note and key but never reads them
+    // back, and a second create with the key answers the first.
+    let new = json!({
+        "title": "Agent draft",
+        "message": "Looking into it.",
+        "internal_note": "Evidence: db-01 swap.",
+        "external_key": "agent-draft",
+    });
+    let draft = ok(drafter, "create_incident", new.clone()).await;
     assert!(draft["published_at"].is_null(), "{draft}");
     assert_eq!(draft["created_by"]["id"], "drafter", "{draft}");
+    assert!(draft.get("internal_note").is_none(), "{draft}");
+    assert!(draft.get("external_key").is_none(), "{draft}");
+    let again = ok(drafter, "create_incident", new).await;
+    assert_eq!(again["id"], draft["id"], "{again}");
+    let refusal = refused(
+        drafter,
+        "list_incidents",
+        json!({ "external_key": "agent-draft" }),
+    )
+    .await;
+    assert!(refusal.contains("`status:read`"), "{refusal}");
     let refusal = refused(
         drafter,
         "create_incident",

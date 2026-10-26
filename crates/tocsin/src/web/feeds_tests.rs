@@ -482,6 +482,8 @@ async fn text_is_escaped_once_and_reads_back_exactly() {
             scheduled_end: None,
             notify: true,
             draft: None,
+            internal_note: None,
+            external_key: None,
         },
         &IncidentWriter::publishing(Actor::person("alice@example.com")),
     )

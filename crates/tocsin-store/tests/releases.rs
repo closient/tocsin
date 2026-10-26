@@ -624,6 +624,8 @@ fn incident(component: &str) -> NewIncident {
         scheduled_end: None,
         notify: true,
         draft: None,
+        internal_note: None,
+        external_key: None,
     }
 }
 

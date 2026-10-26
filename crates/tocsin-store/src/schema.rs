@@ -25,6 +25,7 @@ static MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("../migrations/0009_subscribers.sql")),
     M::up(include_str!("../migrations/0010_slack.sql")),
     M::up(include_str!("../migrations/0011_incident_drafts.sql")),
+    M::up(include_str!("../migrations/0012_incident_internals.sql")),
 ];
 
 /// How long a connection waits for another process's lock before failing.
@@ -177,5 +178,51 @@ mod tests {
             [],
         );
         assert!(half.is_err(), "published_at was set without published_by");
+    }
+
+    /// Existing incidents come through migration 12 with no note and no
+    /// key; a key is then unique and fixed, and an empty one is refused.
+    #[test]
+    fn incidents_before_migration_12_have_no_note_or_key() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let migrations = super::migrations();
+        migrations.to_version(&mut conn, 11).unwrap();
+        conn.execute(
+            "INSERT INTO incident (kind, title, impact, status, created_at,
+                 created_by_kind, created_by, updated_at, updated_by_kind, updated_by)
+                 VALUES ('incident', 'Slow', 'minor', 'investigating', 1000,
+                 'token', 'deploy', 1000, 'token', 'deploy')",
+            [],
+        )
+        .unwrap();
+        migrations.to_latest(&mut conn).unwrap();
+        let internals: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT internal_note, external_key FROM incident",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(internals, (None, None));
+        let keyed = |key: &str| {
+            conn.execute(
+                "INSERT INTO incident (kind, title, impact, status, created_at,
+                     created_by_kind, created_by, updated_at, updated_by_kind, updated_by,
+                     external_key)
+                     VALUES ('incident', 'Slow', 'minor', 'investigating', 1000,
+                     'token', 'deploy', 1000, 'token', 'deploy', ?1)",
+                [key],
+            )
+        };
+        keyed("cluster-a").unwrap();
+        assert!(keyed("cluster-a").is_err(), "a key was used twice");
+        assert!(keyed("").is_err(), "an empty key was stored");
+        let moved = conn.execute(
+            "UPDATE incident SET external_key = 'cluster-b' WHERE external_key = 'cluster-a'",
+            [],
+        );
+        assert!(moved.is_err(), "a key changed after creation");
+        let noted = conn.execute("UPDATE incident SET internal_note = 'evidence'", []);
+        assert_eq!(noted.unwrap(), 2, "the note is not settable later");
     }
 }

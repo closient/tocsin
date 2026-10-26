@@ -536,7 +536,7 @@
         "tags": [
           "incidents"
         ],
-        "summary": "List incidents and maintenance, newest first. Drafts are listed only\nto a `status:read` token.",
+        "summary": "List incidents and maintenance, newest first. Drafts, and each\nincident's `internal_note` and `external_key`, are listed only to a\n`status:read` token; so is `?external_key=`.",
         "operationId": "list_incidents",
         "parameters": [
           {
@@ -559,6 +559,15 @@
               "format": "int32",
               "minimum": 0
             }
+          },
+          {
+            "name": "external_key",
+            "in": "query",
+            "description": "Only the incident given this `external_key` at creation, draft or\npublished: a page of one, or of none. Needs a `status:read` token.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -574,6 +583,16 @@
           },
           "401": {
             "description": "An `Authorization` header with an unknown token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`external_key` without a `status:read` token",
             "content": {
               "application/json": {
                 "schema": {
@@ -604,7 +623,7 @@
         "tags": [
           "incidents"
         ],
-        "summary": "Open an incident or announce scheduled maintenance, published or as a\ndraft. `draft` left out publishes for an `incident` token and drafts\nfor an `incident:draft` one.",
+        "summary": "Open an incident or announce scheduled maintenance, published or as a\ndraft. `draft` left out publishes for an `incident` token and drafts\nfor an `incident:draft` one. With an `external_key` some incident\nalready has, nothing is written and that incident is answered with\n200, as a release posted again is. The answer carries `internal_note`\nand `external_key` only for a token that also has `status:read`.",
         "operationId": "create_incident",
         "requestBody": {
           "content": {
@@ -617,6 +636,16 @@
           "required": true
         },
         "responses": {
+          "200": {
+            "description": "An incident already has this `external_key`: that incident, unchanged; `Location` names it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Incident"
+                }
+              }
+            }
+          },
           "201": {
             "description": "Created; `Location` names it",
             "content": {
@@ -670,7 +699,7 @@
         "tags": [
           "incidents"
         ],
-        "summary": "One incident with every update. A draft is shown only to a\n`status:read` token.",
+        "summary": "One incident with every update. A draft, and the `internal_note` and\n`external_key`, are shown only to a `status:read` token.",
         "operationId": "get_incident",
         "parameters": [
           {
@@ -803,7 +832,7 @@
         "tags": [
           "incidents"
         ],
-        "summary": "Change the title, impact, components or schedule. Fields left out are\nunchanged; status changes only through an update. An `incident:draft`\ntoken may edit only a draft.",
+        "summary": "Change the title, impact, components, schedule or internal note. Fields\nleft out are unchanged; status changes only through an update. An\n`incident:draft` token may edit only a draft. The answer carries\n`internal_note` and `external_key` only for a token that also has\n`status:read`.",
         "operationId": "edit_incident",
         "parameters": [
           {
@@ -2293,6 +2322,13 @@
             "$ref": "#/components/schemas/Actor",
             "description": "Who opened it."
           },
+          "external_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The key its creator gave it, such as an alert cluster's. Present\nonly where `internal_note` would be, and only when set."
+          },
           "id": {
             "type": "integer",
             "format": "int64",
@@ -2301,6 +2337,13 @@
           "impact": {
             "$ref": "#/components/schemas/Impact",
             "description": "How badly the affected components are hit."
+          },
+          "internal_note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Notes for the people who run it: evidence, links. Never public,\nbefore or after publishing. Present only to a `status:read` token\nand in the admin, and only when set."
           },
           "kind": {
             "$ref": "#/components/schemas/IncidentKind",
@@ -2410,6 +2453,13 @@
                 "type": "null"
               }
             ]
+          },
+          "internal_note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A new internal note, replacing the old one; empty clears it. Never\nshown publicly."
           },
           "scheduled_end": {
             "oneOf": [
@@ -2545,9 +2595,24 @@
             ],
             "description": "`true` saves it as a draft: internal only, announced to nobody, until\na person publishes it. Left out, it is published when the caller may\npublish (the `incident` scope, or a person) and a draft otherwise\n(the `incident:draft` scope); the MCP tool always defaults to a\ndraft."
           },
+          "external_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The caller's own key for what it reports, such as an alert\ncluster's: one line, at most 200 characters, set at creation only.\nA create repeating a key in use answers that incident with 200 and\nchanges nothing; discarding a draft frees its key.",
+            "maxLength": 200
+          },
           "impact": {
             "$ref": "#/components/schemas/Impact",
             "description": "Defaults to `none`."
+          },
+          "internal_note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Notes for whoever publishes it: evidence, links. Not empty. Never\nshown publicly, before or after publishing; read back only with the\n`status:read` scope."
           },
           "kind": {
             "$ref": "#/components/schemas/IncidentKind",

@@ -613,9 +613,11 @@ impl Store {
         Ok(self.open_incident(new, actor, at).await?.0)
     }
 
-    /// [`Store::create_incident`], except that when an incident already
-    /// holds `new.external_key` nothing is written and that incident is
-    /// answered, with [`Opened::Existing`]. The lookup and the insert share
+    /// [`Store::create_incident`], except that when an open incident
+    /// already holds `new.external_key` nothing is written and that
+    /// incident is answered, with [`Opened::Existing`]. A resolved
+    /// incident has freed its key, so the same key then opens a new one:
+    /// the trouble came back as a new episode. The lookup and the insert share
     /// one IMMEDIATE transaction, so two creates with one key cannot both
     /// insert.
     ///
@@ -659,9 +661,10 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] if the status does not suit the incident's kind;
-    /// [`Error::Published`] if `drafts_only` and it is published;
-    /// otherwise the write fails.
+    /// [`Error::Invalid`] if the status does not suit the incident's kind,
+    /// or it reopens a resolved incident whose external key another open
+    /// incident now holds; [`Error::Published`] if `drafts_only` and it is
+    /// published; otherwise the write fails.
     pub async fn add_incident_update(
         &self,
         id: i64,
@@ -875,19 +878,15 @@ impl Store {
         self.read(move |conn| incident::load(conn, id)).await
     }
 
-    /// The incident holding external key `key`, if any, drafts included.
+    /// Every incident given external key `key`, newest first, drafts and
+    /// resolved ones included: at most one is open, and each resolved one
+    /// is an earlier episode.
     ///
     /// # Errors
     ///
     /// The read fails.
-    pub async fn incident_keyed(&self, key: String) -> Result<Option<Incident>> {
-        self.read(move |conn| {
-            incident::snapshot(conn, |conn| match incident::keyed(conn, &key)? {
-                Some(id) => incident::load(conn, id),
-                None => Ok(None),
-            })
-        })
-        .await
+    pub async fn incidents_keyed(&self, key: String) -> Result<Vec<Incident>> {
+        self.read(move |conn| incident::all_keyed(conn, &key)).await
     }
 
     /// The internal note and external key of each of `ids` that exists.

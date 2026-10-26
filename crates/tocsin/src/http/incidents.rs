@@ -56,8 +56,10 @@ pub struct ListQuery {
     pub before: Option<i64>,
     /// Page size, 1 to 100; default 20.
     pub limit: Option<u32>,
-    /// Only the incident given this `external_key` at creation, draft or
-    /// published: a page of one, or of none. Needs a `status:read` token.
+    /// Only the incidents given this `external_key` at creation, draft or
+    /// published, open or resolved, newest first and all on one page: at
+    /// most one is open, and each resolved one is an earlier episode.
+    /// Needs a `status:read` token.
     pub external_key: Option<String>,
 }
 
@@ -160,9 +162,9 @@ pub async fn list(
                 "external_key needs a token with the `status:read` scope",
             ));
         }
-        let found = state.store.incident_keyed(key).await?;
+        let found = state.store.incidents_keyed(key).await?;
         return Ok(IncidentList {
-            incidents: revealed(state, viewer, found.into_iter().collect()).await?,
+            incidents: revealed(state, viewer, found).await?,
             next_before: None,
         });
     }
@@ -251,9 +253,10 @@ pub async fn get_incident(
 
 /// Open an incident or announce scheduled maintenance, published or as a
 /// draft. `draft` left out publishes for an `incident` token and drafts
-/// for an `incident:draft` one. With an `external_key` some incident
+/// for an `incident:draft` one. With an `external_key` an open incident
 /// already has, nothing is written and that incident is answered with
-/// 200, as a release posted again is. The answer carries `internal_note`
+/// 200, as a release posted again is; a resolved incident has freed its
+/// key, so the key then opens a new incident with 201. The answer carries `internal_note`
 /// and `external_key` only for a token that also has `status:read`.
 #[utoipa::path(
     post,
@@ -263,7 +266,7 @@ pub async fn get_incident(
     request_body = NewIncident,
     responses(
         (status = 201, description = "Created; `Location` names it", body = Incident),
-        (status = 200, description = "An incident already has this `external_key`: that incident, unchanged; `Location` names it", body = Incident),
+        (status = 200, description = "An open incident already has this `external_key`: that incident, unchanged; `Location` names it", body = Incident),
         (status = 401, description = "No token, or an unknown one", body = ErrorBody),
         (status = 403, description = "The token has neither incident scope, or asks to publish (`\"draft\": false`) with only `incident:draft`", body = ErrorBody),
         (status = 422, description = "Invalid fields, by path", body = ErrorBody),
@@ -302,7 +305,7 @@ pub async fn create_incident(
         (status = 401, description = "No token, or an unknown one", body = ErrorBody),
         (status = 403, description = "The token has neither incident scope, or only `incident:draft` and the incident is published", body = ErrorBody),
         (status = 404, description = "No incident has that id", body = ErrorBody),
-        (status = 422, description = "Invalid fields, by path", body = ErrorBody),
+        (status = 422, description = "Invalid fields, by path; a `status` that reopens a resolved incident whose `external_key` another open incident now holds", body = ErrorBody),
     ),
 )]
 pub async fn add_update(
@@ -328,7 +331,7 @@ pub async fn add_update(
 ///
 /// `new.draft` left out is a draft exactly when `writer` may not publish.
 ///
-/// When an incident already has `new.external_key`, nothing is written,
+/// When an open incident already has `new.external_key`, nothing is written,
 /// emitted or announced, and that incident is answered with
 /// [`Opened::Existing`]; `new` is still checked first, so a bad request is
 /// refused either way. The answer carries no internals: see

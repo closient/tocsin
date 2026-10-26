@@ -1566,4 +1566,97 @@ async fn the_internal_note_stays_internal_and_a_key_opens_one_incident() {
     }
 }
 
+/// A key is held by one open incident at a time. Two creates racing with
+/// the key open one incident (201) and answer it (200); while it is open
+/// the key answers it; once it is resolved, the key opens a new incident,
+/// the list by key has both newest first, and the old one may not reopen
+/// while the new one holds the key.
+#[tokio::test]
+async fn a_key_opens_one_incident_per_episode() {
+    const STABLE: &str = "cluster/website-down";
+    let site = site();
+    let call = |method: Method, uri: String, token: &'static str, body: Option<Value>| {
+        let site = &site;
+        async move { site.api(method, &uri, Some(token), body, 1).await }
+    };
+    let new = json!({
+        "title": "Website unavailable",
+        "components": ["api"],
+        "message": "We are investigating.",
+        "external_key": STABLE,
+    });
+    let create = || {
+        call(
+            Method::POST,
+            "/api/v1/incidents".into(),
+            SWEEPER,
+            Some(new.clone()),
+        )
+    };
+
+    let ((one, _, first), (two, _, second)) = tokio::join!(create(), create());
+    let mut statuses = [one, two];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        [StatusCode::OK, StatusCode::CREATED],
+        "{first} {second}"
+    );
+    assert_eq!(first["id"], second["id"], "{first} {second}");
+    let old = first["id"].as_i64().unwrap();
+    assert_eq!(site.state.store.draft_incidents().await.unwrap().len(), 1);
+
+    let (status, _, again) = create().await;
+    assert_eq!(
+        (status, again["id"].as_i64()),
+        (StatusCode::OK, Some(old)),
+        "{again}"
+    );
+
+    let resolve = json!({"status": "resolved", "message": "Fixed."});
+    let (status, _, resolved) = call(
+        Method::POST,
+        format!("/api/v1/incidents/{old}/updates"),
+        SWEEPER,
+        Some(resolve),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{resolved}");
+
+    let (status, _, fresh) = create().await;
+    assert_eq!(status, StatusCode::CREATED, "{fresh}");
+    let new_id = fresh["id"].as_i64().unwrap();
+    assert_ne!(new_id, old);
+
+    let (status, _, found) = call(
+        Method::GET,
+        format!(
+            "/api/v1/incidents?external_key={}",
+            STABLE.replace('/', "%2F")
+        ),
+        READER,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    let ids: Vec<i64> = found["incidents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|incident| incident["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, [new_id, old], "{found}");
+    assert_eq!(found["next_before"], Value::Null, "{found}");
+
+    let (status, _, refused) = call(
+        Method::POST,
+        format!("/api/v1/incidents/{old}/updates"),
+        SWEEPER,
+        Some(json!({"status": "investigating", "message": "Back again."})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["fields"][0]["path"], "status", "{refused}");
+}
+
 mod slack;

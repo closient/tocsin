@@ -26,6 +26,7 @@ static MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("../migrations/0010_slack.sql")),
     M::up(include_str!("../migrations/0011_incident_drafts.sql")),
     M::up(include_str!("../migrations/0012_incident_internals.sql")),
+    M::up(include_str!("../migrations/0013_open_external_key.sql")),
 ];
 
 /// How long a connection waits for another process's lock before failing.
@@ -181,7 +182,8 @@ mod tests {
     }
 
     /// Existing incidents come through migration 12 with no note and no
-    /// key; a key is then unique and fixed, and an empty one is refused.
+    /// key; a key is then unique among open incidents and fixed, and an
+    /// empty one is refused.
     #[test]
     fn incidents_before_migration_12_have_no_note_or_key() {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -224,5 +226,50 @@ mod tests {
         assert!(moved.is_err(), "a key changed after creation");
         let noted = conn.execute("UPDATE incident SET internal_note = 'evidence'", []);
         assert_eq!(noted.unwrap(), 2, "the note is not settable later");
+    }
+
+    /// Since migration 13 a key is unique among open incidents only: a
+    /// resolved incident's key is taken again, and reopening it while
+    /// another holds the key is refused by the index.
+    #[test]
+    fn a_resolved_incident_frees_its_key_for_the_index() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let migrations = super::migrations();
+        migrations.to_version(&mut conn, 12).unwrap();
+        let keyed = |conn: &Connection, resolved_at: Option<i64>| {
+            conn.execute(
+                "INSERT INTO incident (kind, title, impact, status, resolved_at, created_at,
+                     created_by_kind, created_by, updated_at, updated_by_kind, updated_by,
+                     external_key)
+                     VALUES ('incident', 'Slow', 'minor', ?1, ?2, 1000,
+                     'token', 'deploy', 1000, 'token', 'deploy', 'cluster-a')",
+                rusqlite::params![
+                    if resolved_at.is_some() {
+                        "resolved"
+                    } else {
+                        "investigating"
+                    },
+                    resolved_at
+                ],
+            )
+        };
+        keyed(&conn, Some(2000)).unwrap();
+        assert!(
+            keyed(&conn, None).is_err(),
+            "migration 12 freed a resolved key"
+        );
+        migrations.to_latest(&mut conn).unwrap();
+        keyed(&conn, None).unwrap();
+        assert!(
+            keyed(&conn, None).is_err(),
+            "two open incidents share a key"
+        );
+        keyed(&conn, Some(3000)).unwrap();
+        let reopened = conn.execute(
+            "UPDATE incident SET status = 'investigating', resolved_at = NULL \
+             WHERE resolved_at = 2000",
+            [],
+        );
+        assert!(reopened.is_err(), "a reopen took a key another holds");
     }
 }

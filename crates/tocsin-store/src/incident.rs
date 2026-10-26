@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use tocsin_core::incident::{
-    Actor, ActorKind, Impact, Incident, IncidentEdit, IncidentInternals, IncidentKind,
+    Actor, ActorKind, FieldError, Impact, Incident, IncidentEdit, IncidentInternals, IncidentKind,
     IncidentStatus, IncidentUpdate, NewIncident, NewUpdate, Timestamp,
 };
 
@@ -47,18 +47,45 @@ pub enum Opened {
     Existing,
 }
 
-/// The incident holding external key `key`, if any.
+/// The open incident holding external key `key`, if any. A resolved
+/// incident (or completed maintenance) has freed its key.
 pub(crate) fn keyed(conn: &Connection, key: &str) -> Result<Option<i64>> {
     Ok(conn
-        .prepare_cached("SELECT id FROM incident WHERE external_key = ?1")?
+        .prepare_cached("SELECT id FROM incident WHERE external_key = ?1 AND resolved_at IS NULL")?
         .query_row([key], |row| row.get(0))
+        .optional()?)
+}
+
+/// Every incident ever given external key `key`, open or resolved, draft
+/// or published, newest first, complete.
+pub(crate) fn all_keyed(conn: &Connection, key: &str) -> Result<Vec<Incident>> {
+    snapshot(conn, |conn| {
+        let incidents = conn
+            .prepare_cached(&format!(
+                "SELECT {INCIDENT_COLUMNS} FROM incident WHERE external_key = ?1 ORDER BY id DESC"
+            ))?
+            .query_map([key], incident_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        complete(conn, incidents)
+    })
+}
+
+/// The open incident, other than `id`, holding `id`'s external key: the
+/// one a reopen of `id` would collide with. `None` for a keyless incident.
+fn sharing_key(conn: &Connection, id: i64) -> Result<Option<i64>> {
+    Ok(conn
+        .prepare_cached(
+            "SELECT id FROM incident WHERE resolved_at IS NULL AND id <> ?1 \
+             AND external_key = (SELECT external_key FROM incident WHERE id = ?1)",
+        )?
+        .query_row([id], |row| row.get(0))
         .optional()?)
 }
 
 /// Inserts a new incident with its components and first update; returns
 /// its id. A draft (`new.draft` is `Some(true)`) is not published;
 /// otherwise `actor` publishes it at `at`. The caller has checked that no
-/// incident holds `new.external_key`.
+/// open incident holds `new.external_key`.
 pub(crate) fn insert(
     transaction: &Transaction<'_>,
     new: &NewIncident,
@@ -115,6 +142,20 @@ pub(crate) fn add_update(
         return Err(Error::Published(id));
     }
     incident.check_update(update).map_err(Error::Invalid)?;
+    // Reopening clears `resolved_at`, which takes the external key back;
+    // another incident opened with the key since then holds it.
+    if incident.resolved_at.is_some()
+        && !update.status.is_terminal()
+        && let Some(open) = sharing_key(transaction, id)?
+    {
+        return Err(Error::Invalid(vec![FieldError::new(
+            "status",
+            format!(
+                "incident {open} is open with this incident's external key; \
+                 reopening would give both the same key"
+            ),
+        )]));
+    }
     append_update(transaction, id, update.status, &update.message, actor, at)?;
     // `resolved_at` keeps the first resolution while the incident stays
     // over, and is cleared if an update reopens it.

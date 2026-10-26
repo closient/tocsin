@@ -110,7 +110,7 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
 | `GET /api/v1/checks/{id}/results?since=&before=&limit=` | `status:read` | 200, `{check_id, since, results, next_before}`, newest first |
 | `GET /api/v1/outages?since=&before=&limit=` | none, or `status:read` | 200, `{since, outages, next_before}`, newest start first |
 | `GET /api/v1/incidents?limit=&before=` | none; `status:read` adds drafts and internals | 200, `{incidents, next_before}`, newest first |
-| `GET /api/v1/incidents?external_key=` | `status:read` | 200, `{incidents, next_before}`, the one incident with that key or none |
+| `GET /api/v1/incidents?external_key=` | `status:read` | 200, `{incidents, next_before}`, every incident with that key, newest first |
 | `GET /api/v1/incidents/{id}` | none; `status:read` for a draft and internals | 200, the incident |
 | `GET /api/v1/releases?project=&since=&before=&limit=` | none, or `status:read` | 200, `{releases, truncated, next_before}`, newest first |
 | `GET /api/v1/timeline?component=&since=&after=&limit=` | none, or `status:read` | 200, `{since, events, truncated, next_after}`, oldest first |

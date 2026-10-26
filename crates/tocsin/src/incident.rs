@@ -116,7 +116,7 @@ pub fn run(command: IncidentCommand) -> Result<Report, Failure> {
     }
 }
 
-/// `incident list`: a page of incidents, or the one with `external_key`.
+/// `incident list`: a page of incidents, or every one with `external_key`.
 fn list(
     server: &ServerArgs,
     limit: u32,

@@ -563,7 +563,7 @@
           {
             "name": "external_key",
             "in": "query",
-            "description": "Only the incident given this `external_key` at creation, draft or\npublished: a page of one, or of none. Needs a `status:read` token.",
+            "description": "Only the incidents given this `external_key` at creation, draft or\npublished, open or resolved, newest first and all on one page: at\nmost one is open, and each resolved one is an earlier episode.\nNeeds a `status:read` token.",
             "required": false,
             "schema": {
               "type": "string"
@@ -623,7 +623,7 @@
         "tags": [
           "incidents"
         ],
-        "summary": "Open an incident or announce scheduled maintenance, published or as a\ndraft. `draft` left out publishes for an `incident` token and drafts\nfor an `incident:draft` one. With an `external_key` some incident\nalready has, nothing is written and that incident is answered with\n200, as a release posted again is. The answer carries `internal_note`\nand `external_key` only for a token that also has `status:read`.",
+        "summary": "Open an incident or announce scheduled maintenance, published or as a\ndraft. `draft` left out publishes for an `incident` token and drafts\nfor an `incident:draft` one. With an `external_key` an open incident\nalready has, nothing is written and that incident is answered with\n200, as a release posted again is; a resolved incident has freed its\nkey, so the key then opens a new incident with 201. The answer carries `internal_note`\nand `external_key` only for a token that also has `status:read`.",
         "operationId": "create_incident",
         "requestBody": {
           "content": {
@@ -637,7 +637,7 @@
         },
         "responses": {
           "200": {
-            "description": "An incident already has this `external_key`: that incident, unchanged; `Location` names it",
+            "description": "An open incident already has this `external_key`: that incident, unchanged; `Location` names it",
             "content": {
               "application/json": {
                 "schema": {
@@ -1081,7 +1081,7 @@
             }
           },
           "422": {
-            "description": "Invalid fields, by path",
+            "description": "Invalid fields, by path; a `status` that reopens a resolved incident whose `external_key` another open incident now holds",
             "content": {
               "application/json": {
                 "schema": {

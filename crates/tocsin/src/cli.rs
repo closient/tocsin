@@ -230,8 +230,8 @@ pub enum IncidentCommand {
         internal_note: Option<String>,
 
         /// Your own key for what this reports, such as an alert cluster's.
-        /// If an incident already has it, that incident is answered and
-        /// nothing is opened.
+        /// If an open incident already has it, that incident is answered
+        /// and nothing is opened; a resolved one has freed it.
         #[arg(long, value_name = "KEY")]
         external_key: Option<String>,
     },
@@ -343,8 +343,8 @@ pub enum IncidentCommand {
         #[arg(long, value_name = "ID")]
         before: Option<i64>,
 
-        /// Only the incident with this external key. Needs a `status:read`
-        /// token.
+        /// Only incidents with this external key, newest first, resolved
+        /// ones included. Needs a `status:read` token.
         #[arg(long, value_name = "KEY")]
         external_key: Option<String>,
     },

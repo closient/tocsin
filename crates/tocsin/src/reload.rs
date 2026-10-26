@@ -891,7 +891,7 @@ scopes = ["release"]
     const CONTRACT: &str = r#"
 [alerting.labels.needs_human]
 required = true
-values = ["true", "false"]
+values = ["false", "true"]
 "#;
 
     #[tokio::test]

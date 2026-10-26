@@ -1483,7 +1483,7 @@ url = "support.example.com"
 const CONTRACT: &str = r#"
 [alerting.labels.needs_human]
 required = true
-values = ["true", "false"]
+values = ["false", "true"]
 
 [alerting.labels.page_class]
 required = true
@@ -1549,7 +1549,7 @@ fn a_missing_required_label_names_the_file_the_check_and_the_label() {
     let diagnostic = only_error(&[("alerting.toml", CONTRACT), ("checks.toml", &text)]);
     assert_eq!(
         diagnostic.to_string(),
-        "checks.toml:7:1: check `api` is missing label `needs_human`, which `[alerting]` requires (check[0].labels.needs_human)\n  hint: add `needs_human = \"...\"` to its `labels`; it must be one of `true`, `false`"
+        "checks.toml:7:1: check `api` is missing label `needs_human`, which `[alerting]` requires (check[0].labels.needs_human)\n  hint: add `needs_human = \"...\"` to its `labels`; it must be one of `false`, `true`"
     );
 }
 
@@ -1578,7 +1578,7 @@ fn a_label_value_outside_the_contract_is_located_at_the_value() {
     let diagnostic = only_error(&[("alerting.toml", CONTRACT), ("checks.toml", &text)]);
     assert_eq!(
         diagnostic.to_string(),
-        "checks.toml:8:15: check `api`: label `needs_human` is `ture`, which `[alerting]` does not allow (check[0].labels.needs_human)\n  hint: did you mean `true`? It must be one of `true`, `false`"
+        "checks.toml:8:15: check `api`: label `needs_human` is `ture`, which `[alerting]` does not allow (check[0].labels.needs_human)\n  hint: did you mean `true`? It must be one of `false`, `true`"
     );
 }
 
@@ -1588,7 +1588,7 @@ fn an_empty_value_the_contract_covers_is_one_error_naming_the_values_it_allows()
     let diagnostic = only_error(&[("alerting.toml", CONTRACT), ("checks.toml", &text)]);
     assert_eq!(
         diagnostic.to_string(),
-        "checks.toml:8:15: check `api`: label `needs_human` is empty (check[0].labels.needs_human)\n  hint: Alertmanager drops an empty label: give it a value or remove it; it must be one of `true`, `false`"
+        "checks.toml:8:15: check `api`: label `needs_human` is empty (check[0].labels.needs_human)\n  hint: Alertmanager drops an empty label: give it a value or remove it; it must be one of `false`, `true`"
     );
 }
 

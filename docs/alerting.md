@@ -278,8 +278,11 @@ The check's or heartbeat's configured
 on them, and its `annotations` join the annotations. Labels are part of the
 identity, so both are pinned on the alert when it opens: every fire, repeat
 and resolve of it carries that set, even after a reload changes the
-check's labels or removes the check. A change takes effect from the
-check's next alert, after this one resolves.
+check's labels. A change takes effect from the check's next alert, after
+this one resolves. A resolve already queued when a reload removes the
+check still carries the pinned labels; a check removed while it fires is
+withdrawn without a resolve, and Alertmanager expires its alert at
+`endsAt`.
 
 ## Slack
 

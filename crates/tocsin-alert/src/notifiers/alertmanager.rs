@@ -17,9 +17,11 @@
 //! The check's or heartbeat's configured `labels` join the label set too,
 //! because routing is what labels are for. They are pinned on the alert
 //! when it opens, with its configured `annotations`, and every fire, repeat
-//! and resolve posts that set, so every alert has a matching resolve with
-//! the same identity: a reload that changes a firing check's labels, or
-//! removes the check, takes effect from its next alert, never mid-episode.
+//! and resolve posts that set: a reload that changes a firing check's
+//! labels takes effect from its next alert, never mid-episode. A resolve
+//! already queued when a reload removes the check still carries the pinned
+//! labels; a check removed while it fires is withdrawn without a resolve,
+//! and Alertmanager expires its alert at `endsAt`.
 
 use std::time::Duration;
 

@@ -252,11 +252,76 @@ fn an_alert_keeps_the_labels_it_opened_with_through_a_reload_until_it_resolves()
 }
 
 #[test]
-fn a_resolve_for_a_check_a_reload_removed_keeps_its_labels() {
+fn an_alert_that_re_fires_after_a_reload_keeps_the_labels_it_opened_with() {
     paused(async {
         let fixture = Fixture::new();
         let (sender, mut receiver) = channel();
         let slack: Arc<dyn Notifier> = Fake::accepting("slack", &sender);
+        let running = start(
+            &fixture,
+            &labelled(r#"{ page_class = "page" }"#, r#"{ ticket = "OPS-1" }"#),
+            &[("slack", Arc::clone(&slack))],
+            &AlertMetrics::default(),
+        );
+        let opened = (
+            vec![("page_class".to_owned(), "page".to_owned())],
+            vec![("ticket".to_owned(), "OPS-1".to_owned())],
+        );
+
+        let id = running.change(down(T0)).await.unwrap();
+        let fire = next_from(&mut receiver, "slack").await;
+        assert_eq!(carried(&fire), opened);
+        reload(
+            &fixture,
+            &running,
+            &labelled(r#"{ page_class = "ticket" }"#, r#"{ ticket = "OPS-2" }"#),
+            &[("slack", Arc::clone(&slack))],
+        )
+        .await;
+
+        // The health changes, so the open alert fires again rather than
+        // opening a second one.
+        running
+            .change(turns(id, Health::Degraded, T0 + 1_000))
+            .await
+            .unwrap();
+        let again = next_from(&mut receiver, "slack").await;
+        assert_eq!(again.event(), AlertEvent::Fire);
+        assert_eq!(again.alert.identity(), fire.alert.identity());
+        assert_eq!(carried(&again), opened);
+
+        let stored = fixture.store.alerts().await.unwrap();
+        assert_eq!(stored.len(), 1, "{stored:?}");
+        let pairs = |map: &std::collections::BTreeMap<String, String>| -> Pairs {
+            map.iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect()
+        };
+        assert_eq!(
+            (pairs(&stored[0].labels), pairs(&stored[0].annotations)),
+            opened
+        );
+        running.alerter.stop().await;
+    });
+}
+
+/// The engine withdraws a check a reload removes, without a resolve (see
+/// `Ending::Withdrawn` in the store); this covers the resolve that was
+/// already queued when the reload landed, still going out after it.
+#[test]
+fn a_resolve_queued_before_a_reload_removes_its_check_keeps_its_labels() {
+    paused(async {
+        let fixture = Fixture::new();
+        let (sender, mut receiver) = channel();
+        // The resolve's first attempt fails, so it is still queued when the
+        // reload lands and its retry goes out after.
+        let slack: Arc<dyn Notifier> = Fake::new("slack", &sender, |alert, attempt| {
+            if alert.event == AlertEvent::Resolve && attempt == 1 {
+                Answer::Fail
+            } else {
+                Answer::Accept
+            }
+        });
         let running = start(
             &fixture,
             &labelled(r#"{ page_class = "page" }"#, "{}"),
@@ -265,6 +330,12 @@ fn a_resolve_for_a_check_a_reload_removed_keeps_its_labels() {
         );
         let id = running.change(down(T0)).await.unwrap();
         let fire = next_from(&mut receiver, "slack").await;
+        running.change(up(id, T0 + 1_000)).await;
+        let failed = next_from(&mut receiver, "slack").await;
+        assert_eq!(
+            (failed.event(), failed.answer),
+            (AlertEvent::Resolve, Answer::Fail)
+        );
 
         // The reload removes the check: the router knows nothing of it.
         let toml = monitored(&["slack"], "");
@@ -277,9 +348,11 @@ fn a_resolve_for_a_check_a_reload_removed_keeps_its_labels() {
             &[("slack", Arc::clone(&slack))],
         )
         .await;
-        running.change(up(id, T0 + 1_000)).await;
         let resolve = next_from(&mut receiver, "slack").await;
-        assert_eq!(resolve.event(), AlertEvent::Resolve);
+        assert_eq!(
+            (resolve.event(), resolve.answer),
+            (AlertEvent::Resolve, Answer::Accept)
+        );
         assert_eq!(carried(&resolve), carried(&fire));
         assert_eq!(resolve.alert.labels.len(), 1);
         running.alerter.stop().await;

@@ -62,9 +62,10 @@ BEGIN
     SELECT RAISE(ABORT, 'a silence can only have ended_at set, once');
 END;
 
--- Whether a fire or repeat for the alert has been delivered. An open
--- alert whose messages a silence held back, and that nothing reached, is
--- fired afresh once no silence applies.
+-- Whether a fire or repeat has been delivered for the alert's current
+-- fire; a re-fire at a new outage or health clears it. An open alert whose
+-- current fire a silence held back, and that nothing reached, is fired
+-- afresh once no silence applies.
 ALTER TABLE alert ADD COLUMN notified INTEGER NOT NULL DEFAULT 1 CHECK (notified IN (0, 1));
 
 -- Whether a send of a fire or repeat for the alert was ever started, set

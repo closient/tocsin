@@ -1234,6 +1234,56 @@ fn an_episode_silence_ends_with_its_outage_and_the_re_fire_notifies() {
 }
 
 #[test]
+fn an_escalation_a_silence_held_fires_when_the_silence_expires() {
+    paused(async {
+        let fixture = Fixture::new();
+        let config = config(&monitored(&["slack"], "notify_on = \"degraded\""));
+        let (sender, mut receiver) = channel();
+        let slack = Fake::accepting("slack", &sender);
+        let running = start(
+            &fixture,
+            &config,
+            &[("slack", Arc::clone(&slack) as Arc<dyn Notifier>)],
+            &AlertMetrics::default(),
+        );
+        let degraded = running
+            .change(failing("api", Health::Degraded, T0))
+            .await
+            .unwrap();
+        let fire = next_from(&mut receiver, "slack").await;
+        assert_eq!(fire.event(), AlertEvent::Fire);
+
+        // Heard as degraded, then silenced for an hour; it goes down
+        // meanwhile, and that fire is held.
+        tokio::time::sleep(Duration::from_mins(1)).await;
+        let id = silence(&fixture, None, T0 + 60_000, T0 + 60_000 + HOUR_MS).await;
+        tokio::time::sleep(Duration::from_mins(1)).await;
+        let down = running
+            .change(turns(degraded, Health::Down, T0 + 120_000))
+            .await
+            .unwrap();
+        assert_eq!(held(&fixture, id, 1).await[0].0, HeldKind::Fire);
+
+        // Still down when the silence expires: the escalation is heard then.
+        let escalation = next_from(&mut receiver, "slack").await;
+        assert_eq!(
+            (
+                escalation.event(),
+                escalation.alert.health,
+                escalation.alert.sent_at_ms - T0
+            ),
+            (AlertEvent::Fire, Health::Down, 60_000 + HOUR_MS)
+        );
+        running.change(up(down, T0 + 2 * HOUR_MS)).await;
+        let resolve = next_from(&mut receiver, "slack").await;
+        running.alerter.stop().await;
+
+        assert_eq!(resolve.event(), AlertEvent::Resolve);
+        assert_eq!(sent(&slack).len(), 3, "{:?}", sent(&slack));
+    });
+}
+
+#[test]
 fn a_silence_never_holds_back_the_resolve_of_an_alert_already_sent() {
     paused(async {
         let fixture = Fixture::new();

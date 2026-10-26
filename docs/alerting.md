@@ -198,11 +198,14 @@ the latest fire, even if that silence has since ended) and the cancel
 dropped, since nothing was ringing. When in doubt, tocsin sends.
 
 When a silence stops applying to an alert that is still firing, by
-expiring, being ended early or its episode ending, and that alert's fire
-was held with nothing delivered or still to send, the worker queues a
-fresh fire at once (it wakes when a silence expires, and ending one early
-wakes it), so an outage that outlasts its silence is heard. This rings a Pushover emergency route again. An alert that was
-already heard before the silence gets no fresh fire: its next repeat goes
+expiring, being ended early or its episode ending, and that alert's
+current fire was held with nothing delivered for it or still to send, the
+worker queues a fresh fire at once (it wakes when a silence expires, and
+ending one early wakes it), so an outage that outlasts its silence is
+heard. An escalation counts: an alert heard as degraded that went down
+under the silence fires as down once it ends. This rings a Pushover
+emergency route again. An alert whose current fire was already heard
+before the silence gets no fresh fire: its next repeat goes
 out on the route's schedule, and a route without `repeat` stays quiet
 until the outage ends. A silence does not stop an emergency already
 ringing; acknowledge that in Pushover.

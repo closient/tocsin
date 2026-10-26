@@ -178,7 +178,8 @@ pub struct StoredAlert {
     pub ringing: bool,
     /// The outage it last fired for.
     pub outage_id: Option<i64>,
-    /// Whether a fire or repeat for it has been delivered.
+    /// Whether a fire or repeat has been delivered for its current fire,
+    /// the one for its latest outage or health.
     pub notified: bool,
     /// Whether a send of a fire or repeat for it was ever started, whatever
     /// came of it. Until one was, the receiver cannot have heard of the
@@ -500,8 +501,11 @@ fn fire_alerts(
         }
         transaction
             .prepare_cached(
+                // The new fire is unheard until it is delivered, so a silence
+                // that holds it strands the alert; `attempted` stays, as the
+                // earlier fire's resolve is still owed.
                 "UPDATE alert SET outage_id = ?2, health = ?3, component_id = ?4,
-                     next_repeat_at = ?5 + repeat_ms, ringing = ?6
+                     next_repeat_at = ?5 + repeat_ms, ringing = ?6, notified = 0
                  WHERE id = ?1",
             )?
             .execute(params![

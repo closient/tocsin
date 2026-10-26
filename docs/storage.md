@@ -430,14 +430,37 @@ partial unique index (`alert_open`) allows at most one open alert
 | `started_at`, `ended_at` | integer | `ended_at` is null while it fires. |
 | `resolve` | integer | 1 if its end sends a resolve. |
 | `repeat_ms`, `next_repeat_at` | integer | The repeat interval (null never repeats) and when the next is due. |
+| `notified` | integer | 1 once a fire or repeat was delivered; a [silence](alerting.md#silences) holds back a resolve only while it is 0. Added by 0013; older rows are 1. |
 
-An `alert_delivery` is one message to send: `kind` (`fire`, `repeat` or
-`resolve`), the `health` it reports, `status` (`pending`, `delivered` or
-`failed`), `attempts`, `next_attempt_at`, `last_error` (redacted) and
-`finished_at` (null exactly while pending). The worker is only offered an
-alert's oldest pending delivery, which is what keeps a resolve behind its
-fire. Delivered rows are pruned after a week and failed ones after 90 days;
-an `alert` whose deliveries are all gone and which has ended goes with them.
+An `alert_delivery` is one message to send: `kind` (`fire`, `repeat`,
+`resolve` or `cancel`), the `health` it reports, `status` (`pending`,
+`delivered`, `failed` or `silenced`), `attempts`, `next_attempt_at`,
+`last_error` (redacted), `finished_at` (null exactly while pending) and
+`silence_id` (set exactly when `silenced`: the silence that held it back).
+The worker is only offered an alert's oldest pending delivery, which is
+what keeps a resolve behind its fire. Delivered rows are pruned after a
+week, and failed and silenced ones after 90 days; an `alert` whose
+deliveries are all gone and which has ended goes with them.
+
+### `silence`
+
+[Silences](alerting.md#silences), added by 0013. History, not
+configuration: a row is never deleted, and never changed except to set
+`ended_at`, `ended_by_kind` and `ended_by`, once (a trigger refuses
+anything else).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | integer | Row id. |
+| `node_id`, `subject_kind`, `subject_id`, `component_id`, `notifier_id` | text | The matchers; null matches anything. At least one, or `episode`, is set. |
+| `episode` | integer | The `outage` it is scoped to, or null; it stops applying when that outage ends. |
+| `reason` | text | Not empty. |
+| `created_at`, `created_by_kind`, `created_by` | | When, and the token or person the server authenticated. |
+| `expires_at` | integer | Required, after `created_at`; never moved. |
+| `ended_at`, `ended_by_kind`, `ended_by` | | Set together when someone ends it early. |
+
+A silence applies while `ended_at` is null, `expires_at` is ahead, and its
+episode, if any, is still open.
 
 ### `subscriber`, `subscription`, `subscriber_event` and `subscriber_delivery`
 

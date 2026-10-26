@@ -11,6 +11,7 @@ pub mod incident;
 pub mod link;
 pub mod probe;
 pub mod release;
+pub mod silence;
 pub mod state;
 pub mod status;
 

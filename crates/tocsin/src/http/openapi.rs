@@ -12,8 +12,8 @@ use utoipa::{Modify, OpenApi};
 use utoipa_axum::router::OpenApiRouter;
 
 use super::{
-    AppState, config_status, events, heartbeats, history, incidents, releases, status, subscribers,
-    timeline,
+    AppState, config_status, events, heartbeats, history, incidents, releases, silences, status,
+    subscribers, timeline,
 };
 
 #[derive(OpenApi)]
@@ -37,6 +37,7 @@ use super::{
         (name = config_status::TAG, description = "Whether the configuration reloaded"),
         (name = events::TAG, description = "Changes as they happen, as server-sent events"),
         (name = subscribers::TAG, description = "Email subscriptions to incidents and releases"),
+        (name = silences::TAG, description = "Holding alert messages back until a silence expires"),
     ),
     modifiers(&BearerAuth),
 )]
@@ -66,6 +67,7 @@ pub fn api() -> OpenApiRouter<AppState> {
         .merge(config_status::router())
         .merge(events::router())
         .merge(subscribers::router())
+        .merge(silences::router())
 }
 
 /// The OpenAPI document.

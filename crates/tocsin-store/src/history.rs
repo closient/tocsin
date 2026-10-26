@@ -434,21 +434,36 @@ pub(crate) fn outages(
             ":limit": page.limit,
             ":shown": shown,
         },
-        |row| {
-            Ok(OutageRecord {
-                id: row.get(0)?,
-                node_id: row.get(1)?,
-                check_id: row.get(2)?,
-                component_id: row.get(3)?,
-                health: parse_column(4, &row.get::<_, String>(4)?)?,
-                started_at: Timestamp::from_millis(row.get(5)?),
-                ended_at: row.get::<_, Option<i64>>(6)?.map(Timestamp::from_millis),
-                subject_kind: subject_kind(7, row)?,
-                ending: ending(8, row)?,
-            })
-        },
+        outage_record,
     )?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Outage `id`, if there is one, whatever its check.
+pub(crate) fn outage(conn: &Connection, id: i64) -> Result<Option<OutageRecord>> {
+    Ok(conn
+        .prepare_cached(
+            "SELECT id, node_id, check_id, component_id, health, started_at, ended_at,
+                 subject_kind, ending
+             FROM outage WHERE id = ?1",
+        )?
+        .query_row([id], outage_record)
+        .optional()?)
+}
+
+/// An outage from the nine columns [`OUTAGES`] selects.
+fn outage_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutageRecord> {
+    Ok(OutageRecord {
+        id: row.get(0)?,
+        node_id: row.get(1)?,
+        check_id: row.get(2)?,
+        component_id: row.get(3)?,
+        health: parse_column(4, &row.get::<_, String>(4)?)?,
+        started_at: Timestamp::from_millis(row.get(5)?),
+        ended_at: row.get::<_, Option<i64>>(6)?.map(Timestamp::from_millis),
+        subject_kind: subject_kind(7, row)?,
+        ending: ending(8, row)?,
+    })
 }
 
 #[cfg(test)]

@@ -268,6 +268,18 @@ const ROUTES: &[(&str, Class, &[&str])] = &[
         Class::Refused,
         &["/api/v1/subscribers/1"],
     ),
+    // Silences: every route, reads included, needs the `silence` scope.
+    ("/api/v1/silences", Class::Refused, &["/api/v1/silences"]),
+    (
+        "/api/v1/silences/{id}",
+        Class::Refused,
+        &["/api/v1/silences/1"],
+    ),
+    (
+        "/api/v1/silences/{id}/expire",
+        Class::Refused,
+        &["/api/v1/silences/1/expire"],
+    ),
     // Behind proxy auth.
     ("/admin", Class::Redirect, &["/admin"]),
     ("/admin/", Class::Refused, &["/admin/"]),

@@ -30,6 +30,7 @@ mod query;
 mod release;
 mod reload;
 mod serve;
+mod silence;
 mod slack;
 mod subscribers;
 #[cfg(test)]
@@ -89,6 +90,7 @@ fn run(cli: Cli) -> Result<Report, Failure> {
         Some(Command::Incident { command }) => incident::run(command),
         Some(Command::Maintenance { command }) => incident::run_maintenance(command),
         Some(Command::Release { command }) => release::run(command),
+        Some(Command::Silence { command }) => silence::run(command),
         Some(Command::Notify { command }) => match command {
             NotifyCommand::Test { notifier, config } => notify::test(&notifier, &config),
         },

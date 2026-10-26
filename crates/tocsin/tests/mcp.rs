@@ -59,7 +59,7 @@ components = ["api"]
 [[token]]
 id = "agent"
 secret = "${ENV:AGENT_TOKEN}"
-scopes = ["status:read", "incident", "release"]
+scopes = ["status:read", "incident", "release", "silence"]
 
 [[token]]
 id = "oncall"
@@ -87,9 +87,11 @@ const MINUTE: i64 = 60_000;
 const DAY: i64 = 24 * 60 * MINUTE;
 
 /// Every tool `/mcp` lists; stdio adds `validate_config`.
-const TOOLS: [&str; 12] = [
+const TOOLS: [&str; 15] = [
     "create_incident",
+    "create_silence",
     "discard_incident",
+    "expire_silence",
     "explain_check",
     "get_check_history",
     "get_status",
@@ -97,6 +99,7 @@ const TOOLS: [&str; 12] = [
     "list_incidents",
     "list_outages",
     "list_releases",
+    "list_silences",
     "mark_deployed",
     "publish_release",
     "update_incident",
@@ -510,6 +513,30 @@ async fn drives_every_tool(peer: &Peer<RoleClient>, node: &Node) {
     );
     assert_eq!(releases["releases"][0]["id"], published["id"], "{releases}");
 
+    let in_an_hour = Timestamp::from_millis(now_ms() + 60 * MINUTE).to_string();
+    let silence = ok(
+        peer,
+        "create_silence",
+        json!({
+            "matchers": { "subject": "api-https" },
+            "expires_at": in_an_hour,
+            "reason": "known",
+        }),
+    )
+    .await;
+    assert_eq!(silence["state"], "active", "{silence}");
+    assert_eq!(
+        silence["created_by"],
+        json!({ "kind": "token", "id": "agent" }),
+        "who made it is the token"
+    );
+    let listed = ok(peer, "list_silences", json!({})).await;
+    assert_eq!(listed, node.rest(AGENT, "/api/v1/silences").await);
+    assert_eq!(listed["silences"][0]["id"], silence["id"], "{listed}");
+    let ended = ok(peer, "expire_silence", json!({ "id": silence["id"] })).await;
+    assert_eq!(ended["state"], "ended", "{ended}");
+    assert_eq!(ended["ended_by"], json!({ "kind": "token", "id": "agent" }));
+
     let timeline = ok(peer, "get_timeline", json!({ "since": week_ago })).await;
     assert_eq!(
         timeline,
@@ -537,6 +564,7 @@ async fn drives_every_tool(peer: &Peer<RoleClient>, node: &Node) {
         ("get_timeline", json!({ "limit": 100_000 })),
         ("list_incidents", json!({ "limit": 100_000 })),
         ("list_releases", json!({ "limit": 100_000 })),
+        ("list_silences", json!({ "limit": 100_000 })),
     ] {
         ok(peer, name, arguments).await;
     }
@@ -647,6 +675,7 @@ async fn writes_refuse_without_scope(
     let before = (
         ok(writer, "list_incidents", json!({})).await,
         ok(writer, "list_releases", json!({})).await,
+        ok(writer, "list_silences", json!({})).await,
     );
 
     for (peer, name, arguments, scope) in [
@@ -676,6 +705,18 @@ async fn writes_refuse_without_scope(
         ),
         (
             oncall,
+            "create_silence",
+            json!({
+                "matchers": { "subject": "api-https" },
+                "expires_at": Timestamp::from_millis(now_ms() + 60 * MINUTE).to_string(),
+                "reason": "nope",
+            }),
+            "`silence`",
+        ),
+        (reader, "list_silences", json!({}), "`silence`"),
+        (reader, "expire_silence", json!({ "id": 1 }), "`silence`"),
+        (
+            oncall,
             "get_check_history",
             json!({ "check": "api-https" }),
             "`status:read`",
@@ -694,6 +735,7 @@ async fn writes_refuse_without_scope(
     let after = (
         ok(writer, "list_incidents", json!({})).await,
         ok(writer, "list_releases", json!({})).await,
+        ok(writer, "list_silences", json!({})).await,
     );
     assert_eq!(before, after, "a refused write changed nothing");
     assert!(after.1["releases"][0]["deployed_at"].is_null());

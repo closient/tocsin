@@ -27,6 +27,7 @@ static MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("../migrations/0011_incident_drafts.sql")),
     M::up(include_str!("../migrations/0012_incident_internals.sql")),
     M::up(include_str!("../migrations/0013_open_external_key.sql")),
+    M::up(include_str!("../migrations/0013_silences.sql")),
 ];
 
 /// How long a connection waits for another process's lock before failing.
@@ -271,5 +272,69 @@ mod tests {
             [],
         );
         assert!(reopened.is_err(), "a reopen took a key another holds");
+    }
+
+    /// Migration 13 rebuilds the outbox: every delivery comes through with
+    /// its state, alerts already there count as notified (so their
+    /// resolves are sent), and a silenced delivery must name its silence.
+    #[test]
+    fn deliveries_before_migration_13_are_kept() {
+        type Delivery = (i64, String, i64, Option<String>, Option<i64>);
+        let mut conn = Connection::open_in_memory().unwrap();
+        let migrations = super::migrations();
+        migrations.to_version(&mut conn, 12).unwrap();
+        conn.execute_batch(
+            "INSERT INTO outage (id, node_id, check_id, health, started_at)
+                 VALUES (1, 'node-a', 'web', 'down', 1000);
+             INSERT INTO alert (id, node_id, subject_kind, subject_id, notifier_id, route_id,
+                 outage_id, health, started_at)
+                 VALUES (1, 'node-a', 'check', 'web', 'pager', 'all', 1, 'down', 1000);
+             INSERT INTO alert_delivery (id, alert_id, kind, health, created_at, status,
+                 attempts, next_attempt_at, last_error, finished_at)
+                 VALUES (5, 1, 'fire', 'down', 1000, 'failed', 3, 1500, 'refused', 2000),
+                        (6, 1, 'repeat', 'down', 3000, 'pending', 0, 3000, NULL, NULL);",
+        )
+        .unwrap();
+        migrations.to_latest(&mut conn).unwrap();
+        let rows: Vec<Delivery> = conn
+            .prepare(
+                "SELECT id, status, attempts, last_error, silence_id FROM alert_delivery ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            [
+                (5, "failed".to_owned(), 3, Some("refused".to_owned()), None),
+                (6, "pending".to_owned(), 0, None, None),
+            ]
+        );
+        let notified: i64 = conn
+            .query_row("SELECT notified FROM alert", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(notified, 1);
+        let unnamed = conn.execute(
+            "UPDATE alert_delivery SET status = 'silenced', finished_at = 4000 WHERE id = 6",
+            [],
+        );
+        assert!(unnamed.is_err(), "a delivery was silenced by no silence");
+        let forever = conn.execute(
+            "INSERT INTO silence (subject_id, reason, created_at, created_by_kind, created_by,
+                 expires_at)
+                 VALUES ('web', 'deploying', 1000, 'token', 'ops', 1000)",
+            [],
+        );
+        assert!(forever.is_err(), "a silence did not expire after it began");
+        let everything = conn.execute(
+            "INSERT INTO silence (reason, created_at, created_by_kind, created_by, expires_at)
+                 VALUES ('deploying', 1000, 'token', 'ops', 2000)",
+            [],
+        );
+        assert!(everything.is_err(), "a silence matched every alert");
     }
 }

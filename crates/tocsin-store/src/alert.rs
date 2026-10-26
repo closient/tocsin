@@ -176,6 +176,10 @@ pub struct StoredAlert {
     /// Whether its last message keeps ringing until acknowledged (a
     /// Pushover emergency) and has not been cancelled yet.
     pub ringing: bool,
+    /// Whether a fire or repeat for it has been delivered. A silence holds
+    /// back its resolve only while none has: a receiver that never heard
+    /// of the alert has nothing to resolve.
+    pub notified: bool,
 }
 
 /// A pending delivery that may be sent now: the oldest pending message of
@@ -251,7 +255,8 @@ pub struct FailedDelivery {
 pub struct DeliveryRetention {
     /// Delivered rows older than this go (milliseconds).
     pub delivered_ms: i64,
-    /// Failed rows older than this go (milliseconds).
+    /// Failed and silenced rows older than this go (milliseconds): both
+    /// are kept for someone looking back at what was not sent.
     pub failed_ms: i64,
     /// Most rows one DELETE removes, so queued writes never wait long.
     pub chunk_rows: u32,
@@ -525,8 +530,8 @@ fn fire_alerts(
             .prepare_cached(
                 "INSERT INTO alert (node_id, subject_kind, subject_id, component_id,
                      notifier_id, route_id, outage_id, health, started_at, ringing,
-                     repeat_ms, next_repeat_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12 + ?11)",
+                     repeat_ms, next_repeat_at, notified)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12 + ?11, 0)",
             )?
             .execute(params![
                 outage.identity.node_id,
@@ -660,7 +665,7 @@ fn drop_pending_repeats(conn: &Connection, alert_id: i64) -> Result<()> {
 }
 
 const ALERT_COLUMNS: &str = "a.id, a.node_id, a.subject_kind, a.subject_id, a.component_id,
-    a.notifier_id, a.route_id, a.health, a.started_at, a.ended_at, a.ringing";
+    a.notifier_id, a.route_id, a.health, a.started_at, a.ended_at, a.ringing, a.notified";
 
 fn stored_alert(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<StoredAlert> {
     Ok(StoredAlert {
@@ -675,6 +680,7 @@ fn stored_alert(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<Store
         started_at_ms: row.get(first + 8)?,
         ended_at_ms: row.get(first + 9)?,
         ringing: row.get(first + 10)?,
+        notified: row.get(first + 11)?,
     })
 }
 
@@ -756,7 +762,7 @@ pub(crate) fn queue_repeats(conn: &mut Connection, now_ms: i64) -> Result<usize>
 }
 
 /// Records how an attempt ended. A delivery already finished is left as it
-/// is.
+/// is. A fire or repeat delivered marks its alert notified.
 pub(crate) fn finish(
     conn: &Connection,
     delivery_id: i64,
@@ -764,14 +770,25 @@ pub(crate) fn finish(
     now_ms: i64,
 ) -> Result<()> {
     match outcome {
-        DeliveryOutcome::Delivered => conn
-            .prepare_cached(
+        DeliveryOutcome::Delivered => {
+            // The alert first: a crash between the two leaves it notified
+            // with the message still pending, which only means its resolve
+            // is sent, never that a resolve is held back wrongly.
+            conn.prepare_cached(
+                "UPDATE alert SET notified = 1
+                 WHERE id = (SELECT alert_id FROM alert_delivery
+                             WHERE id = ?1 AND status = 'pending'
+                               AND kind IN ('fire', 'repeat'))",
+            )?
+            .execute(params![delivery_id])?;
+            conn.prepare_cached(
                 "UPDATE alert_delivery
                  SET status = 'delivered', attempts = attempts + 1, finished_at = ?2,
                      last_error = NULL
                  WHERE id = ?1 AND status = 'pending'",
             )?
-            .execute(params![delivery_id, now_ms])?,
+            .execute(params![delivery_id, now_ms])?
+        }
         DeliveryOutcome::Retry { at_ms, error } => conn
             .prepare_cached(
                 "UPDATE alert_delivery
@@ -804,7 +821,7 @@ pub(crate) fn prune_deliveries_chunk(
             "DELETE FROM alert_delivery WHERE id IN (
                  SELECT id FROM alert_delivery
                  WHERE (status = 'delivered' AND finished_at < ?1)
-                    OR (status = 'failed' AND finished_at < ?2)
+                    OR (status IN ('failed', 'silenced') AND finished_at < ?2)
                  LIMIT ?3
              )",
         )?

@@ -30,13 +30,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tocsin_core::incident::{IncidentStatus, NewIncident, NewUpdate, Timestamp};
 use tocsin_core::release::{DeployStamp, NewRelease};
+use tocsin_core::silence::NewSilence;
 
 use crate::client::Api;
 use crate::http::auth::{Caller, scope};
 use crate::http::error::ApiError;
 use crate::http::history::{OutageParams, ResultsParams};
 use crate::http::timeline::{DAY_MS, Window};
-use crate::http::{AppState, history, incidents, now, releases, status, timeline};
+use crate::http::{AppState, history, incidents, now, releases, silences, status, timeline};
 use crate::output::Failure;
 use tocsin_store::Order;
 
@@ -172,6 +173,23 @@ struct ReleasesInput {
     /// Releases per page; default 50, at most 200 (more is cut to 200).
     #[schemars(range(min = 1, max = 200))]
     limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SilencesInput {
+    /// The previous page's `next_before`.
+    before: Option<i64>,
+    /// Silences per page; default 20, at most 100 (more is cut to 100).
+    #[schemars(range(min = 1, max = 100))]
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SilenceInput {
+    /// The silence's id.
+    id: i64,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -597,6 +615,89 @@ impl Server {
         }
     }
 
+    /// Hold back the alert messages the matchers name until `expires_at`,
+    /// which is required and at most `[server] max_silence` away. Every
+    /// matcher given must equal the alert's; give at least one, or an
+    /// `episode` (an outage id from `list_outages`): the silence then ends
+    /// with that outage, so a re-fire after it notifies. Held messages are
+    /// still recorded. Who made it is the token. Needs the `silence` scope.
+    #[tool(name = "create_silence")]
+    async fn create_silence(
+        &self,
+        extensions: Extensions,
+        Parameters(new): Parameters<NewSilence>,
+    ) -> CallToolResult {
+        match &self.backend {
+            Backend::Local(state) => local(
+                async {
+                    let actor = caller(&extensions)?.grant::<scope::Silence>()?;
+                    silences::create(state, new, actor).await
+                }
+                .await,
+            ),
+            Backend::Remote(api) => remote(post(api, &["api", "v1", "silences"], &new).await),
+        }
+    }
+
+    /// Silences, newest first, active or over, each with the messages it
+    /// held back. Needs the `silence` scope.
+    #[tool(name = "list_silences")]
+    async fn list_silences(
+        &self,
+        extensions: Extensions,
+        Parameters(input): Parameters<SilencesInput>,
+    ) -> CallToolResult {
+        let limit = clamp(input.limit, silences::DEFAULT_LIMIT, silences::MAX_LIMIT);
+        match &self.backend {
+            Backend::Local(state) => local(
+                async {
+                    caller(&extensions)?.grant::<scope::Silence>()?;
+                    let query = silences::ListQuery {
+                        before: input.before,
+                        limit: Some(limit),
+                    };
+                    silences::list(state, query).await
+                }
+                .await,
+            ),
+            Backend::Remote(api) => {
+                let mut query = vec![("limit", limit.to_string())];
+                query.extend(input.before.map(|before| ("before", before.to_string())));
+                remote(get(api, &["api", "v1", "silences"], &query, true).await)
+            }
+        }
+    }
+
+    /// End a silence now, before it expires. A silence is never extended:
+    /// make a new one. Needs the `silence` scope.
+    #[tool(name = "expire_silence")]
+    async fn expire_silence(
+        &self,
+        extensions: Extensions,
+        Parameters(input): Parameters<SilenceInput>,
+    ) -> CallToolResult {
+        match &self.backend {
+            Backend::Local(state) => local(
+                async {
+                    let actor = caller(&extensions)?.grant::<scope::Silence>()?;
+                    silences::expire(state, input.id, actor).await
+                }
+                .await,
+            ),
+            Backend::Remote(api) => {
+                let id = input.id.to_string();
+                remote(
+                    post(
+                        api,
+                        &["api", "v1", "silences", id.as_str(), "expire"],
+                        &json!({}),
+                    )
+                    .await,
+                )
+            }
+        }
+    }
+
     /// Validate a configuration folder on this machine, as `tocsin config
     /// check` does: `ok` and what it holds, or every problem found.
     #[tool(name = "validate_config")]
@@ -631,9 +732,11 @@ impl ServerHandler for Server {
         )
         .with_server_info(Implementation::new("tocsin", env!("CARGO_PKG_VERSION")))
         .with_instructions(
-            "tocsin's status, history, incidents and releases. To find what is down and \
-             why: get_status, then list_outages and explain_check, then get_timeline for \
-             what changed just before. Writes need a token with the matching scope.",
+            "tocsin's status, history, incidents, releases and silences. To find what is \
+             down and why: get_status, then list_outages and explain_check, then \
+             get_timeline for what changed just before. To quiet a known outage's alerts, \
+             create_silence with its outage id as `episode`. Writes need a token with the \
+             matching scope.",
         )
     }
 
@@ -774,6 +877,23 @@ mod tests {
     }
 
     #[test]
+    fn a_silence_without_an_expiry_or_with_its_maker_is_refused_by_the_schema() {
+        let tool = Server::tool_router()
+            .get("create_silence")
+            .expect("create_silence is a tool")
+            .clone();
+        let schema = &tool.input_schema;
+        let required = schema["required"].as_array().expect("required fields");
+        assert!(required.contains(&json!("expires_at")), "{schema:?}");
+        assert!(required.contains(&json!("reason")), "{schema:?}");
+        assert_eq!(schema["additionalProperties"], false, "{schema:?}");
+        assert!(
+            schema["properties"].get("created_by").is_none(),
+            "{schema:?}"
+        );
+    }
+
+    #[test]
     fn every_list_tool_advertises_its_page_bound() {
         for (name, max) in [
             ("list_outages", timeline::MAX_LIMIT),
@@ -781,6 +901,7 @@ mod tests {
             ("get_timeline", timeline::MAX_LIMIT),
             ("list_incidents", incidents::MAX_LIMIT),
             ("list_releases", releases::MAX_LIMIT),
+            ("list_silences", silences::MAX_LIMIT),
         ] {
             let tool = Server::tool_router()
                 .get(name)

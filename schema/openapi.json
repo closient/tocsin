@@ -1451,6 +1451,285 @@
         ]
       }
     },
+    "/api/v1/silences": {
+      "get": {
+        "tags": [
+          "silences"
+        ],
+        "summary": "Silences, newest first, active or over, each with the messages it held\nback.",
+        "operationId": "list_silences",
+        "parameters": [
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Only silences older than the previous page's last: its\n`next_before`.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, 1 to 100; default 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SilenceList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks the `silence` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A bad `before` or `limit`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "silences"
+        ],
+        "summary": "Silence the alerts the matchers name until `expires_at`. Every matcher\ngiven must equal the alert's; at least one, or an `episode`, is\nrequired. With an `episode` (an outage id) the silence also ends when\nthat outage does, and the matchers default to its node and subject.\n`expires_at` is required and at most `[server] max_silence` away; who\nmade the silence is the token, never a field.",
+        "operationId": "create_silence",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewSilence"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created; `Location` names it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Silence"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks the `silence` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid fields, by path: no `expires_at`, one past `max_silence`, an unknown subject, or an episode that has ended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/silences/{id}": {
+      "get": {
+        "tags": [
+          "silences"
+        ],
+        "summary": "One silence, with the newest messages it held back.",
+        "operationId": "get_silence",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Silence id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The silence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Silence"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks the `silence` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No silence has that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/silences/{id}/expire": {
+      "post": {
+        "tags": [
+          "silences"
+        ],
+        "summary": "End a silence now, before it expires. One already over is answered as\nit is; a silence is never extended.",
+        "operationId": "expire_silence",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Silence id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ended, or already over",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Silence"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks the `silence` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No silence has that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/status.json": {
       "get": {
         "tags": [
@@ -2280,6 +2559,70 @@
           "down"
         ]
       },
+      "HeldKind": {
+        "type": "string",
+        "description": "Which message a silence held back.",
+        "enum": [
+          "fire",
+          "repeat",
+          "resolve"
+        ]
+      },
+      "HeldMessage": {
+        "type": "object",
+        "description": "One message a silence held back: the alert still fired (or resolved)\nand is recorded; only the sending was skipped.",
+        "required": [
+          "delivery_id",
+          "kind",
+          "health",
+          "at",
+          "alert_id",
+          "node",
+          "subject_kind",
+          "subject",
+          "notifier"
+        ],
+        "properties": {
+          "alert_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The alert's id."
+          },
+          "at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When it was held back."
+          },
+          "delivery_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The delivery's id in the outbox."
+          },
+          "health": {
+            "$ref": "#/components/schemas/Health",
+            "description": "The alert's health when the message was queued."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/HeldKind",
+            "description": "Fire, repeat or resolve."
+          },
+          "node": {
+            "type": "string",
+            "description": "The node that saw the alert."
+          },
+          "notifier": {
+            "type": "string",
+            "description": "The notifier it was for."
+          },
+          "subject": {
+            "type": "string",
+            "description": "The check or heartbeat id."
+          },
+          "subject_kind": {
+            "$ref": "#/components/schemas/CheckKind",
+            "description": "Check or heartbeat."
+          }
+        }
+      },
       "Impact": {
         "type": "string",
         "description": "How badly the affected components are hit. Ordered least to worst.",
@@ -2573,6 +2916,52 @@
           }
         }
       },
+      "Matchers": {
+        "type": "object",
+        "description": "Which alerts a silence holds back: every field set must equal the\nalert's. A field left out matches anything.",
+        "properties": {
+          "component": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A `[[component]]` id: the alert's subject's component when it last\nfired."
+          },
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The node that saw the alert, as its `[server] node_id`."
+          },
+          "notifier": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A `[[notifier]]` id."
+          },
+          "subject": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A `[[check]]` or `[[heartbeat]]` id."
+          },
+          "subject_kind": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CheckKind",
+                "description": "Whether `subject` names a check or a heartbeat."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "NewIncident": {
         "type": "object",
         "description": "`POST /api/v1/incidents`: open an incident or announce maintenance.",
@@ -2735,6 +3124,37 @@
             "description": "1 to 64 characters: ASCII letters, digits and `.`, `_`, `+`, `-`,\nstarting with a letter or digit, such as `v1.4.0` or `2026.10.23+5`.",
             "maxLength": 64,
             "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "NewSilence": {
+        "type": "object",
+        "description": "`POST /api/v1/silences`: hold back the alerts `matchers` names until\n`expires_at`, or until outage `episode` closes if that is sooner.",
+        "required": [
+          "expires_at",
+          "reason"
+        ],
+        "properties": {
+          "episode": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "An outage id: the silence ends when that outage closes (the\nsubject recovers, or moves between degraded and down), so a\nre-fire is sent. The outage must be open."
+          },
+          "expires_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When it stops applying. Required, in the future, and at most\n`[server] max_silence` from now."
+          },
+          "matchers": {
+            "$ref": "#/components/schemas/Matchers",
+            "description": "Which alerts it holds back. At least one field unless `episode` is\nset, which fills in the outage's node, subject kind and subject."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why: shown wherever the silence is."
           }
         },
         "additionalProperties": false
@@ -3074,6 +3494,140 @@
             "description": "What happens next."
           }
         }
+      },
+      "Silence": {
+        "type": "object",
+        "description": "A silence and what it held back.",
+        "required": [
+          "id",
+          "matchers",
+          "reason",
+          "created_at",
+          "created_by",
+          "expires_at",
+          "state",
+          "held",
+          "held_total"
+        ],
+        "properties": {
+          "created_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When it was made."
+          },
+          "created_by": {
+            "$ref": "#/components/schemas/Actor",
+            "description": "Who made it: the caller the server authenticated, never a name\nthe request gave."
+          },
+          "ended_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When someone ended it early, if they did."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ended_by": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Actor",
+                "description": "Who ended it early."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "episode": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The outage it is scoped to, if any."
+          },
+          "episode_ended_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When its episode's outage closed, if it has."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expires_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When it stops applying."
+          },
+          "held": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HeldMessage"
+            },
+            "description": "The messages it held back, newest first: at most the latest 100.\nKept as long as failed deliveries are."
+          },
+          "held_total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many messages it held back that are still kept, including any\npast the 100 in `held`.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Assigned by tocsin; never reused."
+          },
+          "matchers": {
+            "$ref": "#/components/schemas/Matchers",
+            "description": "Which alerts it holds back."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why."
+          },
+          "state": {
+            "$ref": "#/components/schemas/SilenceState",
+            "description": "Whether it applies now, as of the request."
+          }
+        }
+      },
+      "SilenceList": {
+        "type": "object",
+        "description": "`GET /api/v1/silences`: one page of silences.",
+        "required": [
+          "silences"
+        ],
+        "properties": {
+          "next_before": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Pass as `before` to get the next page; `null` on the last page."
+          },
+          "silences": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Silence"
+            },
+            "description": "Newest first."
+          }
+        }
+      },
+      "SilenceState": {
+        "type": "string",
+        "description": "Whether a silence holds back alerts now, and if not, what ended it.",
+        "enum": [
+          "active",
+          "expired",
+          "ended",
+          "episode_ended"
+        ]
       },
       "StatusDocument": {
         "type": "object",
@@ -3496,6 +4050,10 @@
     {
       "name": "subscribers",
       "description": "Email subscriptions to incidents and releases"
+    },
+    {
+      "name": "silences",
+      "description": "Holding alert messages back until a silence expires"
     }
   ]
 }

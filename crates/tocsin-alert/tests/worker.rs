@@ -2,8 +2,8 @@
 
 //! The delivery worker against a real store, on a paused clock: retries
 //! and their backoff, a resolve that waits for its fire, repeats, failed
-//! deliveries, a notifier that hangs, and a restart with a delivery still
-//! queued.
+//! deliveries, a notifier that hangs, a restart with a delivery still
+//! queued, and silences holding messages back.
 //!
 //! Tests wait on the fakes' channel, never on a tokio timeout: while the
 //! store's writer thread works, a paused clock jumps to the next timer, and
@@ -25,6 +25,8 @@ use tocsin_alert::{
 };
 use tocsin_core::Health;
 use tocsin_core::config::Config;
+use tocsin_core::incident::{Actor, Timestamp};
+use tocsin_core::silence::{HeldKind, Matchers, NewSilence, SilenceState};
 use tocsin_engine::ports::{Clock, History, TokioClock};
 use tocsin_store::{DeliveryKind, NewCheckResult, OutageChange, SubjectKind};
 use tokio::sync::mpsc;
@@ -847,5 +849,206 @@ fn an_idle_worker_writes_nothing_until_a_repeat_is_due() {
         );
         assert!(fixture.store.writes_queued() > settled);
         running.alerter.stop().await;
+    });
+}
+
+/// Silences check `api` (with `episode`, only during that outage) from
+/// `at` until `expires_at`; resolves with the silence's id.
+async fn silence(fixture: &Fixture, episode: Option<i64>, at: i64, expires_at: i64) -> i64 {
+    let new = NewSilence {
+        matchers: Matchers {
+            subject: Some("api".to_owned()),
+            ..Matchers::default()
+        },
+        episode,
+        expires_at: Timestamp::from_millis(expires_at),
+        reason: "deploying the api".to_owned(),
+    };
+    fixture
+        .store
+        .create_silence(new, Actor::token("pager"), Timestamp::from_millis(at))
+        .await
+        .unwrap()
+        .id
+}
+
+/// What silence `id` has held back, oldest first, as (kind, ms after T0),
+/// once it has held `count`. Waits on the paused clock, a second at a time,
+/// for the worker to get there.
+async fn held(fixture: &Fixture, id: i64, count: usize) -> Vec<(HeldKind, i64)> {
+    loop {
+        let silence = fixture
+            .store
+            .silence(id, Timestamp::from_millis(T0))
+            .await
+            .unwrap()
+            .unwrap();
+        if silence.held.len() >= count {
+            return silence
+                .held
+                .iter()
+                .rev()
+                .map(|held| (held.kind, held.at.as_millis() - T0))
+                .collect();
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+#[test]
+fn a_silenced_alert_is_recorded_and_never_sent() {
+    paused(async {
+        let fixture = Fixture::new();
+        let config = config(&monitored(&["slack"], ""));
+        let (sender, mut receiver) = channel();
+        let slack = Fake::accepting("slack", &sender);
+        let running = start(
+            &fixture,
+            &config,
+            &[("slack", Arc::clone(&slack) as Arc<dyn Notifier>)],
+            &AlertMetrics::default(),
+        );
+        let id = silence(&fixture, None, T0, T0 + 24 * HOUR_MS).await;
+
+        let outage = running.change(down(T0)).await.unwrap();
+        assert_eq!(held(&fixture, id, 1).await, [(HeldKind::Fire, 0)]);
+        // Nothing was ever sent, so the resolve has nothing to answer.
+        running.change(up(outage, T0 + 90_000)).await;
+        let seen = held(&fixture, id, 2).await;
+        running.alerter.stop().await;
+
+        assert_eq!(seen[0], (HeldKind::Fire, 0));
+        assert_eq!(seen[1].0, HeldKind::Resolve);
+        assert!(slack.seen().is_empty(), "{:?}", slack.seen());
+        assert!(receiver.try_recv().is_err());
+        // Held back, not failed: nothing for anyone to retry.
+        assert_eq!(fixture.store.failed_deliveries(10).await.unwrap(), []);
+    });
+}
+
+#[test]
+fn a_silence_that_expires_lets_the_next_repeat_through() {
+    paused(async {
+        let fixture = Fixture::new();
+        let config = config(&monitored(&["slack"], "repeat = \"1h\""));
+        let (sender, mut receiver) = channel();
+        let slack: Arc<dyn Notifier> = Fake::accepting("slack", &sender);
+        let running = start(
+            &fixture,
+            &config,
+            &[("slack", slack)],
+            &AlertMetrics::default(),
+        );
+        let id = silence(&fixture, None, T0, T0 + 90 * 60_000).await;
+
+        let outage = running.change(down(T0)).await.unwrap();
+        let repeat = next_from(&mut receiver, "slack").await;
+        // Delivered a repeat, so the alert's resolve is sent.
+        running.change(up(outage, T0 + 2 * HOUR_MS + 1_000)).await;
+        let resolve = next_from(&mut receiver, "slack").await;
+        running.alerter.stop().await;
+
+        assert_eq!(
+            (repeat.event(), repeat.alert.sent_at_ms - T0),
+            (AlertEvent::Repeat, 2 * HOUR_MS)
+        );
+        assert_eq!(resolve.event(), AlertEvent::Resolve);
+        let seen = held(&fixture, id, 2).await;
+        let kinds: Vec<HeldKind> = seen.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(kinds, [HeldKind::Fire, HeldKind::Repeat]);
+        assert!(seen[1].1 < 90 * 60_000, "held after it expired: {seen:?}");
+    });
+}
+
+#[test]
+fn an_episode_silence_ends_with_its_outage_and_the_re_fire_notifies() {
+    paused(async {
+        let fixture = Fixture::new();
+        let config = config(&monitored(
+            &["slack"],
+            "repeat = \"1h\"\nnotify_on = \"degraded\"",
+        ));
+        let (sender, mut receiver) = channel();
+        let slack: Arc<dyn Notifier> = Fake::accepting("slack", &sender);
+        let running = start(
+            &fixture,
+            &config,
+            &[("slack", slack)],
+            &AlertMetrics::default(),
+        );
+
+        let degraded = running
+            .change(failing("api", Health::Degraded, T0))
+            .await
+            .unwrap();
+        let fire = next_from(&mut receiver, "slack").await;
+        assert_eq!(fire.event(), AlertEvent::Fire);
+        // Acknowledged for this outage only, for a day.
+        let id = silence(&fixture, Some(degraded), T0, T0 + 24 * HOUR_MS).await;
+        // The repeat due an hour in is held back. When exactly the worker
+        // got to it depends on how far the paused clock ran meanwhile.
+        tokio::time::sleep(Duration::from_mins(90)).await;
+        let seen = held(&fixture, id, 1).await;
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, HeldKind::Repeat);
+        assert!(seen[0].1 >= HOUR_MS, "{seen:?}");
+
+        // Going down ends the degraded outage and opens another: the
+        // silence is over, and the re-fire is sent.
+        let down = running
+            .change(turns(degraded, Health::Down, T0 + 2 * HOUR_MS))
+            .await
+            .unwrap();
+        let refire = next_from(&mut receiver, "slack").await;
+        running.change(up(down, T0 + 3 * HOUR_MS)).await;
+        let resolve = next_from(&mut receiver, "slack").await;
+        running.alerter.stop().await;
+
+        assert_eq!(
+            (refire.event(), refire.alert.health),
+            (AlertEvent::Fire, Health::Down)
+        );
+        assert_eq!(resolve.event(), AlertEvent::Resolve);
+        let silence = fixture
+            .store
+            .silence(id, Timestamp::from_millis(T0 + 3 * HOUR_MS))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(silence.state, SilenceState::EpisodeEnded);
+        assert_eq!(silence.held_total, 1);
+    });
+}
+
+#[test]
+fn a_silence_never_holds_back_the_resolve_of_an_alert_already_sent() {
+    paused(async {
+        let fixture = Fixture::new();
+        let config = config(&monitored(&["slack"], ""));
+        let (sender, mut receiver) = channel();
+        let slack: Arc<dyn Notifier> = Fake::accepting("slack", &sender);
+        let running = start(
+            &fixture,
+            &config,
+            &[("slack", slack)],
+            &AlertMetrics::default(),
+        );
+
+        let outage = running.change(down(T0)).await.unwrap();
+        let fire = next_from(&mut receiver, "slack").await;
+        let id = silence(&fixture, None, T0, T0 + 24 * HOUR_MS).await;
+        running.change(up(outage, T0 + 60_000)).await;
+        let resolve = next_from(&mut receiver, "slack").await;
+        running.alerter.stop().await;
+
+        assert_eq!(fire.event(), AlertEvent::Fire);
+        assert_eq!(resolve.event(), AlertEvent::Resolve);
+        let silence = fixture
+            .store
+            .silence(id, Timestamp::from_millis(T0 + 60_000))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(silence.held_total, 0);
     });
 }

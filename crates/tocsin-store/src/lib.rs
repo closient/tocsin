@@ -23,6 +23,7 @@ mod readers;
 mod release;
 mod rollup;
 mod schema;
+mod silence;
 mod slack;
 mod stats;
 mod subscriber;
@@ -40,6 +41,7 @@ use tocsin_core::incident::{
     Actor, Incident, IncidentEdit, IncidentInternals, NewIncident, NewUpdate, Timestamp,
 };
 use tocsin_core::release::{DeployStamp, NewRelease, Release, Timeline};
+use tocsin_core::silence::{Matchers, NewSilence, Silence};
 use tocsin_core::status::{CheckResult, OutageRecord};
 
 pub use crate::alert::{
@@ -78,7 +80,7 @@ const READERS: usize = 4;
 pub const FUTURE_TOLERANCE: Duration = Duration::from_hours(1);
 
 /// The tables `tocsin db info` counts, in schema order.
-pub const TABLES: [&str; 19] = [
+pub const TABLES: [&str; 20] = [
     "check_result",
     "outage",
     "daily_rollup",
@@ -98,6 +100,7 @@ pub const TABLES: [&str; 19] = [
     "slack_connection",
     "slack_subscription",
     "slack_delivery",
+    "silence",
 ];
 
 /// One probe run, as handed to [`Store::append`].
@@ -527,6 +530,104 @@ impl Store {
         self.writer
             .run(move |conn| alert::finish(conn, delivery_id, &outcome, now_ms))
             .await
+    }
+
+    /// Records a silence, made by `actor` at `at`. The caller has
+    /// validated `new` and scoped it to its episode, if it has one.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] when the episode's outage has ended or does not
+    /// exist; a value breaks a constraint, or the write fails.
+    pub async fn create_silence(
+        &self,
+        new: NewSilence,
+        actor: Actor,
+        at: Timestamp,
+    ) -> Result<Silence> {
+        self.writer
+            .run(move |conn| silence::insert(conn, &new, &actor, at))
+            .await
+    }
+
+    /// Silence `id` as of `now`, with the messages it held back.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn silence(&self, id: i64, now: Timestamp) -> Result<Option<Silence>> {
+        self.read(move |conn| silence::load(conn, id, now)).await
+    }
+
+    /// Up to `limit` silences as of `now`, newest first; with `before`,
+    /// only those with a lower id.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn silences(
+        &self,
+        before: Option<i64>,
+        limit: u32,
+        now: Timestamp,
+    ) -> Result<Vec<Silence>> {
+        self.read(move |conn| silence::list(conn, before, limit, now))
+            .await
+    }
+
+    /// Ends silence `id` early, by `actor` at `at`, and reads it back. A
+    /// silence already over is left as it is. `None` if there is no such
+    /// silence.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn end_silence(
+        &self,
+        id: i64,
+        actor: Actor,
+        at: Timestamp,
+    ) -> Result<Option<Silence>> {
+        self.writer
+            .run(move |conn| silence::end(conn, id, &actor, at))
+            .await
+    }
+
+    /// Every silence that applies at `now`, by id.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn active_silences(&self, now: Timestamp) -> Result<Vec<(i64, Matchers)>> {
+        self.read(move |conn| silence::active(conn, now)).await
+    }
+
+    /// Holds back pending delivery `delivery_id` for silence `silence_id`
+    /// instead of sending it. `false` when it no longer may be: the
+    /// delivery is no longer pending, is a cancel or the resolve of an
+    /// alert already notified, or the silence has stopped applying.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn hold_delivery(
+        &self,
+        delivery_id: i64,
+        silence_id: i64,
+        now: Timestamp,
+    ) -> Result<bool> {
+        self.writer
+            .run(move |conn| silence::hold(conn, delivery_id, silence_id, now))
+            .await
+    }
+
+    /// Outage `id`, if there is one.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn outage(&self, id: i64) -> Result<Option<OutageRecord>> {
+        self.read(move |conn| history::outage(conn, id)).await
     }
 
     /// Deletes finished deliveries older than `retention` allows, then

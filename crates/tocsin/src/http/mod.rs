@@ -23,6 +23,7 @@ pub mod metrics;
 pub mod openapi;
 pub mod public;
 pub mod releases;
+pub mod silences;
 pub mod status;
 pub mod subscribers;
 pub mod timeline;
@@ -33,6 +34,8 @@ mod metrics_tests;
 mod read_tests;
 #[cfg(test)]
 mod release_tests;
+#[cfg(test)]
+mod silence_tests;
 #[cfg(test)]
 mod tests;
 

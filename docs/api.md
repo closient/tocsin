@@ -119,6 +119,10 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
 | `GET /api/v1/openapi.json` | none | 200, the OpenAPI document |
 | `GET /llms.txt` | none | 200, `text/plain` |
 | `GET /metrics` | `status:read` | 200, Prometheus text format 0.0.4; not in the OpenAPI document, see [metrics.md](metrics.md) |
+| `GET /api/v1/silences?before=&limit=` | `silence` | 200, `{silences, next_before}`, newest first; see [alerting.md](alerting.md#silences) |
+| `GET /api/v1/silences/{id}` | `silence` | 200, the silence with the messages it held back |
+| `POST /api/v1/silences` | `silence` | 201, the silence; see [alerting.md](alerting.md#silences) |
+| `POST /api/v1/silences/{id}/expire` | `silence` | 200, the silence, ended |
 | `POST /api/v1/subscribers` | none | 202, the same for every address; 429 past a limit. Only with `[subscribers]`; see [subscribers.md](subscribers.md#signing-up) |
 | `GET /api/v1/subscribers?after=&limit=` | `subscribers:admin` | 200, `{subscribers, next_after, totals}`; see [subscribers.md](subscribers.md#for-operators) |
 | `DELETE /api/v1/subscribers/{id}` | `subscribers:admin` | 204 |

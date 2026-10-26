@@ -170,6 +170,11 @@ pub struct Server {
     #[serde(default = "default_max_concurrent_checks")]
     #[schemars(range(min = 1))]
     pub max_concurrent_checks: u32,
+    /// The longest a silence may last: a silence's `expires_at` must be
+    /// at most this far ahead when it is made. Nothing extends a
+    /// silence, so a longer one is a new one, made by someone.
+    #[serde(default = "default_max_silence")]
+    pub max_silence: Duration,
     /// Sender settings for every email tocsin sends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<ServerEmail>,
@@ -187,6 +192,7 @@ impl Default for Server {
             data_dir: None,
             retention_days: default_retention_days(),
             max_concurrent_checks: default_max_concurrent_checks(),
+            max_silence: default_max_silence(),
             email: None,
             auth: None,
         }
@@ -203,6 +209,10 @@ fn default_retention_days() -> u32 {
 
 fn default_max_concurrent_checks() -> u32 {
     64
+}
+
+fn default_max_silence() -> Duration {
+    Duration::from_secs(24 * 60 * 60)
 }
 
 /// `[server.email]`. Required, with `from`, `reply_to` and `smtp_url`,
@@ -585,6 +595,9 @@ pub enum TokenScope {
     /// Listing, counting and removing email subscribers.
     #[serde(rename = "subscribers:admin")]
     SubscribersAdmin,
+    /// Silences: make, list and end them. Every silence records the token
+    /// or person that made it.
+    Silence,
 }
 
 /// The JSON Schema for one configuration file ([`ConfigFile`]), in draft 7

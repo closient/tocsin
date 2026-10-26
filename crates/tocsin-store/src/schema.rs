@@ -275,8 +275,8 @@ mod tests {
     }
 
     /// Migration 13 rebuilds the outbox: every delivery comes through with
-    /// its state, alerts already there count as notified (so their
-    /// resolves are sent), and a silenced delivery must name its silence.
+    /// its state, alerts already there count as notified and attempted (so
+    /// their resolves and cancels are sent), and a silenced delivery must name its silence.
     #[test]
     fn deliveries_before_migration_13_are_kept() {
         type Delivery = (i64, String, i64, Option<String>, Option<i64>);
@@ -314,10 +314,12 @@ mod tests {
                 (6, "pending".to_owned(), 0, None, None),
             ]
         );
-        let notified: i64 = conn
-            .query_row("SELECT notified FROM alert", [], |row| row.get(0))
+        let marks: (i64, i64) = conn
+            .query_row("SELECT notified, attempted FROM alert", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
             .unwrap();
-        assert_eq!(notified, 1);
+        assert_eq!(marks, (1, 1));
         let unnamed = conn.execute(
             "UPDATE alert_delivery SET status = 'silenced', finished_at = 4000 WHERE id = 6",
             [],

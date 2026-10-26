@@ -33,7 +33,10 @@ CREATE TABLE silence (
     CHECK (
         node_id IS NOT NULL OR subject_kind IS NOT NULL OR subject_id IS NOT NULL
         OR component_id IS NOT NULL OR notifier_id IS NOT NULL OR episode IS NOT NULL
-    )
+    ),
+    -- An episode silence names its outage's node and subject, so it can
+    -- never hold back another subject's alerts.
+    CHECK (episode IS NULL OR (node_id IS NOT NULL AND subject_id IS NOT NULL))
 ) STRICT;
 
 CREATE INDEX silence_unended ON silence (expires_at) WHERE ended_at IS NULL;
@@ -59,11 +62,19 @@ BEGIN
     SELECT RAISE(ABORT, 'a silence can only have ended_at set, once');
 END;
 
--- Whether any fire or repeat for the alert has been delivered. A resolve
--- is held back only when nothing was: the receiver never heard of the
--- alert, so a resolve would answer nothing. Alerts from before this column
--- count as delivered, so their resolves are always sent.
+-- Whether a fire or repeat for the alert has been delivered. An open
+-- alert whose messages a silence held back, and that nothing reached, is
+-- fired afresh once no silence applies.
 ALTER TABLE alert ADD COLUMN notified INTEGER NOT NULL DEFAULT 1 CHECK (notified IN (0, 1));
+
+-- Whether a send of a fire or repeat for the alert was ever started, set
+-- before the send, so a send whose answer was lost still counts. Until
+-- one was, the receiver cannot have heard of the alert: a resolve after a
+-- held fire is held too, and a cancel is dropped, as nothing rang.
+-- Alerts from before these columns count as both, so their resolves and
+-- cancels are always sent.
+ALTER TABLE alert ADD COLUMN attempted INTEGER NOT NULL DEFAULT 1
+    CHECK (attempted IN (0, 1) AND attempted >= notified);
 
 -- The outbox gains a fourth end state, silenced, naming the silence that
 -- held the message back. SQLite cannot change a CHECK in place, so the

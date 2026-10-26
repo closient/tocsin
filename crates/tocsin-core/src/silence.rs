@@ -92,7 +92,7 @@ impl Matchers {
 }
 
 /// `POST /api/v1/silences`: hold back the alerts `matchers` names until
-/// `expires_at`, or until outage `episode` closes if that is sooner.
+/// it expires, or until outage `episode` closes if that is sooner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NewSilence {
@@ -105,9 +105,16 @@ pub struct NewSilence {
     /// re-fire is sent. The outage must be open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub episode: Option<i64>,
-    /// When it stops applying. Required, in the future, and at most
-    /// `[server] max_silence` from now.
-    pub expires_at: Timestamp,
+    /// When it stops applying: in the future, and at most `[server]
+    /// max_silence` from now. Give this or `expires_in`, not both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Timestamp>,
+    /// How long from now it applies, such as `"30m"` or `"1h30m"`, counted
+    /// from the server's clock: at most `[server] max_silence`. Give this
+    /// or `expires_at`, not both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, pattern = "^([0-9]+(ms|s|m|h|d))+$", example = "30m")]
+    pub expires_in: Option<Duration>,
     /// Why: shown wherever the silence is.
     pub reason: String,
 }
@@ -163,7 +170,7 @@ impl NewSilence {
     }
 
     /// Checks every rule a new silence follows at `now`, with silences
-    /// capped at `max`.
+    /// capped at `max`, and returns when it expires.
     ///
     /// # Errors
     ///
@@ -173,20 +180,59 @@ impl NewSilence {
         now: Timestamp,
         max: Duration,
         known: &Known<'_>,
-    ) -> Result<(), Vec<FieldError>> {
+    ) -> Result<Timestamp, Vec<FieldError>> {
         let mut errors = Vec::new();
         check_text("reason", &self.reason, &mut errors);
-        let lasts = self.expires_at.as_millis().saturating_sub(now.as_millis());
+        let expires_at = self.expiry(now, max, &mut errors);
+        self.check_matchers(known, &mut errors);
+        into_result(errors)?;
+        expires_at.ok_or_else(|| vec![FieldError::new("expires_at", "is required")])
+    }
+
+    /// When it expires, from `expires_at` or `expires_in` counted from
+    /// `now`, if that is ahead and within `max`.
+    fn expiry(
+        &self,
+        now: Timestamp,
+        max: Duration,
+        errors: &mut Vec<FieldError>,
+    ) -> Option<Timestamp> {
+        let (path, expires_at) = match (self.expires_at, self.expires_in) {
+            (Some(_), Some(_)) => {
+                errors.push(FieldError::new(
+                    "expires_in",
+                    "give expires_at or expires_in, not both",
+                ));
+                return None;
+            }
+            (None, None) => {
+                errors.push(FieldError::new(
+                    "expires_at",
+                    "required: give expires_at or expires_in; a silence always ends",
+                ));
+                return None;
+            }
+            (Some(at), None) => ("expires_at", at),
+            (None, Some(lasts)) => {
+                let lasts = i64::try_from(lasts.get().as_millis()).unwrap_or(i64::MAX);
+                (
+                    "expires_in",
+                    Timestamp::from_millis(now.as_millis().saturating_add(lasts)),
+                )
+            }
+        };
+        let lasts = expires_at.as_millis().saturating_sub(now.as_millis());
         if lasts <= 0 {
-            errors.push(FieldError::new("expires_at", "must be in the future"));
+            errors.push(FieldError::new(path, "must be in the future"));
         } else if u128::from(lasts.unsigned_abs()) > max.get().as_millis() {
             errors.push(FieldError::new(
-                "expires_at",
+                path,
                 format!("must be at most {max} from now (`[server] max_silence`)"),
             ));
+        } else {
+            return Some(expires_at);
         }
-        self.check_matchers(known, &mut errors);
-        into_result(errors)
+        None
     }
 
     fn check_matchers(&self, known: &Known<'_>, errors: &mut Vec<FieldError>) {
@@ -271,7 +317,8 @@ text_enum! {
         Fire => "fire",
         /// The alert was still firing.
         Repeat => "repeat",
-        /// The alert ended, before any message for it was sent.
+        /// The alert ended before any send of its fire or repeats was
+        /// attempted.
         Resolve => "resolve",
     }
 }
@@ -391,7 +438,8 @@ mod tests {
                 ..Matchers::default()
             },
             episode: None,
-            expires_at: Timestamp::from_millis(NOW + expires_in_ms),
+            expires_at: Some(Timestamp::from_millis(NOW + expires_in_ms)),
+            expires_in: None,
             reason: "deploying".to_owned(),
         }
     }
@@ -461,12 +509,23 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_expiry_does_not_parse() {
-        let error = serde_json::from_str::<NewSilence>(
-            r#"{"matchers": {"subject": "web"}, "reason": "deploying"}"#,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("expires_at"), "{error}");
+    fn an_expiry_is_required_once() {
+        let mut silence = new(60_000);
+        silence.expires_at = None;
+        assert_eq!(paths(&silence), ["expires_at"]);
+        silence.expires_in = Some(Duration::from_secs(60));
+        assert_eq!(
+            silence.validate(Timestamp::from_millis(NOW), DAY, &known()),
+            Ok(Timestamp::from_millis(NOW + 60_000)),
+            "expires_in counts from the server's now"
+        );
+        silence.expires_in = Some(Duration::from_secs(86_401));
+        assert_eq!(paths(&silence), ["expires_in"], "capped like expires_at");
+        silence.expires_in = Some(Duration::from_secs(0));
+        assert_eq!(paths(&silence), ["expires_in"]);
+        silence.expires_in = Some(Duration::from_secs(60));
+        silence.expires_at = Some(Timestamp::from_millis(NOW + 60_000));
+        assert_eq!(paths(&silence), ["expires_in"], "not both");
     }
 
     fn outage(ended: bool) -> OutageRecord {

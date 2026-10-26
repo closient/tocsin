@@ -100,13 +100,15 @@ fn complete(conn: &Connection, silences: &mut [Silence]) -> Result<()> {
     Ok(())
 }
 
-/// Inserts `new`, made by `actor` at `at`, and reads it back. The caller
-/// has validated `new` and scoped it to its episode; the episode is
+/// Inserts `new`, made by `actor` at `at` to last until `expires_at`, and
+/// reads it back. The caller has validated `new`, resolved its expiry
+/// against `at`, and scoped it to its episode; the episode is
 /// checked again here, in the same transaction, so an outage that closed
 /// since is refused rather than silenced after the fact.
 pub(crate) fn insert(
     conn: &mut Connection,
     new: &NewSilence,
+    expires_at: Timestamp,
     actor: &Actor,
     at: Timestamp,
 ) -> Result<Silence> {
@@ -152,7 +154,7 @@ pub(crate) fn insert(
             at.as_millis(),
             actor.kind.as_str(),
             actor.id,
-            new.expires_at.as_millis(),
+            expires_at.as_millis(),
         ])?;
     let id = transaction.last_insert_rowid();
     let silence = load(&transaction, id, at)?;
@@ -228,23 +230,43 @@ pub(crate) fn end(
     Ok(silence)
 }
 
-/// Every silence that applies at `now`: its id and matchers.
-pub(crate) fn active(conn: &Connection, now: Timestamp) -> Result<Vec<(i64, Matchers)>> {
+/// A silence that applies now, as the delivery worker needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveSilence {
+    /// Its id.
+    pub id: i64,
+    /// What it matches.
+    pub matchers: Matchers,
+    /// The outage it is scoped to, if any: it then holds only that
+    /// outage's messages.
+    pub episode: Option<i64>,
+    /// When it stops applying, unless ended first.
+    pub expires_at: Timestamp,
+}
+
+/// Every silence that applies at `now`.
+pub(crate) fn active(conn: &Connection, now: Timestamp) -> Result<Vec<ActiveSilence>> {
     let mut statement = conn.prepare_cached(&format!(
         "SELECT {SILENCE_COLUMNS} FROM {SILENCE_FROM} WHERE {ACTIVE} ORDER BY s.id"
     ))?;
     let rows = statement.query_map(rusqlite::named_params! { ":now": now.as_millis() }, |row| {
         let silence = silence_row(row, now)?;
-        Ok((silence.id, silence.matchers))
+        Ok(ActiveSilence {
+            id: silence.id,
+            matchers: silence.matchers,
+            episode: silence.episode,
+            expires_at: silence.expires_at,
+        })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Marks pending delivery `delivery_id` held back by silence `silence_id`
-/// at `now`, instead of sending it. Refused (`false`) unless the delivery
-/// is still pending, is not a cancel, is not the resolve of an alert
-/// already notified, and the silence still applies at `now`: the worker
-/// read both a moment ago, and either may have moved since.
+/// Marks pending fire or repeat `delivery_id` held back by silence
+/// `silence_id` at `now`, instead of sending it. Refused (`false`) unless
+/// the delivery is still pending, the silence still applies at `now`, and
+/// a silence scoped to an episode is scoped to the outage the alert fired
+/// for: the worker read all three a moment ago, and any may have moved
+/// since.
 pub(crate) fn hold(
     conn: &Connection,
     delivery_id: i64,
@@ -255,10 +277,12 @@ pub(crate) fn hold(
         .prepare_cached(&format!(
             "UPDATE alert_delivery SET status = 'silenced', silence_id = :silence,
                  finished_at = :now
-             WHERE id = :delivery AND status = 'pending' AND kind <> 'cancel'
-               AND (kind <> 'resolve'
-                    OR NOT (SELECT notified FROM alert a WHERE a.id = alert_delivery.alert_id))
-               AND EXISTS (SELECT 1 FROM {SILENCE_FROM} WHERE s.id = :silence AND {ACTIVE})"
+             WHERE id = :delivery AND status = 'pending' AND kind IN ('fire', 'repeat')
+               AND EXISTS (SELECT 1 FROM {SILENCE_FROM}
+                           WHERE s.id = :silence AND {ACTIVE}
+                             AND (s.episode IS NULL OR s.episode =
+                                  (SELECT a.outage_id FROM alert a
+                                   WHERE a.id = alert_delivery.alert_id)))"
         ))?
         .execute(rusqlite::named_params! {
             ":delivery": delivery_id,
@@ -266,4 +290,35 @@ pub(crate) fn hold(
             ":now": now.as_millis(),
         })?;
     Ok(changed == 1)
+}
+
+/// Marks pending resolve `delivery_id` held back at `now` if the receiver
+/// cannot have heard of its alert: no send of a fire or repeat for it was
+/// ever attempted, and the latest one was held back by a silence. It is
+/// held under that silence, whether or not the silence still applies;
+/// anything else (a send attempted, a fire that is not silenced, a row
+/// pruned) sends it. The silence it was held under, or `None` if it goes.
+pub(crate) fn hold_resolve(
+    conn: &Connection,
+    delivery_id: i64,
+    now: Timestamp,
+) -> Result<Option<i64>> {
+    const LATEST_FIRE: &str = "FROM alert_delivery f
+        WHERE f.alert_id = alert_delivery.alert_id AND f.kind IN ('fire', 'repeat')
+          AND f.id < alert_delivery.id
+        ORDER BY f.id DESC LIMIT 1";
+    Ok(conn
+        .prepare_cached(&format!(
+            "UPDATE alert_delivery SET status = 'silenced', finished_at = :now,
+                 silence_id = (SELECT f.silence_id {LATEST_FIRE})
+             WHERE id = :delivery AND status = 'pending' AND kind = 'resolve'
+               AND NOT (SELECT a.attempted FROM alert a WHERE a.id = alert_delivery.alert_id)
+               AND (SELECT f.status {LATEST_FIRE}) = 'silenced'
+             RETURNING silence_id"
+        ))?
+        .query_row(
+            rusqlite::named_params! { ":delivery": delivery_id, ":now": now.as_millis() },
+            |row| row.get(0),
+        )
+        .optional()?)
 }

@@ -615,8 +615,10 @@ impl Server {
         }
     }
 
-    /// Hold back the alert messages the matchers name until `expires_at`,
-    /// which is required and at most `[server] max_silence` away. Every
+    /// Hold back the alert messages the matchers name until it expires:
+    /// give `expires_in` (such as `"30m"`, counted from the server's clock)
+    /// or `expires_at`, exactly one, at most `[server] max_silence` away.
+    /// Every
     /// matcher given must equal the alert's; give at least one, or an
     /// `episode` (an outage id from `list_outages`): the silence then ends
     /// with that outage, so a re-fire after it notifies. Held messages are
@@ -884,8 +886,13 @@ mod tests {
             .clone();
         let schema = &tool.input_schema;
         let required = schema["required"].as_array().expect("required fields");
-        assert!(required.contains(&json!("expires_at")), "{schema:?}");
         assert!(required.contains(&json!("reason")), "{schema:?}");
+        // Exactly one of the two is required, which the server enforces:
+        // both are offered, neither alone is required.
+        for expiry in ["expires_at", "expires_in"] {
+            assert!(schema["properties"].get(expiry).is_some(), "{schema:?}");
+            assert!(!required.contains(&json!(expiry)), "{schema:?}");
+        }
         assert_eq!(schema["additionalProperties"], false, "{schema:?}");
         assert!(
             schema["properties"].get("created_by").is_none(),

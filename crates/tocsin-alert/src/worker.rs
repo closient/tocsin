@@ -15,13 +15,23 @@
 //! with full jitter, and a 429 or 503 `Retry-After` pauses the notifier
 //! for as long as it asks.
 //!
-//! A message an active silence matches is not sent: it is marked silenced
-//! in the outbox, naming the silence, and the alert's next message becomes
-//! its head. Silences are looked up as each message comes due, not when the
-//! engine fires, so a silence made while an alert fires holds back its
-//! repeats, and one that ends lets the next message through. Cancels are
-//! never held back, and neither is the resolve of an alert whose fire or
-//! repeat was delivered: every message a receiver saw is answered.
+//! A fire or repeat an active silence matches is not sent: it is marked
+//! silenced in the outbox, naming the silence, and the alert's next message
+//! becomes its head. Silences are looked up as each message comes due, not
+//! when the engine fires, so a silence made while an alert fires holds back
+//! its repeats. A silence scoped to an episode holds only the messages of
+//! the outage it names.
+//!
+//! Every message a receiver may have seen is answered. An alert is marked
+//! attempted before the first send of its fire or repeats starts, so a send
+//! whose answer was lost counts too. Its resolve is held back only while
+//! nothing was ever attempted and its latest fire or repeat was held back,
+//! under that fire's silence, live or not; anything else sends it. A cancel
+//! is never held back, but one for an alert never attempted is dropped:
+//! nothing rang. When a silence stops applying (it expires, is ended, or
+//! its matchers no longer cover the alert) to an open alert it kept
+//! entirely quiet, the alert fires afresh, so an outage that outlives its
+//! silence is heard of.
 //!
 //! [`Alerter::reconfigure`] swaps the notifiers and routes without a
 //! restart. A send already in flight finishes on the notifier it started
@@ -33,11 +43,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tocsin_core::incident::Timestamp;
-use tocsin_core::silence::{Matchers, Target};
+use tocsin_core::silence::Target;
 use tocsin_core::status::CheckKind;
 use tocsin_engine::ports::Clock;
 use tocsin_store::{
-    DeliveryKind, DeliveryOutcome, DeliveryRetention, PendingDelivery, Store, SubjectKind,
+    ActiveSilence, DeliveryKind, DeliveryOutcome, DeliveryRetention, PendingDelivery, Store,
+    StoredAlert, SubjectKind,
 };
 use tokio::sync::{Notify, watch};
 use tokio::task::{self, JoinHandle, JoinSet};
@@ -285,6 +296,25 @@ impl Alerter {
     }
 }
 
+/// Whether `silence` applies to `alert`: its matchers cover it, and if it
+/// is scoped to an episode, that is the outage the alert fired for.
+fn applies(silence: &ActiveSilence, alert: &StoredAlert) -> bool {
+    let target = Target {
+        node: &alert.node_id,
+        subject_kind: match alert.subject_kind {
+            SubjectKind::Check => CheckKind::Check,
+            SubjectKind::Heartbeat => CheckKind::Heartbeat,
+        },
+        subject: &alert.subject_id,
+        component: alert.component_id.as_deref(),
+        notifier: &alert.notifier_id,
+    };
+    silence.matchers.matches(&target)
+        && silence
+            .episode
+            .is_none_or(|episode| alert.outage_id == Some(episode))
+}
+
 fn millis(duration: Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
@@ -355,6 +385,8 @@ impl Worker {
     /// paused; returns when to look again. Repeats are queued, a write,
     /// only when one is due.
     async fn dispatch(&mut self, now: i64) -> tocsin_store::Result<i64> {
+        let mut silences = None;
+        self.refire(now, &mut silences).await?;
         let mut outbox = self.store.outbox().await?;
         if outbox
             .next_repeat_at_ms
@@ -367,13 +399,26 @@ impl Worker {
         if let Some(repeat_at) = outbox.next_repeat_at_ms {
             wake_at = wake_at.min(repeat_at);
         }
-        let mut silences = None;
         for delivery in outbox.pending {
             let notifier_id = &delivery.alert.notifier_id;
             if self
                 .busy
                 .contains(&(delivery.alert.id, Lane::of(delivery.kind)))
             {
+                continue;
+            }
+            // Nothing rang, so there is nothing to stop. The store checks
+            // again, in case a send started since the outbox was read.
+            if delivery.kind == DeliveryKind::Cancel
+                && !delivery.alert.attempted
+                && self.store.drop_cancel(delivery.id).await?
+            {
+                tracing::info!(
+                    delivery = delivery.id,
+                    notifier = %delivery.alert.notifier_id,
+                    alert = %self.message(&delivery, now).identity(),
+                    "cancel dropped: no send of its alert was ever attempted",
+                );
                 continue;
             }
             // Held back even while it waits to retry: a silence made for a
@@ -401,62 +446,117 @@ impl Worker {
             {
                 continue;
             }
+            // From here the receiver may hear of the alert, whatever comes
+            // of the send, so its resolve can no longer be held back.
+            if matches!(delivery.kind, DeliveryKind::Fire | DeliveryKind::Repeat)
+                && !delivery.alert.attempted
+            {
+                self.store.attempt_alert(delivery.alert.id).await?;
+            }
             self.spawn(&delivery, now);
+        }
+        // Look again the moment a silence expires: what it held may have
+        // to fire.
+        if let Some(silences) = &silences {
+            for silence in silences {
+                wake_at = wake_at.min(silence.expires_at.as_millis());
+            }
         }
         Ok(wake_at.max(now))
     }
 
-    /// Marks `delivery` silenced if a silence active at `now` matches its
-    /// alert; whether it did. The active silences are read once per pass,
-    /// when the first message that could be held back comes up.
-    async fn hold(
+    /// Fires afresh every open alert a silence kept entirely quiet once no
+    /// silence active at `now` applies to it: the outage outlived the
+    /// silence, and nobody has heard of it. The active silences are read
+    /// only when there is such an alert.
+    async fn refire(
         &self,
-        delivery: &PendingDelivery,
         now: i64,
-        silences: &mut Option<Vec<(i64, Matchers)>>,
-    ) -> tocsin_store::Result<bool> {
-        let alert = &delivery.alert;
-        let holdable = match delivery.kind {
-            DeliveryKind::Fire | DeliveryKind::Repeat => true,
-            DeliveryKind::Resolve => !alert.notified,
-            DeliveryKind::Cancel => false,
-        };
-        if !holdable {
-            return Ok(false);
+        silences: &mut Option<Vec<ActiveSilence>>,
+    ) -> tocsin_store::Result<()> {
+        let stranded = self.store.stranded_alerts().await?;
+        if stranded.is_empty() {
+            return Ok(());
         }
         let at = Timestamp::from_millis(now);
         let silences = match silences {
             Some(silences) => silences,
             None => silences.insert(self.store.active_silences(at).await?),
         };
-        let target = Target {
-            node: &alert.node_id,
-            subject_kind: match alert.subject_kind {
-                SubjectKind::Check => CheckKind::Check,
-                SubjectKind::Heartbeat => CheckKind::Heartbeat,
-            },
-            subject: &alert.subject_id,
-            component: alert.component_id.as_deref(),
-            notifier: &alert.notifier_id,
-        };
-        for (silence, matchers) in silences.iter() {
-            // The store checks again that both are still as read: the
-            // silence may have ended, or the alert been notified, since.
-            if matchers.matches(&target)
-                && self.store.hold_delivery(delivery.id, *silence, at).await?
-            {
+        for alert in &stranded {
+            // One still applying holds the fresh fire straight back, so
+            // leave the alert as it is.
+            if silences.iter().any(|silence| applies(silence, alert)) {
+                continue;
+            }
+            if self.store.refire(alert.id, now).await? {
                 tracing::info!(
-                    delivery = delivery.id,
-                    kind = delivery.kind.as_str(),
-                    silence,
+                    alert = alert.id,
                     notifier = %alert.notifier_id,
-                    alert = %self.message(delivery, now).identity(),
-                    "alert message held back by a silence",
+                    node = %alert.node_id,
+                    subject = %alert.subject_id,
+                    "alert fires again: the silence that held it no longer applies",
                 );
-                return Ok(true);
             }
         }
-        Ok(false)
+        Ok(())
+    }
+
+    /// Marks `delivery` silenced if it may be held back; whether it was. A
+    /// fire or repeat is held by a silence active at `now` that applies to
+    /// its alert; a resolve by the store's own test, live silence or not.
+    /// The active silences are read once per pass, when first needed.
+    async fn hold(
+        &self,
+        delivery: &PendingDelivery,
+        now: i64,
+        silences: &mut Option<Vec<ActiveSilence>>,
+    ) -> tocsin_store::Result<bool> {
+        let alert = &delivery.alert;
+        let at = Timestamp::from_millis(now);
+        let silence = match delivery.kind {
+            DeliveryKind::Cancel => None,
+            DeliveryKind::Resolve => {
+                if alert.attempted {
+                    None
+                } else {
+                    self.store.hold_resolve(delivery.id, at).await?
+                }
+            }
+            DeliveryKind::Fire | DeliveryKind::Repeat => {
+                let silences = match silences {
+                    Some(silences) => silences,
+                    None => silences.insert(self.store.active_silences(at).await?),
+                };
+                let mut held = None;
+                for silence in silences.iter() {
+                    // The store checks again that the silence still
+                    // applies: it may have ended since it was read.
+                    if applies(silence, alert)
+                        && self
+                            .store
+                            .hold_delivery(delivery.id, silence.id, at)
+                            .await?
+                    {
+                        held = Some(silence.id);
+                        break;
+                    }
+                }
+                held
+            }
+        };
+        let Some(silence) = silence else {
+            return Ok(false);
+        };
+        tracing::info!(
+            delivery = delivery.id,
+            kind = delivery.kind.as_str(),
+            silence,
+            notifier = %alert.notifier_id,
+            alert = %self.message(delivery, now).identity(),
+            "alert message held back by a silence",
+        );
+        Ok(true)
     }
 
     fn spawn(&mut self, delivery: &PendingDelivery, now: i64) {

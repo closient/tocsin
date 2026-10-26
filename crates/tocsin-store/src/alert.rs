@@ -176,10 +176,14 @@ pub struct StoredAlert {
     /// Whether its last message keeps ringing until acknowledged (a
     /// Pushover emergency) and has not been cancelled yet.
     pub ringing: bool,
-    /// Whether a fire or repeat for it has been delivered. A silence holds
-    /// back its resolve only while none has: a receiver that never heard
-    /// of the alert has nothing to resolve.
+    /// The outage it last fired for.
+    pub outage_id: Option<i64>,
+    /// Whether a fire or repeat for it has been delivered.
     pub notified: bool,
+    /// Whether a send of a fire or repeat for it was ever started, whatever
+    /// came of it. Until one was, the receiver cannot have heard of the
+    /// alert: a silence holds back its resolve, and its cancel is dropped.
+    pub attempted: bool,
 }
 
 /// A pending delivery that may be sent now: the oldest pending message of
@@ -530,8 +534,8 @@ fn fire_alerts(
             .prepare_cached(
                 "INSERT INTO alert (node_id, subject_kind, subject_id, component_id,
                      notifier_id, route_id, outage_id, health, started_at, ringing,
-                     repeat_ms, next_repeat_at, notified)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12 + ?11, 0)",
+                     repeat_ms, next_repeat_at, notified, attempted)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12 + ?11, 0, 0)",
             )?
             .execute(params![
                 outage.identity.node_id,
@@ -665,7 +669,8 @@ fn drop_pending_repeats(conn: &Connection, alert_id: i64) -> Result<()> {
 }
 
 const ALERT_COLUMNS: &str = "a.id, a.node_id, a.subject_kind, a.subject_id, a.component_id,
-    a.notifier_id, a.route_id, a.health, a.started_at, a.ended_at, a.ringing, a.notified";
+    a.notifier_id, a.route_id, a.health, a.started_at, a.ended_at, a.ringing, a.outage_id,
+    a.notified, a.attempted";
 
 fn stored_alert(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<StoredAlert> {
     Ok(StoredAlert {
@@ -680,7 +685,9 @@ fn stored_alert(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<Store
         started_at_ms: row.get(first + 8)?,
         ended_at_ms: row.get(first + 9)?,
         ringing: row.get(first + 10)?,
-        notified: row.get(first + 11)?,
+        outage_id: row.get(first + 11)?,
+        notified: row.get(first + 12)?,
+        attempted: row.get(first + 13)?,
     })
 }
 
@@ -762,7 +769,8 @@ pub(crate) fn queue_repeats(conn: &mut Connection, now_ms: i64) -> Result<usize>
 }
 
 /// Records how an attempt ended. A delivery already finished is left as it
-/// is. A fire or repeat delivered marks its alert notified.
+/// is. A fire or repeat delivered marks its alert notified (and attempted,
+/// which [`attempt`] marked before the send).
 pub(crate) fn finish(
     conn: &Connection,
     delivery_id: i64,
@@ -775,7 +783,7 @@ pub(crate) fn finish(
             // with the message still pending, which only means its resolve
             // is sent, never that a resolve is held back wrongly.
             conn.prepare_cached(
-                "UPDATE alert SET notified = 1
+                "UPDATE alert SET notified = 1, attempted = 1
                  WHERE id = (SELECT alert_id FROM alert_delivery
                              WHERE id = ?1 AND status = 'pending'
                                AND kind IN ('fire', 'repeat'))",
@@ -806,6 +814,74 @@ pub(crate) fn finish(
             .execute(params![delivery_id, now_ms, error])?,
     };
     Ok(())
+}
+
+/// Marks alert `alert_id` attempted before a send of its fire or repeat
+/// starts, so a send whose answer is lost (a timeout, a crash) still
+/// counts as one the receiver may have seen.
+pub(crate) fn attempt(conn: &Connection, alert_id: i64) -> Result<()> {
+    conn.prepare_cached("UPDATE alert SET attempted = 1 WHERE id = ?1 AND attempted = 0")?
+        .execute(params![alert_id])?;
+    Ok(())
+}
+
+/// Drops pending cancel `delivery_id` if no send of its alert's fire or
+/// repeats was ever attempted: nothing rang, so there is nothing to stop.
+/// Whether it was dropped.
+pub(crate) fn drop_cancel(conn: &Connection, delivery_id: i64) -> Result<bool> {
+    Ok(conn
+        .prepare_cached(
+            "DELETE FROM alert_delivery
+             WHERE id = ?1 AND status = 'pending' AND kind = 'cancel'
+               AND NOT (SELECT attempted FROM alert a WHERE a.id = alert_delivery.alert_id)",
+        )?
+        .execute(params![delivery_id])?
+        == 1)
+}
+
+/// What makes an open alert stranded by a silence: nothing reached the
+/// receiver, its latest fire or repeat was held back, and no message is
+/// pending. Over `alert a`.
+const STRANDED: &str = "a.ended_at IS NULL AND NOT a.notified
+    AND (SELECT d.status FROM alert_delivery d
+         WHERE d.alert_id = a.id AND d.kind IN ('fire', 'repeat')
+         ORDER BY d.id DESC LIMIT 1) = 'silenced'
+    AND NOT EXISTS (SELECT 1 FROM alert_delivery p
+                    WHERE p.alert_id = a.id AND p.status = 'pending' AND p.kind <> 'cancel')";
+
+/// Every open alert a silence held back that nobody has heard of and that
+/// has no message pending: if no silence applies to it any more, it fires
+/// afresh with [`refire`].
+pub(crate) fn stranded(conn: &Connection) -> Result<Vec<StoredAlert>> {
+    let mut statement = conn.prepare_cached(&format!(
+        "SELECT {ALERT_COLUMNS} FROM alert a WHERE {STRANDED} ORDER BY a.id"
+    ))?;
+    let rows = statement.query_map([], |row| stored_alert(row, 0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Queues a fresh fire for alert `alert_id` at its current health, and
+/// schedules its next repeat from `now_ms`, if it is still stranded.
+/// Whether it queued one.
+pub(crate) fn refire(conn: &mut Connection, alert_id: i64, now_ms: i64) -> Result<bool> {
+    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let health = transaction
+        .prepare_cached(&format!(
+            "SELECT a.health FROM alert a WHERE a.id = ?1 AND {STRANDED}"
+        ))?
+        .query_row(params![alert_id], |row| {
+            parse_column::<Health>(0, &row.get::<_, String>(0)?)
+        })
+        .optional()?;
+    let Some(health) = health else {
+        return Ok(false);
+    };
+    transaction
+        .prepare_cached("UPDATE alert SET next_repeat_at = ?2 + repeat_ms WHERE id = ?1")?
+        .execute(params![alert_id, now_ms])?;
+    queue(&transaction, alert_id, DeliveryKind::Fire, health, now_ms)?;
+    transaction.commit()?;
+    Ok(true)
 }
 
 /// Deletes up to `limit` finished deliveries older than `retention` allows.

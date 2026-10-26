@@ -194,8 +194,11 @@ pub async fn create(
         })?;
         new.scope_to(&outage).map_err(ApiError::invalid)?;
     }
-    validate(state, &new, at)?;
-    let silence = state.store.create_silence(new, actor.clone(), at).await?;
+    let expires_at = validate(state, &new, at)?;
+    let silence = state
+        .store
+        .create_silence(new, expires_at, actor.clone(), at)
+        .await?;
     tracing::info!(
         silence = silence.id,
         episode = silence.episode,
@@ -207,8 +210,9 @@ pub async fn create(
     Ok(silence)
 }
 
-/// `new` checked against the configuration and `[server] max_silence`.
-fn validate(state: &AppState, new: &NewSilence, at: Timestamp) -> Result<(), ApiError> {
+/// `new` checked against the configuration and `[server] max_silence`,
+/// and when it expires, counted from `at`.
+fn validate(state: &AppState, new: &NewSilence, at: Timestamp) -> Result<Timestamp, ApiError> {
     let config = &state.config;
     let subject = |id: &str| {
         if config.checks.iter().any(|check| check.id.as_str() == id) {

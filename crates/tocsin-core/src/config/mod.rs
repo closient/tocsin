@@ -170,8 +170,9 @@ pub struct Server {
     #[serde(default = "default_max_concurrent_checks")]
     #[schemars(range(min = 1))]
     pub max_concurrent_checks: u32,
-    /// The longest a silence may last: a silence's `expires_at` must be
-    /// at most this far ahead when it is made. Nothing extends a
+    /// The longest a silence may last: a silence's expiry, given as
+    /// `expires_at` or `expires_in`, must be at most this far ahead when
+    /// it is made. Nothing extends a
     /// silence, so a longer one is a new one, made by someone.
     #[serde(default = "default_max_silence")]
     pub max_silence: Duration,

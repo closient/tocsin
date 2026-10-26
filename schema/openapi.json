@@ -3130,9 +3130,8 @@
       },
       "NewSilence": {
         "type": "object",
-        "description": "`POST /api/v1/silences`: hold back the alerts `matchers` names until\n`expires_at`, or until outage `episode` closes if that is sooner.",
+        "description": "`POST /api/v1/silences`: hold back the alerts `matchers` names until\nit expires, or until outage `episode` closes if that is sooner.",
         "required": [
-          "expires_at",
           "reason"
         ],
         "properties": {
@@ -3145,8 +3144,24 @@
             "description": "An outage id: the silence ends when that outage closes (the\nsubject recovers, or moves between degraded and down), so a\nre-fire is sent. The outage must be open."
           },
           "expires_at": {
-            "$ref": "#/components/schemas/Timestamp",
-            "description": "When it stops applying. Required, in the future, and at most\n`[server] max_silence` from now."
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When it stops applying: in the future, and at most `[server]\nmax_silence` from now. Give this or `expires_in`, not both."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expires_in": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How long from now it applies, such as `\"30m\"` or `\"1h30m\"`, counted\nfrom the server's clock: at most `[server] max_silence`. Give this\nor `expires_at`, not both.",
+            "example": "30m",
+            "pattern": "^([0-9]+(ms|s|m|h|d))+$"
           },
           "matchers": {
             "$ref": "#/components/schemas/Matchers",

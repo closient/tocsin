@@ -276,6 +276,48 @@ async fn a_silence_without_an_expiry_is_refused() {
 }
 
 #[tokio::test]
+async fn a_duration_is_counted_from_the_server_s_clock_and_capped_the_same() {
+    let api = api();
+    let before = now().as_millis();
+    let (status, body) = api
+        .create(json!({
+            "matchers": {"subject": "api-port"},
+            "expires_in": "30m",
+            "reason": "deploying",
+        }))
+        .await;
+    let after = now().as_millis();
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let expires_at: Timestamp = serde_json::from_value(body["expires_at"].clone()).unwrap();
+    assert!(
+        (before + 30 * MINUTE_MS..=after + 30 * MINUTE_MS).contains(&expires_at.as_millis()),
+        "{body}"
+    );
+
+    let (status, body) = api
+        .create(json!({
+            "matchers": {"subject": "api-port"},
+            "expires_in": "121m",
+            "reason": "a long one",
+        }))
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(paths(&body), ["expires_in"], "{body}");
+    assert!(body.to_string().contains("max_silence"), "{body}");
+
+    let (status, body) = api
+        .create(json!({
+            "matchers": {"subject": "api-port"},
+            "expires_in": "30m",
+            "expires_at": from_now(30),
+            "reason": "which one",
+        }))
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(paths(&body), ["expires_in"], "{body}");
+}
+
+#[tokio::test]
 async fn an_expiry_is_capped_by_max_silence_and_must_be_ahead() {
     let api = api();
     let (status, body) = api

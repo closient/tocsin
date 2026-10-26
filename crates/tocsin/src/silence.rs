@@ -44,7 +44,14 @@ pub fn run(command: SilenceCommand) -> Result<Report, Failure> {
                     notifier,
                 },
                 episode,
-                expires_at: expires,
+                expires_at: match expires {
+                    Expires::At(at) => Some(at),
+                    Expires::In(_) => None,
+                },
+                expires_in: match expires {
+                    Expires::In(lasts) => Some(lasts),
+                    Expires::At(_) => None,
+                },
                 reason,
             };
             let silence: Silence = Client::new(&server)?.write(&Method::POST, SILENCES, &new)?;
@@ -84,17 +91,23 @@ pub fn run(command: SilenceCommand) -> Result<Report, Failure> {
     }
 }
 
+/// When a silence given on the command line ends.
+#[derive(Debug, Clone, Copy)]
+pub enum Expires {
+    /// This long after the server receives it: the server counts, so a
+    /// slow request or a skewed clock here does not shorten it.
+    In(Duration),
+    /// At this instant.
+    At(Timestamp),
+}
+
 /// A duration forward from now, such as `30m`, or an RFC 3339 instant,
 /// for `--expires`.
-pub fn parse_expires(text: &str) -> Result<Timestamp, String> {
-    if let Ok(ahead) = Duration::parse(text) {
-        let ahead = i64::try_from(ahead.get().as_millis())
-            .map_err(|_| format!("{text} reaches too far ahead"))?;
-        return Ok(Timestamp::from_millis(
-            crate::http::now().as_millis().saturating_add(ahead),
-        ));
+pub fn parse_expires(text: &str) -> Result<Expires, String> {
+    if let Ok(lasts) = Duration::parse(text) {
+        return Ok(Expires::In(lasts));
     }
-    text.parse::<Timestamp>().map_err(|error| {
+    text.parse::<Timestamp>().map(Expires::At).map_err(|error| {
         format!("{error}; give a duration from now such as 30m or 4h, or RFC 3339 such as 2026-10-23T14:05:00Z")
     })
 }

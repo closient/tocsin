@@ -1168,12 +1168,7 @@ fn incident_new_draft_sends_draft_true_and_the_default_leaves_it_out() {
 }
 
 #[test]
-fn silence_new_sends_an_expiry_ahead_of_now_and_never_a_creator() {
-    let millis = |at: &str| {
-        let at: jiff::Timestamp = at.parse().unwrap();
-        at.as_millisecond()
-    };
-    let before = jiff::Timestamp::now().as_millisecond();
+fn silence_new_sends_its_expiry_as_given_and_never_a_creator() {
     let body = body_sent_by(&[
         "silence",
         "new",
@@ -1190,13 +1185,10 @@ fn silence_new_sends_an_expiry_ahead_of_now_and_never_a_creator() {
         "--reason",
         "deploying",
     ]);
-    let after = jiff::Timestamp::now().as_millisecond();
-    let half_hour = 30 * 60 * 1000;
-    let expires_at = millis(body["expires_at"].as_str().unwrap());
-    assert!(
-        (before + half_hour..=after + half_hour).contains(&expires_at),
-        "{body}"
-    );
+    // A duration is sent as one, so the server's clock starts it, not
+    // this host's.
+    assert_eq!(body["expires_in"], "30m", "{body}");
+    assert!(body.get("expires_at").is_none(), "{body}");
     assert_eq!(
         body["matchers"],
         serde_json::json!({ "subject": "api", "subject_kind": "check" })
@@ -1222,6 +1214,7 @@ fn silence_new_sends_an_expiry_ahead_of_now_and_never_a_creator() {
         "known",
     ]);
     assert_eq!(body["expires_at"], "2026-10-23T14:05:00.000Z", "{body}");
+    assert!(body.get("expires_in").is_none(), "{body}");
     assert_eq!(body["episode"], 7);
 }
 

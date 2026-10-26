@@ -41,7 +41,7 @@ use tocsin_core::incident::{
     Actor, Incident, IncidentEdit, IncidentInternals, NewIncident, NewUpdate, Timestamp,
 };
 use tocsin_core::release::{DeployStamp, NewRelease, Release, Timeline};
-use tocsin_core::silence::{Matchers, NewSilence, Silence};
+use tocsin_core::silence::{NewSilence, Silence};
 use tocsin_core::status::{CheckResult, OutageRecord};
 
 pub use crate::alert::{
@@ -57,6 +57,7 @@ pub use crate::outage::{LastUp, LatestResult, Outage};
 use crate::readers::Readers;
 pub use crate::release::{ComponentScope, Order, Projects, ReleaseQuery, TimelineQuery, Written};
 pub use crate::rollup::DailyRollup;
+pub use crate::silence::ActiveSilence;
 pub use crate::slack::{
     ClaimedSlack, NewSlackConnection, SlackConnection, SlackCounts, SlackHook, SlackPurpose,
     WebhookUrl,
@@ -532,8 +533,9 @@ impl Store {
             .await
     }
 
-    /// Records a silence, made by `actor` at `at`. The caller has
-    /// validated `new` and scoped it to its episode, if it has one.
+    /// Records a silence, made by `actor` at `at` to last until
+    /// `expires_at`. The caller has validated `new`, resolved its expiry,
+    /// and scoped it to its episode, if it has one.
     ///
     /// # Errors
     ///
@@ -542,11 +544,12 @@ impl Store {
     pub async fn create_silence(
         &self,
         new: NewSilence,
+        expires_at: Timestamp,
         actor: Actor,
         at: Timestamp,
     ) -> Result<Silence> {
         self.writer
-            .run(move |conn| silence::insert(conn, &new, &actor, at))
+            .run(move |conn| silence::insert(conn, &new, expires_at, &actor, at))
             .await
     }
 
@@ -598,14 +601,15 @@ impl Store {
     /// # Errors
     ///
     /// The read fails.
-    pub async fn active_silences(&self, now: Timestamp) -> Result<Vec<(i64, Matchers)>> {
+    pub async fn active_silences(&self, now: Timestamp) -> Result<Vec<ActiveSilence>> {
         self.read(move |conn| silence::active(conn, now)).await
     }
 
-    /// Holds back pending delivery `delivery_id` for silence `silence_id`
-    /// instead of sending it. `false` when it no longer may be: the
-    /// delivery is no longer pending, is a cancel or the resolve of an
-    /// alert already notified, or the silence has stopped applying.
+    /// Holds back pending fire or repeat `delivery_id` for silence
+    /// `silence_id` instead of sending it. `false` when it no longer may
+    /// be: the delivery is no longer pending or is not a fire or repeat,
+    /// the silence has stopped applying, or the silence is scoped to an
+    /// outage other than the one the alert fired for.
     ///
     /// # Errors
     ///
@@ -618,6 +622,67 @@ impl Store {
     ) -> Result<bool> {
         self.writer
             .run(move |conn| silence::hold(conn, delivery_id, silence_id, now))
+            .await
+    }
+
+    /// Holds back pending resolve `delivery_id` if the receiver cannot
+    /// have heard of its alert: no send of a fire or repeat was ever
+    /// attempted and the latest was held back by a silence. The silence it
+    /// was held under, or `None` when it must be sent.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn hold_resolve(&self, delivery_id: i64, now: Timestamp) -> Result<Option<i64>> {
+        self.writer
+            .run(move |conn| silence::hold_resolve(conn, delivery_id, now))
+            .await
+    }
+
+    /// Marks alert `alert_id` attempted before a send of its fire or
+    /// repeat starts: from then on the receiver may have heard of it.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn attempt_alert(&self, alert_id: i64) -> Result<()> {
+        self.writer
+            .run(move |conn| alert::attempt(conn, alert_id))
+            .await
+    }
+
+    /// Drops pending cancel `delivery_id` if no send of its alert's fire
+    /// or repeats was ever attempted: nothing rang. Whether it was dropped.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn drop_cancel(&self, delivery_id: i64) -> Result<bool> {
+        self.writer
+            .run(move |conn| alert::drop_cancel(conn, delivery_id))
+            .await
+    }
+
+    /// Every open alert a silence held back that nobody has heard of and
+    /// that has no message pending. One no silence applies to any more is
+    /// fired afresh with [`Store::refire`].
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn stranded_alerts(&self) -> Result<Vec<StoredAlert>> {
+        self.read(alert::stranded).await
+    }
+
+    /// Queues a fresh fire for alert `alert_id` at `now_ms` if it is still
+    /// stranded. Whether it queued one.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn refire(&self, alert_id: i64, now_ms: i64) -> Result<bool> {
+        self.writer
+            .run(move |conn| alert::refire(conn, alert_id, now_ms))
             .await
     }
 

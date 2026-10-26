@@ -446,10 +446,11 @@ pub enum SilenceCommand {
         #[arg(long, value_name = "OUTAGE")]
         episode: Option<i64>,
 
-        /// When it ends: a duration from now, such as `30m` or `4h`, or
-        /// RFC 3339. At most `[server] max_silence` away.
+        /// When it ends: a duration from now, such as `30m` or `4h`, which
+        /// the server counts from when it receives the silence, or an RFC
+        /// 3339 instant. At most `[server] max_silence` away.
         #[arg(long, value_name = "WHEN", value_parser = crate::silence::parse_expires)]
-        expires: Timestamp,
+        expires: crate::silence::Expires,
 
         /// Why, for whoever reads the silence later.
         #[arg(long)]

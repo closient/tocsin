@@ -28,7 +28,7 @@ use tocsin_core::config::Config;
 use tocsin_core::incident::{Actor, Timestamp};
 use tocsin_core::silence::{HeldKind, Matchers, NewSilence, SilenceState};
 use tocsin_engine::ports::{Clock, History, TokioClock};
-use tocsin_store::{DeliveryKind, NewCheckResult, OutageChange, SubjectKind};
+use tocsin_store::{DeliveryKind, NewCheckResult, OutageChange, Store, SubjectKind};
 use tokio::sync::mpsc;
 
 const HOUR_MS: i64 = 3_600_000;
@@ -852,24 +852,46 @@ fn an_idle_worker_writes_nothing_until_a_repeat_is_due() {
     });
 }
 
-/// Silences check `api` (with `episode`, only during that outage) from
-/// `at` until `expires_at`; resolves with the silence's id.
+/// Runs `write` against the store with the paused clock standing still,
+/// as [`Running::change`] does, so no retry or repeat comes due meanwhile.
+async fn still<T: Send + 'static>(
+    fixture: &Fixture,
+    write: impl AsyncFnOnce(&Store) -> T + Send + 'static,
+) -> T {
+    let store = Arc::clone(&fixture.store);
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || runtime.block_on(write(&store)))
+        .await
+        .unwrap()
+}
+
+/// Silences check `api` on `node-a` (with `episode`, only during that
+/// outage) from `at` until `expires_at`; resolves with the silence's id.
 async fn silence(fixture: &Fixture, episode: Option<i64>, at: i64, expires_at: i64) -> i64 {
     let new = NewSilence {
         matchers: Matchers {
+            node: Some("node-a".to_owned()),
             subject: Some("api".to_owned()),
             ..Matchers::default()
         },
         episode,
-        expires_at: Timestamp::from_millis(expires_at),
+        expires_at: Some(Timestamp::from_millis(expires_at)),
+        expires_in: None,
         reason: "deploying the api".to_owned(),
     };
-    fixture
-        .store
-        .create_silence(new, Actor::token("pager"), Timestamp::from_millis(at))
-        .await
-        .unwrap()
-        .id
+    still(fixture, async move |store: &Store| {
+        store
+            .create_silence(
+                new,
+                Timestamp::from_millis(expires_at),
+                Actor::token("pager"),
+                Timestamp::from_millis(at),
+            )
+            .await
+            .unwrap()
+            .id
+    })
+    .await
 }
 
 /// What silence `id` has held back, oldest first, as (kind, ms after T0),
@@ -926,37 +948,221 @@ fn a_silenced_alert_is_recorded_and_never_sent() {
     });
 }
 
+/// Every message `notifier` was sent, cancels apart, as (event, ms after
+/// T0).
+fn sent(fake: &Fake) -> Vec<(AlertEvent, bool, i64)> {
+    fake.seen()
+        .iter()
+        .map(|attempt| {
+            (
+                attempt.event(),
+                attempt.cancel,
+                attempt.alert.sent_at_ms - T0,
+            )
+        })
+        .collect()
+}
+
 #[test]
-fn a_silence_that_expires_lets_the_next_repeat_through() {
+fn an_outage_that_outlives_its_silence_fires_when_the_silence_expires() {
     paused(async {
         let fixture = Fixture::new();
-        let config = config(&monitored(&["slack"], "repeat = \"1h\""));
+        let config = config(&monitored(&["slack"], ""));
         let (sender, mut receiver) = channel();
-        let slack: Arc<dyn Notifier> = Fake::accepting("slack", &sender);
+        let slack = Fake::accepting("slack", &sender);
         let running = start(
             &fixture,
             &config,
-            &[("slack", slack)],
+            &[("slack", Arc::clone(&slack) as Arc<dyn Notifier>)],
             &AlertMetrics::default(),
         );
-        let id = silence(&fixture, None, T0, T0 + 90 * 60_000).await;
+        // An hour's silence; five minutes in, the api goes down.
+        let id = silence(&fixture, None, T0, T0 + HOUR_MS).await;
+        tokio::time::sleep(Duration::from_mins(5)).await;
+        let outage = running.change(down(T0 + 5 * 60_000)).await.unwrap();
+        assert_eq!(held(&fixture, id, 1).await[0].0, HeldKind::Fire);
 
+        // Still down when the silence expires: somebody is told then.
+        let fire = next_from(&mut receiver, "slack").await;
+        assert_eq!(
+            (fire.event(), fire.alert.sent_at_ms - T0),
+            (AlertEvent::Fire, HOUR_MS)
+        );
+        running.change(up(outage, T0 + 2 * HOUR_MS)).await;
+        let resolve = next_from(&mut receiver, "slack").await;
+        running.alerter.stop().await;
+
+        assert_eq!(resolve.event(), AlertEvent::Resolve);
+        assert_eq!(sent(&slack).len(), 2, "{:?}", sent(&slack));
+        assert_eq!(held(&fixture, id, 1).await.len(), 1);
+    });
+}
+
+#[test]
+fn an_outage_that_outlives_a_silence_ended_early_fires_when_it_ends() {
+    paused(async {
+        let fixture = Fixture::new();
+        let config = config(&monitored(&["slack"], ""));
+        let (sender, mut receiver) = channel();
+        let slack = Fake::accepting("slack", &sender);
+        let running = start(
+            &fixture,
+            &config,
+            &[("slack", Arc::clone(&slack) as Arc<dyn Notifier>)],
+            &AlertMetrics::default(),
+        );
+        let id = silence(&fixture, None, T0, T0 + 24 * HOUR_MS).await;
         let outage = running.change(down(T0)).await.unwrap();
-        let repeat = next_from(&mut receiver, "slack").await;
-        // Delivered a repeat, so the alert's resolve is sent.
-        running.change(up(outage, T0 + 2 * HOUR_MS + 1_000)).await;
+        assert_eq!(held(&fixture, id, 1).await[0].0, HeldKind::Fire);
+        still(&fixture, async move |store: &Store| {
+            store
+                .end_silence(
+                    id,
+                    Actor::token("pager"),
+                    Timestamp::from_millis(T0 + 60_000),
+                )
+                .await
+                .unwrap()
+        })
+        .await;
+
+        // Seen at the worker's next look, an idle wake at the latest.
+        let fire = next_from(&mut receiver, "slack").await;
+        assert_eq!(fire.event(), AlertEvent::Fire);
+        assert!(fire.alert.sent_at_ms - T0 <= HOUR_MS + 60_000, "{fire:?}");
+        running.change(up(outage, T0 + 2 * HOUR_MS)).await;
+        let resolve = next_from(&mut receiver, "slack").await;
+        running.alerter.stop().await;
+
+        assert_eq!(resolve.event(), AlertEvent::Resolve);
+        assert_eq!(sent(&slack).len(), 2, "{:?}", sent(&slack));
+    });
+}
+
+#[test]
+fn a_fire_whose_send_failed_before_an_episode_silence_still_gets_its_resolve() {
+    paused(async {
+        let fixture = Fixture::new();
+        let config = config(&monitored(&["slack"], ""));
+        let (sender, mut receiver) = channel();
+        // The fire fails once, maybe after the receiver saw it.
+        let slack = Fake::new("slack", &sender, |_, attempt| {
+            if attempt == 0 {
+                Answer::Fail
+            } else {
+                Answer::Accept
+            }
+        });
+        let running = start(
+            &fixture,
+            &config,
+            &[("slack", Arc::clone(&slack) as Arc<dyn Notifier>)],
+            &AlertMetrics::default(),
+        );
+        let outage = running.change(down(T0)).await.unwrap();
+        let first = next_from(&mut receiver, "slack").await;
+        assert_eq!(
+            (first.event(), first.answer),
+            (AlertEvent::Fire, Answer::Fail)
+        );
+        // Acknowledged for this outage: the retry is held back, even
+        // before it is due.
+        let id = silence(&fixture, Some(outage), T0, T0 + 24 * HOUR_MS).await;
+        assert_eq!(held(&fixture, id, 1).await[0].0, HeldKind::Fire);
+
+        running.change(up(outage, T0 + HOUR_MS)).await;
         let resolve = next_from(&mut receiver, "slack").await;
         running.alerter.stop().await;
 
         assert_eq!(
-            (repeat.event(), repeat.alert.sent_at_ms - T0),
-            (AlertEvent::Repeat, 2 * HOUR_MS)
+            (resolve.event(), resolve.answer),
+            (AlertEvent::Resolve, Answer::Accept)
         );
+        assert_eq!(sent(&slack).len(), 2, "{:?}", sent(&slack));
+        assert_eq!(
+            held(&fixture, id, 1).await.len(),
+            1,
+            "the resolve is not held"
+        );
+    });
+}
+
+#[test]
+fn a_fire_whose_answer_timed_out_before_a_silence_still_gets_its_resolve() {
+    paused(async {
+        let fixture = Fixture::new();
+        let config = config(&monitored(&["slack"], ""));
+        let (sender, mut receiver) = channel();
+        // The fire lands but its answer never comes; later sends answer.
+        let slack = Fake::new("slack", &sender, |_, attempt| {
+            if attempt == 0 {
+                Answer::Hang
+            } else {
+                Answer::Accept
+            }
+        });
+        let running = start_with(
+            &fixture,
+            &config,
+            &[("slack", Arc::clone(&slack) as Arc<dyn Notifier>)],
+            &AlertMetrics::default(),
+            WorkerSettings {
+                send_timeout: Duration::from_secs(10),
+                ..settings()
+            },
+        );
+        let outage = running.change(down(T0)).await.unwrap();
+        let first = next_from(&mut receiver, "slack").await;
+        assert_eq!(
+            (first.event(), first.answer),
+            (AlertEvent::Fire, Answer::Hang)
+        );
+        let id = silence(&fixture, None, T0, T0 + 24 * HOUR_MS).await;
+        // Timed out at 10s, the retry is held back.
+        assert_eq!(held(&fixture, id, 1).await, [(HeldKind::Fire, 10_000)]);
+
+        running.change(up(outage, T0 + HOUR_MS)).await;
+        let resolve = next_from(&mut receiver, "slack").await;
+        running.alerter.stop().await;
+
         assert_eq!(resolve.event(), AlertEvent::Resolve);
+        assert_eq!(sent(&slack).len(), 2, "{:?}", sent(&slack));
+        assert_eq!(
+            held(&fixture, id, 1).await.len(),
+            1,
+            "the resolve is not held"
+        );
+    });
+}
+
+#[test]
+fn an_emergency_that_never_rang_is_never_cancelled() {
+    paused(async {
+        let fixture = Fixture::new();
+        let config = config(&monitored_by(&pushover("pager"), &["pager"], ""));
+        let (sender, _receiver) = channel();
+        let pager = Fake::accepting("pager", &sender);
+        let running = start(
+            &fixture,
+            &config,
+            &[("pager", Arc::clone(&pager) as Arc<dyn Notifier>)],
+            &AlertMetrics::default(),
+        );
+        let id = silence(&fixture, None, T0, T0 + 24 * HOUR_MS).await;
+        let outage = running.change(down(T0)).await.unwrap();
+        assert_eq!(held(&fixture, id, 1).await[0].0, HeldKind::Fire);
+        running.change(up(outage, T0 + 60_000)).await;
         let seen = held(&fixture, id, 2).await;
-        let kinds: Vec<HeldKind> = seen.iter().map(|(kind, _)| *kind).collect();
-        assert_eq!(kinds, [HeldKind::Fire, HeldKind::Repeat]);
-        assert!(seen[1].1 < 90 * 60_000, "held after it expired: {seen:?}");
+        // The resolve is held and the cancel dropped in one pass; wait for
+        // the outbox to drain.
+        while !fixture.store.outbox().await.unwrap().pending.is_empty() {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        running.alerter.stop().await;
+
+        assert_eq!(seen[1].0, HeldKind::Resolve);
+        assert_eq!(sent(&pager), [], "nothing rang, so nothing is cancelled");
+        assert_eq!(fixture.store.failed_deliveries(10).await.unwrap(), []);
     });
 }
 

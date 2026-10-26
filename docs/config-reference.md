@@ -423,7 +423,7 @@ A destination for operator alerts. Every alert it sends is followed by a resolve
 | `email` | [table](#table-serveremail) |  |  | Sender settings for every email tocsin sends. |
 | `listen` | string |  | `"127.0.0.1:8080"` | The address the web server listens on, as `ip:port`: `127.0.0.1:8080`, `0.0.0.0:8080` or `[::]:8080`. Hostnames are not accepted. |
 | `max_concurrent_checks` | integer, ≥ 1 |  | `64` | The most checks that may run at once across the node. Checks due while the limit is reached wait for a free slot. |
-| `max_silence` | [`Duration`](#type-duration) |  | `"1d"` | The longest a silence may last: a silence's `expires_at` must be at most this far ahead when it is made. Nothing extends a silence, so a longer one is a new one, made by someone. |
+| `max_silence` | [`Duration`](#type-duration) |  | `"1d"` | The longest a silence may last: a silence's expiry, given as `expires_at` or `expires_in`, must be at most this far ahead when it is made. Nothing extends a silence, so a longer one is a new one, made by someone. |
 | `node_id` | string |  |  | This node's name in every result it records. Defaults to the hostname. |
 | `public_url` | string |  |  | The URL people reach the status page at, used in links and emails. |
 | `retention_days` | integer |  | `90` | Days of check results kept. |

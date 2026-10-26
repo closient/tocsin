@@ -387,7 +387,7 @@ impl Server {
 
     /// Incidents and maintenance, newest first, with every update; with
     /// the `status:read` scope, drafts and each one's `internal_note` and
-    /// `external_key` too, and `external_key` finds every one with that key.
+    /// `external_key` too, and `external_key` pages through those with that key.
     #[tool(name = "list_incidents")]
     async fn list_incidents(
         &self,

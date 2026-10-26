@@ -686,17 +686,31 @@ async fn a_second_create_with_a_key_answers_the_first_and_writes_nothing() {
     assert_eq!(opened, Opened::Created);
     assert_ne!(other.id, first.id);
     assert_eq!(
-        store
-            .incident_keyed("cluster-b".into())
+        ids(&store
+            .incidents_keyed("cluster-b".into(), None, 100)
             .await
-            .unwrap()
-            .map(|incident| incident.id),
-        Some(other.id)
+            .unwrap()),
+        [other.id]
     );
     assert_eq!(
-        store.incident_keyed("cluster-c".into()).await.unwrap(),
-        None
+        store
+            .incidents_keyed("cluster-c".into(), None, 100)
+            .await
+            .unwrap(),
+        []
     );
+}
+
+fn ids(incidents: &[tocsin_core::incident::Incident]) -> Vec<i64> {
+    incidents.iter().map(|incident| incident.id).collect()
+}
+
+fn update(status: IncidentStatus) -> NewUpdate {
+    NewUpdate {
+        status,
+        message: "Moving on.".into(),
+        notify: false,
+    }
 }
 
 #[tokio::test]
@@ -724,6 +738,192 @@ async fn discarding_a_draft_frees_its_key_and_publishing_keeps_it() {
         .await
         .unwrap();
     assert_eq!((again.id, opened), (redrafted.id, Opened::Existing));
+}
+
+/// A stable key that fires again after its incident was resolved is a new
+/// episode: the create opens a new incident, and the list by key has both,
+/// newest first.
+#[tokio::test]
+async fn resolving_frees_the_key_and_the_next_create_opens_a_new_incident() {
+    let fixture = open();
+    let store = &fixture.store;
+    let seat = Actor::token("seat");
+    let (first, _) = store
+        .open_incident(keyed("cluster-a"), seat.clone(), at(1000))
+        .await
+        .unwrap();
+    store
+        .add_incident_update(
+            first.id,
+            update(IncidentStatus::Resolved),
+            false,
+            seat.clone(),
+            at(2000),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let (second, opened) = store
+        .open_incident(keyed("cluster-a"), seat.clone(), at(3000))
+        .await
+        .unwrap();
+    assert_eq!(opened, Opened::Created);
+    assert_ne!(second.id, first.id);
+    assert_eq!(
+        ids(&store
+            .incidents_keyed("cluster-a".into(), None, 100)
+            .await
+            .unwrap()),
+        [second.id, first.id]
+    );
+    // The new one holds the key while it is open.
+    let (again, opened) = store
+        .open_incident(keyed("cluster-a"), seat, at(4000))
+        .await
+        .unwrap();
+    assert_eq!((again.id, opened), (second.id, Opened::Existing));
+    let rows: i64 = raw(&fixture)
+        .query_row("SELECT count(*) FROM incident", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 2);
+}
+
+/// Completing a maintenance frees its key the same way.
+#[tokio::test]
+async fn completing_a_maintenance_frees_its_key() {
+    let fixture = open();
+    let store = &fixture.store;
+    let seat = Actor::token("seat");
+    let window = || NewIncident {
+        external_key: Some("window-a".into()),
+        ..maintenance()
+    };
+    let (first, _) = store
+        .open_incident(window(), seat.clone(), at(1000))
+        .await
+        .unwrap();
+    store
+        .add_incident_update(
+            first.id,
+            update(IncidentStatus::Completed),
+            false,
+            seat.clone(),
+            at(2000),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let (second, opened) = store.open_incident(window(), seat, at(3000)).await.unwrap();
+    assert_eq!(opened, Opened::Created);
+    assert_ne!(second.id, first.id);
+}
+
+/// Two creates with one key at the same moment: one opens the incident,
+/// the other is answered it. Never two incidents.
+#[tokio::test]
+async fn racing_creates_with_one_key_open_one_incident() {
+    let fixture = open();
+    let store = &fixture.store;
+    let (one, two) = tokio::join!(
+        store.open_incident(keyed("cluster-a"), Actor::token("one"), at(1000)),
+        store.open_incident(keyed("cluster-a"), Actor::token("two"), at(1000)),
+    );
+    let ((one, one_opened), (two, two_opened)) = (one.unwrap(), two.unwrap());
+    let mut opened = [one_opened, two_opened];
+    opened.sort_by_key(|opened| *opened == Opened::Existing);
+    assert_eq!(opened, [Opened::Created, Opened::Existing]);
+    assert_eq!(one.id, two.id);
+    let rows: i64 = raw(&fixture)
+        .query_row("SELECT count(*) FROM incident", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 1);
+}
+
+/// Reopening takes the key back, so it is refused while a newer incident
+/// holds the key, and allowed once that one is resolved too.
+#[tokio::test]
+async fn a_reopen_is_refused_while_another_open_incident_holds_the_key() {
+    let fixture = open();
+    let store = &fixture.store;
+    let seat = Actor::token("seat");
+    let (first, _) = store
+        .open_incident(keyed("cluster-a"), seat.clone(), at(1000))
+        .await
+        .unwrap();
+    let resolve = |id: i64, ms: i64| {
+        store.add_incident_update(
+            id,
+            update(IncidentStatus::Resolved),
+            false,
+            seat.clone(),
+            at(ms),
+        )
+    };
+    resolve(first.id, 2000).await.unwrap().unwrap();
+    let (second, _) = store
+        .open_incident(keyed("cluster-a"), seat.clone(), at(3000))
+        .await
+        .unwrap();
+    let refused = store
+        .add_incident_update(
+            first.id,
+            update(IncidentStatus::Investigating),
+            false,
+            seat.clone(),
+            at(4000),
+        )
+        .await;
+    match refused {
+        Err(Error::Invalid(fields)) => {
+            assert_eq!(fields.len(), 1, "{fields:?}");
+            assert_eq!(fields[0].path, "status");
+            assert!(
+                fields[0].message.contains(&second.id.to_string()),
+                "{fields:?}"
+            );
+        }
+        other => panic!("the reopen was not refused: {other:?}"),
+    }
+    let first_now = store.incident(first.id).await.unwrap().unwrap();
+    assert_eq!(first_now.status, IncidentStatus::Resolved);
+    assert_eq!(
+        first_now.updates.len(),
+        2,
+        "the refused update was appended"
+    );
+    // A resolved incident may still take another resolving update.
+    resolve(first.id, 4500).await.unwrap().unwrap();
+    // Once the newer one is resolved, the older one may reopen.
+    resolve(second.id, 5000).await.unwrap().unwrap();
+    let reopened = store
+        .add_incident_update(
+            first.id,
+            update(IncidentStatus::Investigating),
+            false,
+            seat.clone(),
+            at(6000),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reopened.resolved_at, None);
+    // A keyless incident reopens freely.
+    let plain = store
+        .create_incident(outage(), seat.clone(), at(7000))
+        .await
+        .unwrap();
+    resolve(plain.id, 8000).await.unwrap().unwrap();
+    store
+        .add_incident_update(
+            plain.id,
+            update(IncidentStatus::Investigating),
+            false,
+            seat,
+            at(9000),
+        )
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]

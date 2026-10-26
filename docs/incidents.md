@@ -101,16 +101,23 @@ the trouble in the key.
   edit). An edit replaces the whole note; `""` clears it.
 - **`external_key`** is the caller's own id for what the incident is about,
   one line of up to 200 characters. It is set on create only and never
-  changes. Each key belongs to one incident: a create carrying a key some
-  incident already has writes nothing, emits nothing and tells nobody, and
-  answers that incident, unchanged, with **200** instead of 201 (and the
-  same `Location`). The request is still checked first, so an invalid one
+  changes. Each key belongs to one *open* incident: a create carrying a key
+  an open incident already has writes nothing, emits nothing and tells
+  nobody, and answers that incident, unchanged, with **200** instead of 201
+  (and the same `Location`). The request is still checked first, so an invalid one
   is 422 either way. This is how a [release](releases.md#http-api) posted
   again answers: 201 for a new one, 200 for one that already existed. So a
   sender can retry, or run again on the same trouble, without opening a
-  second incident. Discarding a draft frees its key; a published incident
-  keeps its key for good, so a key for one occurrence of a problem should
-  say which occurrence (a date, say).
+  second incident. Resolving an incident (or completing a maintenance)
+  frees its key, as discarding a draft does: the same key then opens a new
+  incident with 201, because trouble that comes back weeks later is a new
+  episode. A sender can keep one stable key per problem and needs no
+  episode suffix of its own. A published incident holds its key until it
+  is resolved. Reopening a resolved incident takes its key back, so an
+  update that reopens it while another open incident holds the key is
+  422. A create with a key must open non-terminal: one that opened
+  `resolved` (or `completed`) would free its key as it was written, so a
+  retry after a lost answer would open a second incident; it is 422.
 
 Both are **internal for the incident's whole life**, draft or published.
 They are returned only to a token with `status:read` (on any read, and on
@@ -157,9 +164,9 @@ served at `GET /api/v1/openapi.json` and committed as
 | Method and path | Token | Body | Success |
 |---|---|---|---|
 | `GET /api/v1/incidents?limit=&before=` | none; `status:read` adds drafts and internals | | 200, `{incidents, next_before}` |
-| `GET /api/v1/incidents?external_key=` | `status:read` | | 200, `{incidents, next_before}`: the one incident with that key, or none |
+| `GET /api/v1/incidents?external_key=` | `status:read` | | 200, `{incidents, next_before}`: every incident with that key, newest first; at most one is open |
 | `GET /api/v1/incidents/{id}` | none; `status:read` for a draft and internals | | 200, the incident |
-| `POST /api/v1/incidents` | `incident` or `incident:draft` | `{kind, title, impact, components, status, message, scheduled_start, scheduled_end, notify, draft, internal_note, external_key}` | 201, the incident, with `Location`; 200 if its `external_key` is taken |
+| `POST /api/v1/incidents` | `incident` or `incident:draft` | `{kind, title, impact, components, status, message, scheduled_start, scheduled_end, notify, draft, internal_note, external_key}` | 201, the incident, with `Location`; 200 if an open incident has its `external_key` |
 | `POST /api/v1/incidents/{id}/updates` | `incident`, or `incident:draft` on a draft | `{status, message, notify}` | 201, the incident |
 | `PATCH /api/v1/incidents/{id}` | `incident`, or `incident:draft` on a draft | any of `{title, impact, components, scheduled_start, scheduled_end, internal_note}` | 200, the incident |
 | `POST /api/v1/incidents/{id}/publish` | `incident` | `{notify}`, or no body | 200, the incident |
@@ -168,19 +175,20 @@ served at `GET /api/v1/openapi.json` and committed as
 - **List** returns newest first. `limit` is 1 to 100 (default 20).
   `next_before` is set when more incidents follow; pass it as `before` for
   the next page. It is `null` on the last page, even a full one.
-  `external_key` finds the incident created with that key, draft or
-  published, as a page of one (or none); without a `status:read` token it
-  is 403.
+  `external_key` finds every incident created with that key, draft or
+  published, open or resolved, newest first, paged the same way; without a
+  `status:read` token it is 403.
 - **Create** needs `title` and `message`; `kind` defaults to `incident`,
   `impact` to `none`, `components` to none, and `status` to the kind's first
   status. Maintenance needs `scheduled_start` and `scheduled_end`.
   `"notify": false` (default `true`) opens it without emailing subscribers.
   `"draft": true` makes it a [draft](#drafts); left out, it follows the
   token's scope. `internal_note` and `external_key` are
-  [optional and internal](#internal-note-and-external-key); a key already
-  taken answers 200 with the incident that has it.
+  [optional and internal](#internal-note-and-external-key); a key an open
+  incident already has answers 200 with that incident.
 - **Update** appends to the timeline and moves `status`. The status must
-  belong to the incident's kind. With [email subscribers](subscribers.md)
+  belong to the incident's kind, and one that reopens a resolved incident
+  is 422 while another open incident holds its `external_key`. With [email subscribers](subscribers.md)
   on, each new incident and update is emailed to the subscribers of its
   components; `"notify": false` (default `true`) posts an update without
   emailing it, for a typo fix or a minor note. An update to a draft is

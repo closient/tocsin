@@ -154,8 +154,9 @@ struct IncidentsInput {
     /// Incidents per page; default 20, at most 100 (more is cut to 100).
     #[schemars(range(min = 1, max = 100))]
     limit: Option<u32>,
-    /// Only the incident created with this `external_key`, draft or
-    /// published: a page of one, or of none. Needs `status:read`.
+    /// Only the incidents created with this `external_key`, draft or
+    /// published, open or resolved, newest first: at most one is open.
+    /// Needs `status:read`.
     external_key: Option<String>,
 }
 
@@ -386,7 +387,7 @@ impl Server {
 
     /// Incidents and maintenance, newest first, with every update; with
     /// the `status:read` scope, drafts and each one's `internal_note` and
-    /// `external_key` too, and `external_key` finds one by its key.
+    /// `external_key` too, and `external_key` pages through those with that key.
     #[tool(name = "list_incidents")]
     async fn list_incidents(
         &self,
@@ -459,8 +460,8 @@ impl Server {
     /// publishes it from the admin or the internal board. Needs the
     /// `incident:draft` scope; `draft: false` publishes at once and needs
     /// `incident`. `internal_note` is never public; with an `external_key`
-    /// some incident already has, that incident is answered and nothing is
-    /// written. The note and key come back only with `status:read`.
+    /// an open incident already has, that incident is answered and nothing
+    /// is written; a resolved incident has freed its key. The note and key come back only with `status:read`.
     #[tool(name = "create_incident")]
     async fn create_incident(
         &self,

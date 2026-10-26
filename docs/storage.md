@@ -368,10 +368,15 @@ incident is never deleted.
 **Internals** (migration 0012): `internal_note` and `external_key`, both
 optional, never an empty string. The note is Markdown for the people
 working the incident; an edit replaces it. The key is set at creation only
-(a trigger refuses changing it) and a partial unique index allows each
-non-`NULL` key once, so a create carrying a key some incident already has
-answers that incident instead of inserting. Discarding a draft deletes the
-row and so frees its key; a published incident holds its key for good.
+(a trigger refuses changing it). Since migration 0013 a partial unique
+index allows each non-`NULL` key once among incidents with `resolved_at
+IS NULL`, so a create carrying a key an open incident already has answers
+that incident instead of inserting. Resolving an incident (or completing
+a maintenance) sets `resolved_at` and frees its key; discarding a draft
+deletes the row and frees it too. A second, non-unique partial index on
+the key serves the list of every incident with a key. Reopening clears
+`resolved_at`, so the store refuses a reopen while another open incident
+holds the key, and the unique index backs that up.
 Ordinary reads leave both columns out; one read fetches them by incident
 id for the callers trusted with them (see
 [incidents.md](incidents.md#internal-note-and-external-key)). An edit's

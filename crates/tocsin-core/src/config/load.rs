@@ -658,7 +658,7 @@ impl<'a> Loader<'a> {
                 self.report(
                     &token.origin.key("scopes"),
                     "a token needs at least one scope",
-                    Some("scopes are heartbeat, incident, release, status:read and subscribers:admin".to_owned()),
+                    Some("scopes are heartbeat, incident, incident:draft, release, silence, status:read and subscribers:admin".to_owned()),
                 );
             }
         }
@@ -745,6 +745,13 @@ impl<'a> Loader<'a> {
             self.report(
                 &origin.key("max_concurrent_checks"),
                 "`max_concurrent_checks` must be at least 1",
+                None,
+            );
+        }
+        if value.max_silence.get().is_zero() {
+            self.report(
+                &origin.key("max_silence"),
+                "`max_silence` must be longer than 0s",
                 None,
             );
         }

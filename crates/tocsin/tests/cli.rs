@@ -549,7 +549,7 @@ fn db_info_reports_rows_and_the_oldest_result() {
     let info = json_stdout(&output);
     assert_eq!(info["rows"]["check_result"], 4);
     assert_eq!(info["rows"]["daily_rollup"], 0);
-    assert_eq!(info["schema_version"], 13);
+    assert_eq!(info["schema_version"], 14);
     assert!(info["size_bytes"].as_u64().unwrap() > 0);
     assert_eq!(
         info["oldest_result"],
@@ -653,13 +653,13 @@ fn db_info_reports_a_newer_schema_without_touching_it() {
     );
     let info = json_stdout(&output);
     assert_eq!(info["schema_version"], 99);
-    assert_eq!(info["supported_schema_version"], 13);
+    assert_eq!(info["supported_schema_version"], 14);
     assert_eq!(info["rows"]["check_result"], 4);
     assert_eq!(user_version(&data), 99);
 
     let text = tocsin(&["db", "info", "--data", data_arg(&data)]);
     assert!(
-        String::from_utf8_lossy(&text.stdout).contains("newer than this build's 13"),
+        String::from_utf8_lossy(&text.stdout).contains("newer than this build's 14"),
         "{}",
         String::from_utf8_lossy(&text.stdout)
     );
@@ -1091,9 +1091,10 @@ fn config_check_warns_of_a_slack_connection_not_connected() {
     assert_eq!(std::fs::read_dir(data.path()).unwrap().count(), 0);
 }
 
-/// What `tocsin incident new` sends to a server that answers 500 after
-/// reading one request: the JSON body of that request.
-fn body_sent_by_incident_new(extra: &[&str]) -> Value {
+/// What `tocsin` run with `args` (holding `{url}` for the server) sends to
+/// a server that answers 500 after reading one request: the JSON body of
+/// that request.
+fn body_sent_by(args: &[&str]) -> Value {
     use std::io::Write;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -1122,11 +1123,21 @@ fn body_sent_by_incident_new(extra: &[&str]) -> Value {
             .unwrap();
         body
     });
+    let args: Vec<&str> = args
+        .iter()
+        .map(|arg| if *arg == "{url}" { url.as_str() } else { arg })
+        .collect();
+    tocsin(&args);
+    serde_json::from_str(&server.join().unwrap()).unwrap()
+}
+
+/// What `tocsin incident new` sends: see [`body_sent_by`].
+fn body_sent_by_incident_new(extra: &[&str]) -> Value {
     let mut args = vec![
         "incident",
         "new",
         "--url",
-        &url,
+        "{url}",
         "--token",
         "t",
         "--title",
@@ -1135,8 +1146,7 @@ fn body_sent_by_incident_new(extra: &[&str]) -> Value {
         "Looking into it.",
     ];
     args.extend_from_slice(extra);
-    tocsin(&args);
-    serde_json::from_str(&server.join().unwrap()).unwrap()
+    body_sent_by(&args)
 }
 
 #[test]
@@ -1155,4 +1165,90 @@ fn incident_new_draft_sends_draft_true_and_the_default_leaves_it_out() {
     // Absent, the server decides from the token's scope.
     let plain = body_sent_by_incident_new(&[]);
     assert!(plain.get("draft").is_none(), "{plain}");
+}
+
+#[test]
+fn silence_new_sends_its_expiry_as_given_and_never_a_creator() {
+    let body = body_sent_by(&[
+        "silence",
+        "new",
+        "--url",
+        "{url}",
+        "--token",
+        "t",
+        "--subject",
+        "api",
+        "--subject-kind",
+        "check",
+        "--expires",
+        "30m",
+        "--reason",
+        "deploying",
+    ]);
+    // A duration is sent as one, so the server's clock starts it, not
+    // this host's.
+    assert_eq!(body["expires_in"], "30m", "{body}");
+    assert!(body.get("expires_at").is_none(), "{body}");
+    assert_eq!(
+        body["matchers"],
+        serde_json::json!({ "subject": "api", "subject_kind": "check" })
+    );
+    assert_eq!(body["reason"], "deploying");
+    assert!(
+        body.get("created_by").is_none(),
+        "the server records who: {body}"
+    );
+
+    let body = body_sent_by(&[
+        "silence",
+        "new",
+        "--url",
+        "{url}",
+        "--token",
+        "t",
+        "--episode",
+        "7",
+        "--expires",
+        "2026-10-23T14:05:00Z",
+        "--reason",
+        "known",
+    ]);
+    assert_eq!(body["expires_at"], "2026-10-23T14:05:00.000Z", "{body}");
+    assert!(body.get("expires_in").is_none(), "{body}");
+    assert_eq!(body["episode"], 7);
+}
+
+#[test]
+fn silence_new_without_an_expiry_is_invalid_input() {
+    let output = tocsin(&[
+        "--json",
+        "silence",
+        "new",
+        "--url",
+        "http://127.0.0.1:9",
+        "--token",
+        "t",
+        "--subject",
+        "api",
+        "--reason",
+        "deploying",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(json_stdout(&output)["error"]["kind"], "invalid_input");
+    let output = tocsin(&[
+        "--json",
+        "silence",
+        "new",
+        "--url",
+        "http://127.0.0.1:9",
+        "--token",
+        "t",
+        "--subject",
+        "api",
+        "--reason",
+        "deploying",
+        "--expires",
+        "whenever",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
 }

@@ -54,6 +54,8 @@ pub mod scope {
     pub struct Heartbeat;
     /// `release`: releases and deploys.
     pub struct Release;
+    /// `silence`: making, reading and ending silences.
+    pub struct Silence;
 
     /// `status:read`: reading what is not public.
     pub struct StatusRead;
@@ -76,6 +78,10 @@ pub mod scope {
     impl super::Scope for Release {
         const SCOPE: TokenScope = TokenScope::Release;
         const NAME: &'static str = "release";
+    }
+    impl super::Scope for Silence {
+        const SCOPE: TokenScope = TokenScope::Silence;
+        const NAME: &'static str = "silence";
     }
     impl super::Scope for StatusRead {
         const SCOPE: TokenScope = TokenScope::StatusRead;

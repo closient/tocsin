@@ -67,6 +67,7 @@ tocsin probe run <check> [--config <dir>] --json # one check, once: facts and ea
 tocsin openapi                               # the HTTP API's OpenAPI document
 tocsin incident new|update|edit|show|list|export ...  # HTTP client: TOCSIN_URL, TOCSIN_TOKEN (or --url, --token)
 tocsin release publish|deployed ...                    # HTTP client, as above; docs/releases.md
+tocsin silence new|list|show|expire ...                # HTTP client, `silence` scope; docs/alerting.md#silences
 tocsin maintenance schedule --start <rfc3339> --end <rfc3339> ...
 tocsin status --json                                    # HTTP client: the page now; exit 1 when degraded or down
 tocsin history <check> --since 2h --json                # raw results; TOCSIN_TOKEN needs status:read

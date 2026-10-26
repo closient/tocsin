@@ -71,6 +71,12 @@ pub enum Command {
         #[command(subcommand)]
         command: ReleaseCommand,
     },
+    /// Hold alert messages back for a while on a running server. Needs a
+    /// token with the `silence` scope.
+    Silence {
+        #[command(subcommand)]
+        command: SilenceCommand,
+    },
     /// Try the alert notifiers.
     Notify {
         #[command(subcommand)]
@@ -175,8 +181,8 @@ pub struct ServerArgs {
     /// A `[[token]]` secret with the scope the command needs: `incident`
     /// (or `incident:draft`, for drafts only) for incidents and
     /// maintenance, `release` for releases, `heartbeat`
-    /// for pings, `status:read` to read what is not public and for
-    /// `config status`. Prefer the environment variable: arguments show in
+    /// for pings, `silence` for silences, `status:read` to read what is
+    /// not public and for `config status`. Prefer the environment variable: arguments show in
     /// `ps`.
     #[arg(
         long,
@@ -404,6 +410,91 @@ pub enum MaintenanceCommand {
         #[arg(long)]
         impact: Option<Impact>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SilenceCommand {
+    /// Hold back the alert messages the matchers name until `--expires`.
+    /// Give at least one matcher, or `--episode`. Who made it is the
+    /// token; it can be ended early but never extended.
+    New {
+        #[command(flatten)]
+        server: ServerArgs,
+
+        /// Only alerts from this node.
+        #[arg(long, value_name = "NODE")]
+        node: Option<String>,
+
+        /// Only alerts for checks, or only for heartbeats.
+        #[arg(long, value_name = "KIND")]
+        subject_kind: Option<SubjectKindArg>,
+
+        /// Only alerts for this `[[check]]` or `[[heartbeat]]`.
+        #[arg(long, value_name = "ID")]
+        subject: Option<String>,
+
+        /// Only alerts for checks on this `[[component]]`.
+        #[arg(long, value_name = "ID")]
+        component: Option<String>,
+
+        /// Only messages to this `[[notifier]]`.
+        #[arg(long, value_name = "ID")]
+        notifier: Option<String>,
+
+        /// Only during this outage: the silence ends when it does, and
+        /// matches its node and subject unless told otherwise.
+        #[arg(long, value_name = "OUTAGE")]
+        episode: Option<i64>,
+
+        /// When it ends: a duration from now, such as `30m` or `4h`, which
+        /// the server counts from when it receives the silence, or an RFC
+        /// 3339 instant. At most `[server] max_silence` away.
+        #[arg(long, value_name = "WHEN", value_parser = crate::silence::parse_expires)]
+        expires: crate::silence::Expires,
+
+        /// Why, for whoever reads the silence later.
+        #[arg(long)]
+        reason: String,
+    },
+    /// List silences, newest first, active or over.
+    List {
+        #[command(flatten)]
+        server: ServerArgs,
+
+        /// How many, 1 to 100.
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+
+        /// Only silences with a smaller id: the previous page's
+        /// `next_before`.
+        #[arg(long, value_name = "ID")]
+        before: Option<i64>,
+    },
+    /// One silence, with the messages it held back.
+    Show {
+        #[command(flatten)]
+        server: ServerArgs,
+
+        /// The silence's id.
+        id: i64,
+    },
+    /// End a silence now.
+    Expire {
+        #[command(flatten)]
+        server: ServerArgs,
+
+        /// The silence's id.
+        id: i64,
+    },
+}
+
+/// `--subject-kind`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum SubjectKindArg {
+    /// A `[[check]]`.
+    Check,
+    /// A `[[heartbeat]]`.
+    Heartbeat,
 }
 
 #[derive(Debug, Subcommand)]

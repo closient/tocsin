@@ -118,6 +118,7 @@ Fields marked **may be secret** take either a value written in the file or an en
 | `data_dir` | path | none | Folder for the SQLite database. A relative path is relative to the config folder. `tocsin serve --data` overrides it; one of the two is required. |
 | `retention_days` | integer | `90` | Whole UTC days of raw check results kept before today; daily rollups are kept forever. At least 1. See [storage.md](storage.md#retention). |
 | `max_concurrent_checks` | integer | `64` | Most probes running at once across all checks; the rest wait for a slot. At least 1. See [engine.md](engine.md#scheduling). |
+| `max_silence` | duration | `"24h"` | The furthest ahead a [silence](alerting.md#silences) may expire when it is made. Not zero. Nothing extends a silence, so a longer one is a new one. |
 
 ### `[server.email]`
 
@@ -478,5 +479,5 @@ A bearer token for the API: writing incidents, releases and heartbeats, and read
 |-----|------|-|
 | `id` | id | Required. Logged with each write. |
 | `secret` | secret | Required. Two tokens may not resolve to the same value; the error names both tokens, never the value. |
-| `scopes` | list of `heartbeat`, `incident`, `incident:draft`, `release`, `status:read`, `subscribers:admin` | Required, at least one. `incident:draft` writes [draft incidents](incidents.md#drafts) only and can never publish one: give it to an agent. `release` publishes releases and stamps deploys; `subscribers:admin` lists and removes [subscribers](subscribers.md#for-operators); `status:read` reads what the public cannot: non-public components, checks and heartbeats on one or on no component, non-public projects' releases and deploys, check targets, raw check results, and [the reload status](#reloading). See [api.md](api.md#who-sees-what). |
+| `scopes` | list of `heartbeat`, `incident`, `incident:draft`, `release`, `silence`, `status:read`, `subscribers:admin` | Required, at least one. `incident:draft` writes [draft incidents](incidents.md#drafts) only and can never publish one: give it to an agent. `release` publishes releases and stamps deploys; `silence` makes, reads and ends [silences](alerting.md#silences); `subscribers:admin` lists and removes [subscribers](subscribers.md#for-operators); `status:read` reads what the public cannot: non-public components, checks and heartbeats on one or on no component, non-public projects' releases and deploys, check targets, raw check results, and [the reload status](#reloading). See [api.md](api.md#who-sees-what). |
 | `description` | string | Optional. Who or what uses the token. |

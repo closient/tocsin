@@ -132,6 +132,9 @@ it cannot publish at all.
 | `discard_incident` | `DELETE /api/v1/incidents/{id}` | `incident` or `incident:draft` | The discarded draft. A published incident is refused. |
 | `publish_release` | `POST /api/v1/releases` | `release` | The release, new or updated. |
 | `mark_deployed` | `POST /api/v1/releases/{project}/{version}/deployed` | `release` | The release with its deploy time. |
+| `create_silence` | `POST /api/v1/silences` | `silence` | The new [silence](alerting.md#silences). `reason` is required, and exactly one of `expires_in` (such as `"30m"`, from the server's clock) or `expires_at`, at most `[server] max_silence` away. Give `episode`, an outage id from `list_outages`, to quiet one outage: the silence ends with it. Who made it is the token. |
+| `list_silences` | `GET /api/v1/silences` | `silence` | Silences, newest first, each with the messages it held back. |
+| `expire_silence` | `POST /api/v1/silences/{id}/expire` | `silence` | The silence, ended now. Nothing extends one. |
 | `validate_config` | none; `tocsin mcp` only | none | `tocsin config check --json` on a folder: `ok` and what it holds, or `ok: false` with every error. |
 
 "Any token" is any known token on `/mcp`, and no token at all through
@@ -154,7 +157,7 @@ below 1 is 1.
 | Tool | Default | Largest |
 |---|---|---|
 | `list_outages`, `get_check_history`, `get_timeline` | 100 | 500 |
-| `list_incidents` | 20 | 100 |
+| `list_incidents`, `list_silences` | 20 | 100 |
 | `list_releases` | 50 | 200 |
 
 Use the result's cursor (`next_before`, or `next_after` on the timeline) as

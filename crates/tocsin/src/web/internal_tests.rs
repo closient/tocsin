@@ -167,6 +167,7 @@ pub(super) fn serve(config: Config, admin: Option<AdminAuth>) -> Board {
         admin: admin.map(Arc::new),
         live: Arc::new(snapshot()),
         heartbeats: HeartbeatHandle::default(),
+        alert_wake: Arc::default(),
         config_status: crate::reload::steady_status(),
         metrics: Arc::new(crate::metrics::Metrics::new()),
         subscribers: None,

@@ -132,6 +132,101 @@ verifying against the system's root certificates. On a system without any,
 `serve` keeps running: it logs an error at startup, and each HTTPS delivery
 fails and is recorded as failed.
 
+## Silences
+
+A silence holds back the messages for the alerts it matches until it
+expires. It never stops an alert: the outage, the alert and each message are
+still recorded, and a message held back is marked `silenced` with the
+silence's id instead of being sent, so the history shows exactly what was
+kept quiet and by which silence.
+
+```sh
+export TOCSIN_URL=https://status.example.com TOCSIN_TOKEN=...   # `silence` scope
+
+tocsin silence new --subject api-https --expires 2h --reason "deploying the api"
+tocsin silence new --episode 812 --expires 4h --reason "known: upstream DNS"
+tocsin silence list [--limit N] [--before ID] [--json]
+tocsin silence show <id> [--json]
+tocsin silence expire <id> [--json]
+```
+
+**Matchers.** `node`, `subject_kind` (`check` or `heartbeat`), `subject`
+(a `[[check]]` or `[[heartbeat]]` id), `component` and `notifier`. Each one
+given must equal the alert's; one left out matches anything. At least one
+matcher, or an episode, is required, and each id must be in the
+configuration when the silence is made. Matching on `notifier` keeps one
+channel quiet while the others still hear.
+
+**Expiry.** Every silence ends: give exactly one of `expires_in`, a
+duration (`30m`, `1h30m`) the server counts from its own clock, or
+`expires_at`, an instant. Either must land ahead of now and at most
+`[server] max_silence` away (default 24 hours; see
+[config.md](config.md#server)), and the silence records the instant. The
+CLI's `--expires` takes either: a duration is sent as `expires_in`, so a
+skewed client clock cannot shorten or stretch it, and an RFC 3339 instant
+as `expires_at`. A silence is never
+extended, and nothing renews one: when it runs out, a person who still
+wants quiet makes a new one, with a reason of their own. It can be ended
+early (`expire`), once.
+
+**Episodes.** `episode` scopes a silence to one outage, by the id
+`tocsin outages` and `list_outages` show. The matchers default to that
+outage's node, subject kind and subject, and the silence stops applying
+when the outage ends, even before it expires. Any change of health ends
+an outage: a move from degraded to down (or back) opens a new one at once,
+and a failure after a recovery opens another later, so the alert fires
+again and is heard. A silence cannot be scoped to an outage that has
+already ended.
+
+**Who and why.** `created_by` (and `ended_by`) is the token or signed-in
+person the server authenticated, recorded by the server; a request that
+names one is refused. `reason` is required and kept with the silence.
+
+**What is held.** The delivery worker checks the active silences as each
+message comes due, so a repeat of an alert that was already firing is held
+too. A fire or repeat is held while a matching silence applies (an
+episode's silence only for alerts that fired for that outage).
+
+A resolve or a cancel is about something the receiver may have heard, so
+the rule for both is whether a fire or repeat was ever *attempted*, not
+whether one was delivered: a send whose answer timed out, or which failed,
+may still have arrived. Once any send was attempted, the resolve goes out
+and a Pushover emergency's cancel goes out, whatever silence applies. Only
+when every fire and repeat for the alert was held, and none was ever
+attempted, is the resolve held too (recorded under the silence that held
+the latest fire, even if that silence has since ended) and the cancel
+dropped, since nothing was ringing. When in doubt, tocsin sends.
+
+When a silence stops applying to an alert that is still firing, by
+expiring, being ended early or its episode ending, and that alert's
+current fire was held with nothing delivered for it or still to send, the
+worker queues a fresh fire at once (it wakes when a silence expires, and
+ending one early wakes it), so an outage that outlasts its silence is
+heard. An escalation counts: an alert heard as degraded that went down
+under the silence fires as down once it ends. This rings a Pushover
+emergency route again. An alert whose current fire was already heard
+before the silence gets no fresh fire: its next repeat goes
+out on the route's schedule, and a route without `repeat` stays quiet
+until the outage ends. A silence does not stop an emergency already
+ringing; acknowledge that in Pushover.
+
+**History.** Silences are kept forever. Each one is read back with its
+state (`active`, `expired`, `ended` or `episode_ended`), `held_total`, and
+its 100 newest held messages: kind, health, alert, node, subject, notifier
+and when. Held delivery rows are pruned with failed ones, after 90 days.
+
+| Method and path | Success |
+|---|---|
+| `POST /api/v1/silences` | 201 with `Location`, the silence; 422 by field for no expiry or both kinds, one past `max_silence`, an unknown id, or an episode that is missing or over |
+| `GET /api/v1/silences?before=&limit=` | 200, `{silences, next_before}`, newest first; `limit` 1 to 100, default 20 |
+| `GET /api/v1/silences/{id}` | 200, the silence |
+| `POST /api/v1/silences/{id}/expire` | 200, the silence, ended now; one already over is answered as it is |
+
+Every silence route, reads included, needs a token with the `silence`
+scope. The MCP tools `create_silence`,
+`list_silences` and `expire_silence` call the same routes; see
+[mcp.md](mcp.md#tools).
+
 ## Notifiers
 
 | `type` | Fire and repeat | Resolve |

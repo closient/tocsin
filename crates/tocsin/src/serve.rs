@@ -230,6 +230,7 @@ async fn serve(
         admin,
         live: Arc::new(monitor.status_handle()),
         heartbeats: monitor.heartbeats(),
+        alert_wake: monitor.alert_waker(),
         config_status,
         metrics: Arc::clone(&metrics),
         subscribers: subscriptions,
@@ -470,6 +471,12 @@ impl Monitor {
         end_alerts_without_notifier(&self.store, &self.notifiers)
             .await
             .map_err(ReloadError::Unfinished)
+    }
+
+    /// Wakes the alert delivery worker. A reload keeps the same worker,
+    /// so the handle stays good across reloads.
+    pub(crate) fn alert_waker(&self) -> Arc<tokio::sync::Notify> {
+        self.alerter.waker()
     }
 
     /// Takes heartbeat pings to the engine.
@@ -1066,6 +1073,7 @@ mod tests {
             admin: None,
             live: Arc::new(tocsin_engine::Snapshot::default()),
             heartbeats: tocsin_engine::HeartbeatHandle::default(),
+            alert_wake: Arc::default(),
             config_status: crate::reload::steady_status(),
             metrics: Arc::new(crate::metrics::Metrics::new()),
             subscribers: None,
@@ -1352,6 +1360,7 @@ mod tests {
             admin: None,
             live: Arc::new(monitor.engine.status_handle()),
             heartbeats: monitor.heartbeats(),
+            alert_wake: monitor.alert_waker(),
             config_status: crate::reload::steady_status(),
             metrics,
             subscribers: None,

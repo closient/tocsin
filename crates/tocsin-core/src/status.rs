@@ -80,13 +80,26 @@ pub struct ComponentDetail {
 }
 
 /// Whether a member of a component is probed or pinged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckKind {
     /// A `[[check]]`: tocsin probes it.
     Check,
     /// A `[[heartbeat]]`: it pings tocsin.
     Heartbeat,
+}
+
+impl CheckKind {
+    /// How the API and the database spell it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CheckKind::Check => "check",
+            CheckKind::Heartbeat => "heartbeat",
+        }
+    }
 }
 
 /// `GET /api/v1/checks`: every check and heartbeat.

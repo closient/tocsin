@@ -154,6 +154,9 @@ struct IncidentsInput {
     /// Incidents per page; default 20, at most 100 (more is cut to 100).
     #[schemars(range(min = 1, max = 100))]
     limit: Option<u32>,
+    /// Only the incident created with this `external_key`, draft or
+    /// published: a page of one, or of none. Needs `status:read`.
+    external_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -382,7 +385,8 @@ impl Server {
     }
 
     /// Incidents and maintenance, newest first, with every update; with
-    /// the `status:read` scope, drafts too.
+    /// the `status:read` scope, drafts and each one's `internal_note` and
+    /// `external_key` too, and `external_key` finds one by its key.
     #[tool(name = "list_incidents")]
     async fn list_incidents(
         &self,
@@ -400,6 +404,7 @@ impl Server {
                         incidents::ListQuery {
                             before: input.before,
                             limit: Some(limit),
+                            external_key: input.external_key,
                         },
                     )
                     .await
@@ -409,6 +414,7 @@ impl Server {
             Backend::Remote(api) => {
                 let mut query = vec![("limit", limit.to_string())];
                 query.extend(input.before.map(|before| ("before", before.to_string())));
+                query.extend(input.external_key.map(|key| ("external_key", key)));
                 remote(get(api, &["api", "v1", "incidents"], &query, api.has_token()).await)
             }
         }
@@ -452,7 +458,9 @@ impl Server {
     /// people and `status:read` tokens, announced to nobody, until a person
     /// publishes it from the admin or the internal board. Needs the
     /// `incident:draft` scope; `draft: false` publishes at once and needs
-    /// `incident`.
+    /// `incident`. `internal_note` is never public; with an `external_key`
+    /// some incident already has, that incident is answered and nothing is
+    /// written. The note and key come back only with `status:read`.
     #[tool(name = "create_incident")]
     async fn create_incident(
         &self,
@@ -463,8 +471,10 @@ impl Server {
         match &self.backend {
             Backend::Local(state) => local(
                 async {
-                    let writer = caller(&extensions)?.incident_writer()?;
-                    incidents::open(state, new, &writer).await
+                    let caller = caller(&extensions)?;
+                    let writer = caller.incident_writer()?;
+                    let (incident, _) = incidents::open(state, new, &writer).await?;
+                    incidents::revealed_one(state, caller.viewer(), incident).await
                 }
                 .await,
             ),
@@ -489,8 +499,10 @@ impl Server {
         match &self.backend {
             Backend::Local(state) => local(
                 async {
-                    let writer = caller(&extensions)?.incident_writer()?;
-                    incidents::append(state, input.id, update, &writer).await
+                    let caller = caller(&extensions)?;
+                    let writer = caller.incident_writer()?;
+                    let incident = incidents::append(state, input.id, update, &writer).await?;
+                    incidents::revealed_one(state, caller.viewer(), incident).await
                 }
                 .await,
             ),

@@ -12,6 +12,15 @@
 {%- if !incident.components.is_empty() %}
 <p class="muted">Components: {{ incident.components.join(", ") }}</p>
 {%- endif %}
+{%- if let Some(key) = incident.external_key %}
+<p class="muted">External key: <code>{{ key }}</code></p>
+{%- endif %}
+{%- if let Some(note) = note_html %}
+<section class="internal-note">
+  <h2>Internal note <span class="hint">Never public, even once published</span></h2>
+  <div class="markdown">{{ note|safe }}</div>
+</section>
+{%- endif %}
 
 {%- if !errors.is_empty() %}
 <div class="notice error" role="alert">

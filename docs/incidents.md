@@ -25,6 +25,7 @@ told to nobody, until a person publishes it.
 | `published_at`, `published_by` | When and by whom it went public; both `null` while it is a [draft](#drafts). An incident created published has the creation's time and author. |
 | `updated_at`, `updated_by` | The last update or edit, and who sent it. |
 | `updates` | The timeline, oldest first. |
+| `internal_note`, `external_key` | Optional, and never public: see [below](#internal-note-and-external-key). Present only for a reader trusted with them. |
 
 Each update has a `status`, a Markdown `message`, `created_at` and
 `created_by`. Updates are append-only; the first is the opening message.
@@ -87,6 +88,39 @@ be discarded (409); resolve it instead.
 Drafts are listed at the top of the internal board and marked on the admin
 page with who wrote them.
 
+## Internal note and external key
+
+Two optional fields carry what the people working an incident need and the
+public must never read. An agent that drafts an incident from its alerts,
+say, puts its evidence and ticket link in the note and its own name for
+the trouble in the key.
+
+- **`internal_note`** is Markdown for operators: evidence, host names, a
+  ticket link. It is set on create and changed by an edit, by an
+  `incident` token or an `incident:draft` one (on a draft only, as for any
+  edit). An edit replaces the whole note; `""` clears it.
+- **`external_key`** is the caller's own id for what the incident is about,
+  one line of up to 200 characters. It is set on create only and never
+  changes. Each key belongs to one incident: a create carrying a key some
+  incident already has writes nothing, emits nothing and tells nobody, and
+  answers that incident, unchanged, with **200** instead of 201 (and the
+  same `Location`). The request is still checked first, so an invalid one
+  is 422 either way. This is how a [release](releases.md#http-api) posted
+  again answers: 201 for a new one, 200 for one that already existed. So a
+  sender can retry, or run again on the same trouble, without opening a
+  second incident. Discarding a draft frees its key; a published incident
+  keeps its key for good, so a key for one occurrence of a problem should
+  say which occurrence (a date, say).
+
+Both are **internal for the incident's whole life**, draft or published.
+They are returned only to a token with `status:read` (on any read, and on
+the answer to a write) and shown on the [admin page](admin.md). The status
+page and its incident pages, the public API, `status.json`, the Atom feeds,
+the event streams, `llms.txt`, the Markdown export, subscriber email and
+Slack never carry them. A write made by a token without `status:read`,
+such as a plain `incident:draft` one, is answered without them: give an
+agent both scopes if it should read back what it wrote.
+
 ## Tokens
 
 Writes need a bearer token whose `[[token]]` entry has one of two scopes:
@@ -122,23 +156,29 @@ served at `GET /api/v1/openapi.json` and committed as
 
 | Method and path | Token | Body | Success |
 |---|---|---|---|
-| `GET /api/v1/incidents?limit=&before=` | none; `status:read` adds drafts | | 200, `{incidents, next_before}` |
-| `GET /api/v1/incidents/{id}` | none; `status:read` for a draft | | 200, the incident |
-| `POST /api/v1/incidents` | `incident` or `incident:draft` | `{kind, title, impact, components, status, message, scheduled_start, scheduled_end, notify, draft}` | 201, the incident, with `Location` |
+| `GET /api/v1/incidents?limit=&before=` | none; `status:read` adds drafts and internals | | 200, `{incidents, next_before}` |
+| `GET /api/v1/incidents?external_key=` | `status:read` | | 200, `{incidents, next_before}`: the one incident with that key, or none |
+| `GET /api/v1/incidents/{id}` | none; `status:read` for a draft and internals | | 200, the incident |
+| `POST /api/v1/incidents` | `incident` or `incident:draft` | `{kind, title, impact, components, status, message, scheduled_start, scheduled_end, notify, draft, internal_note, external_key}` | 201, the incident, with `Location`; 200 if its `external_key` is taken |
 | `POST /api/v1/incidents/{id}/updates` | `incident`, or `incident:draft` on a draft | `{status, message, notify}` | 201, the incident |
-| `PATCH /api/v1/incidents/{id}` | `incident`, or `incident:draft` on a draft | any of `{title, impact, components, scheduled_start, scheduled_end}` | 200, the incident |
+| `PATCH /api/v1/incidents/{id}` | `incident`, or `incident:draft` on a draft | any of `{title, impact, components, scheduled_start, scheduled_end, internal_note}` | 200, the incident |
 | `POST /api/v1/incidents/{id}/publish` | `incident` | `{notify}`, or no body | 200, the incident |
 | `DELETE /api/v1/incidents/{id}` | `incident` or `incident:draft` | none | 200, the discarded draft |
 
 - **List** returns newest first. `limit` is 1 to 100 (default 20).
   `next_before` is set when more incidents follow; pass it as `before` for
   the next page. It is `null` on the last page, even a full one.
+  `external_key` finds the incident created with that key, draft or
+  published, as a page of one (or none); without a `status:read` token it
+  is 403.
 - **Create** needs `title` and `message`; `kind` defaults to `incident`,
   `impact` to `none`, `components` to none, and `status` to the kind's first
   status. Maintenance needs `scheduled_start` and `scheduled_end`.
   `"notify": false` (default `true`) opens it without emailing subscribers.
   `"draft": true` makes it a [draft](#drafts); left out, it follows the
-  token's scope.
+  token's scope. `internal_note` and `external_key` are
+  [optional and internal](#internal-note-and-external-key); a key already
+  taken answers 200 with the incident that has it.
 - **Update** appends to the timeline and moves `status`. The status must
   belong to the incident's kind. With [email subscribers](subscribers.md)
   on, each new incident and update is emailed to the subscribers of its
@@ -169,7 +209,7 @@ Every error, including an unknown route (404) or method (405), is JSON:
 |---|---|---|
 | 400 | `bad_request` | The body is not JSON, or has trailing data. |
 | 401 | `unauthorized` | No bearer token, or one no `[[token]]` has. Carries `WWW-Authenticate: Bearer`. |
-| 403 | `forbidden` | The token lacks the scope the write needs; an `incident:draft` token publishing or writing to a published incident. The message names the token id. |
+| 403 | `forbidden` | The token lacks the scope the write needs; an `incident:draft` token publishing or writing to a published incident; `?external_key=` without `status:read`. A refused write names the token id. |
 | 404 | `not_found` | No incident with that id (or a draft, to a caller without `status:read`), or no such route. |
 | 409 | `conflict` | Publishing an incident already published, or discarding one. |
 | 405 | `method_not_allowed` | The route exists; the method does not. |
@@ -186,8 +226,10 @@ token learns nothing about the body rules.
 Every successful write emits one event on the server's internal event bus,
 after its transaction commits: `incident_created`, `incident_updated` (an
 update was appended), `incident_edited`, `incident_published` or
-`incident_discarded`, each carrying the incident as the API returns it.
-Refused writes emit nothing. An event about a draft reaches only the
+`incident_discarded`, each carrying the incident as the API returns it to
+the public, without its internal note and key.
+Refused writes emit nothing, and so does a create answered with an
+existing incident's key. An event about a draft reaches only the
 internal board's stream and `status:read` readers; the public stream first
 hears of a draft when it is published. The engine publishes
 `check_changed` and `component_changed` on the same bus, and rereads
@@ -214,14 +256,18 @@ tocsin incident new --title "API errors" --impact major \
   --component api --component web --message "Looking into elevated errors."
 tocsin incident new --title "Typo test" --message "Ignore." --quiet  # no email
 tocsin incident new --title "API errors" --message "Looking into it." --draft
+tocsin incident new --title "Website unavailable" --message "We are investigating." --draft \
+  --internal-note "Evidence and the ticket link." --external-key "website-down/2026-10-25"
 tocsin incident publish 9 [--quiet]
 tocsin incident discard 10
 tocsin incident update 7 --status identified --message "A bad deploy; rolling back."
 tocsin incident update 7 --status identified --message "Fixed a typo." --quiet  # no email
 tocsin incident edit 7 --title "API errors in eu-west" --component api
 tocsin incident edit 7 --no-components
+tocsin incident edit 7 --internal-note "Root cause: the bad deploy."  # "" clears it
 tocsin incident show 7
 tocsin incident list --json [--limit 50] [--before 7]
+tocsin incident list --external-key "website-down/2026-10-25"  # needs status:read
 
 tocsin maintenance schedule --start 2026-11-01T02:00:00Z --end 2026-11-01T03:00:00Z \
   --component api --message "Upgrading the database." [--title "..."] [--impact minor]

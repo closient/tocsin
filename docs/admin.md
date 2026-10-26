@@ -17,6 +17,11 @@ and a draft's page carries **Publish** (with its own "Notify subscribers"
 box) and **Discard**. Updates and edits to a draft are allowed and tell
 nobody; publishing tells subscribers once, with the newest update.
 
+An incident's page also shows its
+[internal note and external key](incidents.md#internal-note-and-external-key)
+when it has them, draft or published: the note is for the people working
+the incident and appears nowhere public.
+
 tocsin does no sign-in of its own. A proxy in front of it signs people in
 and tells tocsin who they are, in one of two ways:
 

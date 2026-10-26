@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tocsin_core::incident::{
     Actor, FieldError, Incident, IncidentEdit, IncidentList, NewIncident, NewUpdate,
 };
-use tocsin_store::Drafts;
+use tocsin_store::{Drafts, Opened};
 use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -47,7 +47,7 @@ pub fn drafts_for(viewer: Viewer) -> Drafts {
     }
 }
 
-/// `?before=&limit=` on the list.
+/// `?before=&limit=&external_key=` on the list.
 #[derive(Debug, Default, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 #[serde(deny_unknown_fields)]
@@ -56,10 +56,62 @@ pub struct ListQuery {
     pub before: Option<i64>,
     /// Page size, 1 to 100; default 20.
     pub limit: Option<u32>,
+    /// Only the incident given this `external_key` at creation, draft or
+    /// published: a page of one, or of none. Needs a `status:read` token.
+    pub external_key: Option<String>,
 }
 
-/// List incidents and maintenance, newest first. Drafts are listed only
-/// to a `status:read` token.
+/// Adds each incident's internal note and external key when `viewer` is
+/// trusted with them; for anyone else they stay out. Store reads never
+/// carry them, so this is the one way they reach an answer.
+///
+/// # Errors
+///
+/// 500 if the store fails.
+pub async fn revealed(
+    state: &AppState,
+    viewer: Viewer,
+    incidents: Vec<Incident>,
+) -> Result<Vec<Incident>, ApiError> {
+    if viewer != Viewer::Trusted || incidents.is_empty() {
+        return Ok(incidents);
+    }
+    let ids = incidents.iter().map(|incident| incident.id).collect();
+    let mut internals = state.store.incident_internals(ids).await?;
+    Ok(incidents
+        .into_iter()
+        .map(|incident| match internals.remove(&incident.id) {
+            Some(found) => incident.with_internals(found),
+            None => incident,
+        })
+        .collect())
+}
+
+/// [`revealed`] for one incident as the writes answer it.
+///
+/// # Errors
+///
+/// 500 if the store fails.
+pub async fn revealed_one(
+    state: &AppState,
+    viewer: Viewer,
+    incident: Arc<Incident>,
+) -> Result<Arc<Incident>, ApiError> {
+    if viewer != Viewer::Trusted {
+        return Ok(incident);
+    }
+    let incident = Arc::unwrap_or_clone(incident);
+    Ok(Arc::new(
+        revealed(state, viewer, vec![incident])
+            .await?
+            .pop()
+            .expect("one in, one out"),
+    ))
+}
+
+/// List incidents and maintenance, newest first. Drafts, and each
+/// incident's `internal_note` and `external_key`, are listed only to a
+/// `status:read` token; so is `?external_key=`.
 #[utoipa::path(
     get,
     path = "/api/v1/incidents",
@@ -69,6 +121,7 @@ pub struct ListQuery {
     responses(
         (status = 200, description = "One page, newest first", body = IncidentList),
         (status = 401, description = "An `Authorization` header with an unknown token", body = ErrorBody),
+        (status = 403, description = "`external_key` without a `status:read` token", body = ErrorBody),
         (status = 422, description = "A bad `before` or `limit`", body = ErrorBody),
     ),
 )]
@@ -87,7 +140,8 @@ pub async fn list_incidents(
 ///
 /// # Errors
 ///
-/// 422 for a `limit` out of range.
+/// 403 for `external_key` unless `viewer` is trusted; 422 for a `limit`
+/// out of range; 500 if the store fails.
 pub async fn list(
     state: &AppState,
     viewer: Viewer,
@@ -99,6 +153,18 @@ pub async fn list(
             "limit",
             format!("must be 1 to {MAX_LIMIT}"),
         )]));
+    }
+    if let Some(key) = query.external_key {
+        if viewer != Viewer::Trusted {
+            return Err(ApiError::forbidden(
+                "external_key needs a token with the `status:read` scope",
+            ));
+        }
+        let found = state.store.incident_keyed(key).await?;
+        return Ok(IncidentList {
+            incidents: revealed(state, viewer, found.into_iter().collect()).await?,
+            next_before: None,
+        });
     }
     // One more than the page holds says whether another page follows, so
     // the last page carries no cursor even when it is exactly full.
@@ -113,7 +179,7 @@ pub async fn list(
         .filter(|_| more)
         .map(|incident| incident.id);
     Ok(IncidentList {
-        incidents,
+        incidents: revealed(state, viewer, incidents).await?,
         next_before,
     })
 }
@@ -141,22 +207,27 @@ pub async fn naming(
 }
 
 /// The incident with that id if `viewer` may see it: a draft is 404 to
-/// anyone but a trusted viewer, as if it did not exist.
+/// anyone but a trusted viewer, as if it did not exist. A trusted viewer
+/// gets its internals too.
 ///
 /// # Errors
 ///
 /// 404 if there is none `viewer` may see; 500 if the store fails.
 pub async fn get(state: &AppState, viewer: Viewer, id: i64) -> Result<Incident, ApiError> {
-    state
+    let incident = state
         .store
         .incident(id)
         .await?
         .filter(|incident| !incident.is_draft() || viewer == Viewer::Trusted)
-        .ok_or_else(|| missing(id))
+        .ok_or_else(|| missing(id))?;
+    Ok(revealed(state, viewer, vec![incident])
+        .await?
+        .pop()
+        .expect("one in, one out"))
 }
 
-/// One incident with every update. A draft is shown only to a
-/// `status:read` token.
+/// One incident with every update. A draft, and the `internal_note` and
+/// `external_key`, are shown only to a `status:read` token.
 #[utoipa::path(
     get,
     path = "/api/v1/incidents/{id}",
@@ -180,7 +251,10 @@ pub async fn get_incident(
 
 /// Open an incident or announce scheduled maintenance, published or as a
 /// draft. `draft` left out publishes for an `incident` token and drafts
-/// for an `incident:draft` one.
+/// for an `incident:draft` one. With an `external_key` some incident
+/// already has, nothing is written and that incident is answered with
+/// 200, as a release posted again is. The answer carries `internal_note`
+/// and `external_key` only for a token that also has `status:read`.
 #[utoipa::path(
     post,
     path = "/api/v1/incidents",
@@ -189,6 +263,7 @@ pub async fn get_incident(
     request_body = NewIncident,
     responses(
         (status = 201, description = "Created; `Location` names it", body = Incident),
+        (status = 200, description = "An incident already has this `external_key`: that incident, unchanged; `Location` names it", body = Incident),
         (status = 401, description = "No token, or an unknown one", body = ErrorBody),
         (status = 403, description = "The token has neither incident scope, or asks to publish (`\"draft\": false`) with only `incident:draft`", body = ErrorBody),
         (status = 422, description = "Invalid fields, by path", body = ErrorBody),
@@ -197,14 +272,19 @@ pub async fn get_incident(
 pub async fn create_incident(
     State(state): State<AppState>,
     writer: IncidentWriter,
+    viewer: Viewer,
     ApiJson(new): ApiJson<NewIncident>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let incident = open(&state, new, &writer).await?;
+    let (incident, opened) = open(&state, new, &writer).await?;
     let location = format!("/api/v1/incidents/{}", incident.id);
+    let status = match opened {
+        Opened::Created => StatusCode::CREATED,
+        Opened::Existing => StatusCode::OK,
+    };
     Ok((
-        StatusCode::CREATED,
+        status,
         [(header::LOCATION, location)],
-        Json(incident),
+        Json(revealed_one(&state, viewer, incident).await?),
     ))
 }
 
@@ -228,12 +308,16 @@ pub async fn create_incident(
 pub async fn add_update(
     State(state): State<AppState>,
     writer: IncidentWriter,
+    viewer: Viewer,
     id: Result<Path<i64>, PathRejection>,
     ApiJson(update): ApiJson<NewUpdate>,
 ) -> Result<impl IntoResponse, ApiError> {
     let id = incident_id(id)?;
     let incident = append(&state, id, update, &writer).await?;
-    Ok((StatusCode::CREATED, Json(incident)))
+    Ok((
+        StatusCode::CREATED,
+        Json(revealed_one(&state, viewer, incident).await?),
+    ))
 }
 
 /// Opens an incident as `writer`: decides whether it is a draft, validates,
@@ -244,6 +328,12 @@ pub async fn add_update(
 ///
 /// `new.draft` left out is a draft exactly when `writer` may not publish.
 ///
+/// When an incident already has `new.external_key`, nothing is written,
+/// emitted or announced, and that incident is answered with
+/// [`Opened::Existing`]; `new` is still checked first, so a bad request is
+/// refused either way. The answer carries no internals: see
+/// [`revealed_one`].
+///
 /// # Errors
 ///
 /// 403 if it would be published and `writer` may not publish; 422 for
@@ -252,7 +342,7 @@ pub async fn open(
     state: &AppState,
     mut new: NewIncident,
     writer: &IncidentWriter,
-) -> Result<Arc<Incident>, ApiError> {
+) -> Result<(Arc<Incident>, Opened), ApiError> {
     let draft = *new.draft.get_or_insert(!writer.publishes);
     if !draft {
         writer.may_publish()?;
@@ -264,19 +354,20 @@ pub async fn open(
     )?;
     let notify = new.notify && !draft;
     let actor = &writer.actor;
-    let incident = state
-        .store
-        .create_incident(new, actor.clone(), now())
-        .await?;
-    tracing::info!(incident = incident.id, kind = %incident.kind, %actor, draft, "incident opened");
+    let (incident, opened) = state.store.open_incident(new, actor.clone(), now()).await?;
     let incident = Arc::new(incident);
+    if opened == Opened::Existing {
+        tracing::info!(incident = incident.id, %actor, "incident already open for its external key");
+        return Ok((incident, opened));
+    }
+    tracing::info!(incident = incident.id, kind = %incident.kind, %actor, draft, "incident opened");
     state.events.emit(Event::IncidentCreated {
         incident: Arc::clone(&incident),
     });
     if let Some(subscribers) = state.subscribers.as_ref().filter(|_| notify) {
         subscribers.incident_opened(state, &incident).await;
     }
-    Ok(incident)
+    Ok((incident, opened))
 }
 
 /// Appends an update to incident `id` as `writer`: validates, stores,
@@ -360,11 +451,13 @@ fn notify_by_default() -> bool {
 pub async fn publish_incident(
     State(state): State<AppState>,
     auth: Authorized<scope::Incident>,
+    viewer: Viewer,
     id: Result<Path<i64>, PathRejection>,
     OptionalJson(body): OptionalJson<Publish>,
 ) -> Result<Json<Arc<Incident>>, ApiError> {
     let id = incident_id(id)?;
-    publish(&state, id, auth.actor, body.notify).await.map(Json)
+    let incident = publish(&state, id, auth.actor, body.notify).await?;
+    revealed_one(&state, viewer, incident).await.map(Json)
 }
 
 /// Publishes draft `id` as `actor`: stores who and when, logs, emits
@@ -421,6 +514,7 @@ pub async fn discard_incident(
     id: Result<Path<i64>, PathRejection>,
 ) -> Result<Json<Arc<Incident>>, ApiError> {
     let id = incident_id(id)?;
+    // The draft is gone, and its internals with it.
     discard(&state, id, &writer.actor).await.map(Json)
 }
 
@@ -456,9 +550,11 @@ fn refused(writer: &IncidentWriter, error: tocsin_store::Error) -> ApiError {
     }
 }
 
-/// Change the title, impact, components or schedule. Fields left out are
-/// unchanged; status changes only through an update. An `incident:draft`
-/// token may edit only a draft.
+/// Change the title, impact, components, schedule or internal note. Fields
+/// left out are unchanged; status changes only through an update. An
+/// `incident:draft` token may edit only a draft. The answer carries
+/// `internal_note` and `external_key` only for a token that also has
+/// `status:read`.
 #[utoipa::path(
     patch,
     path = "/api/v1/incidents/{id}",
@@ -477,6 +573,7 @@ fn refused(writer: &IncidentWriter, error: tocsin_store::Error) -> ApiError {
 pub async fn edit_incident(
     State(state): State<AppState>,
     writer: IncidentWriter,
+    viewer: Viewer,
     id: Result<Path<i64>, PathRejection>,
     ApiJson(edit): ApiJson<IncidentEdit>,
 ) -> Result<Json<Arc<Incident>>, ApiError> {
@@ -497,7 +594,7 @@ pub async fn edit_incident(
     state.events.emit(Event::IncidentEdited {
         incident: Arc::clone(&incident),
     });
-    Ok(Json(incident))
+    revealed_one(&state, viewer, incident).await.map(Json)
 }
 
 /// An id that is not a number names no incident.

@@ -2,7 +2,8 @@
 
 //! Checks on no component stay off every public surface (TOC-69), and so
 //! does a component that is not public, with its group, its checks and
-//! their outages (TOC-92), and so do draft incidents (TOC-93).
+//! their outages (TOC-92), and so do draft incidents (TOC-93) and every
+//! incident's internal note and external key (TOC-94).
 //!
 //! The routes come from the router itself, not from a list kept by hand:
 //! a route added without a line in [`ROUTES`] fails
@@ -43,8 +44,9 @@ use crate::http::{self, OPENAPI_PATH, incidents, now, releases};
 /// What names the internal check and heartbeat, the component that is
 /// not public and the draft incident: their ids, names and the checks'
 /// targets, the component's group, a removed check whose outage recorded
-/// the component, and the draft's title and message.
-const HIDDEN: [&str; 14] = [
+/// the component, the draft's title and message, and the internal note and
+/// external key of both the draft and the published incident.
+const HIDDEN: [&str; 18] = [
     "backup-disk",
     "Backup disk",
     "nightly-dump",
@@ -59,7 +61,18 @@ const HIDDEN: [&str; 14] = [
     "vault-retired",
     DRAFT,
     "Not public yet.",
+    PUBLISHED_NOTE,
+    PUBLISHED_KEY,
+    DRAFT_NOTE,
+    DRAFT_KEY,
 ];
+
+/// The published incident's internal note and external key.
+const PUBLISHED_NOTE: &str = "Evidence: db-07 replication lag";
+const PUBLISHED_KEY: &str = "sweep-cluster-published";
+/// The draft's internal note and external key.
+const DRAFT_NOTE: &str = "Evidence: db-07 disk at 97 percent";
+const DRAFT_KEY: &str = "sweep-cluster-draft";
 
 /// The seeded draft incident's title.
 const DRAFT: &str = "Drafted trouble";
@@ -185,6 +198,15 @@ const ROUTES: &[(&str, Class, &[&str])] = &[
     ("/api/v1/checks", Class::Public, &["/api/v1/checks"]),
     ("/api/v1/outages", Class::Public, &["/api/v1/outages"]),
     ("/api/v1/incidents", Class::Public, &["/api/v1/incidents"]),
+    // Finding an incident by its external key needs `status:read`.
+    (
+        "/api/v1/incidents",
+        Class::Refused,
+        &[
+            "/api/v1/incidents?external_key=sweep-cluster-draft",
+            "/api/v1/incidents?external_key=sweep-cluster-published",
+        ],
+    ),
     (
         "/api/v1/incidents/{id}",
         Class::Public,
@@ -364,11 +386,14 @@ async fn seeded() -> (Board, String) {
             scheduled_end: None,
             notify: true,
             draft: None,
+            internal_note: Some(PUBLISHED_NOTE.to_owned()),
+            external_key: Some(PUBLISHED_KEY.to_owned()),
         },
         &IncidentWriter::publishing(Actor::person(ALICE)),
     )
     .await
-    .unwrap();
+    .unwrap()
+    .0;
     incidents::open(
         &board.state,
         NewIncident {
@@ -382,6 +407,8 @@ async fn seeded() -> (Board, String) {
             scheduled_end: None,
             notify: true,
             draft: Some(true),
+            internal_note: Some(DRAFT_NOTE.to_owned()),
+            external_key: Some(DRAFT_KEY.to_owned()),
         },
         &IncidentWriter::publishing(Actor::person(ALICE)),
     )
@@ -538,6 +565,40 @@ async fn a_reader_sees_the_draft() {
         let (status, full) = read(&board, &uri, Some(READER)).await;
         assert_eq!(status, StatusCode::OK, "{uri}");
         assert!(full.contains(DRAFT), "{DRAFT} missing from {uri}: {full}");
+    }
+}
+
+/// The controls for the internals: a `status:read` token and the admin
+/// page read them, so their absence elsewhere is the filter at work.
+#[tokio::test]
+async fn a_reader_and_the_admin_see_the_internals() {
+    let (board, incident) = seeded().await;
+    let draft = draft_id(&board).await;
+    let (status, full) = read(&board, "/api/v1/incidents", Some(READER)).await;
+    assert_eq!(status, StatusCode::OK);
+    for shown in [PUBLISHED_NOTE, PUBLISHED_KEY, DRAFT_NOTE, DRAFT_KEY] {
+        assert!(
+            full.contains(shown),
+            "{shown} missing from the list: {full}"
+        );
+    }
+    for (id, note, key) in [
+        (&incident, PUBLISHED_NOTE, PUBLISHED_KEY),
+        (&draft, DRAFT_NOTE, DRAFT_KEY),
+    ] {
+        let (status, one) = read(&board, &format!("/api/v1/incidents/{id}"), Some(READER)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(one.contains(note) && one.contains(key), "{one}");
+        let (status, keyed) = read(
+            &board,
+            &format!("/api/v1/incidents?external_key={key}"),
+            Some(READER),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(keyed.contains(note), "{keyed}");
+        let page = board.page(&format!("/admin/incidents/{id}")).await;
+        assert!(page.contains(note) && page.contains(key), "{page}");
     }
 }
 
@@ -732,6 +793,68 @@ async fn the_event_stream_leaves_out_internal_changes() {
         // before it were left out, not still on their way.
         let seen = stream(&board, request.body(Body::empty()).unwrap(), SHOWN).await;
         assert_hidden(&seen, &format!("/api/v1/events (token {token:?})"));
+    }
+}
+
+/// A note and key written while a `status:read` reader listens: the
+/// events name the incident but never its internals, even to a reader
+/// who may fetch them from the API.
+#[tokio::test]
+async fn the_event_stream_never_carries_the_internals() {
+    const NOTE: &str = "Evidence: production-01 swap at 100 percent";
+    const KEY: &str = "sweep-cluster-live";
+    let (board, incident) = seeded().await;
+    let request = from(OUTSIDER, Method::GET, "/api/v1/events")
+        .header(header::AUTHORIZATION, format!("Bearer {READER}"))
+        .body(Body::empty())
+        .unwrap();
+    let (status, response) = send(&board.router, request).await;
+    assert_eq!(status, StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    incidents::open(
+        &board.state,
+        NewIncident {
+            kind: IncidentKind::Incident,
+            title: "Checkout errors".to_owned(),
+            impact: Impact::Major,
+            components: vec!["api".to_owned()],
+            status: None,
+            message: "Looking into it.".to_owned(),
+            scheduled_start: None,
+            scheduled_end: None,
+            notify: false,
+            draft: None,
+            internal_note: Some(NOTE.to_owned()),
+            external_key: Some(KEY.to_owned()),
+        },
+        &IncidentWriter::publishing(Actor::person(ALICE)),
+    )
+    .await
+    .unwrap();
+    let edit = from(
+        OUTSIDER,
+        Method::PATCH,
+        &format!("/api/v1/incidents/{incident}"),
+    )
+    .header(header::AUTHORIZATION, format!("Bearer {ONCALL}"))
+    .header(header::CONTENT_TYPE, "application/json")
+    .body(Body::from(json!({ "internal_note": NOTE }).to_string()))
+    .unwrap();
+    assert_eq!(send(&board.router, edit).await.0, StatusCode::OK);
+    let mut seen = String::new();
+    while !(seen.contains("Checkout errors") && seen.contains("incident_edited")) {
+        let frame = tokio::time::timeout(Duration::from_secs(5), body.next())
+            .await
+            .unwrap_or_else(|_| panic!("no incident events within 5s: {seen}"))
+            .expect("the stream is open")
+            .unwrap();
+        seen.push_str(&String::from_utf8_lossy(&frame));
+    }
+    for hidden in [NOTE, KEY, "production-01", "internal_note", "external_key"] {
+        assert!(
+            !seen.contains(hidden),
+            "{hidden} on the event stream: {seen}"
+        );
     }
 }
 

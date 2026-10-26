@@ -223,6 +223,17 @@ pub enum IncidentCommand {
         /// incident publish`. An `incident:draft` token always drafts.
         #[arg(long)]
         draft: bool,
+
+        /// A note for whoever publishes it: evidence, links. Never shown
+        /// publicly; read back only with a `status:read` token.
+        #[arg(long, value_name = "TEXT")]
+        internal_note: Option<String>,
+
+        /// Your own key for what this reports, such as an alert cluster's.
+        /// If an incident already has it, that incident is answered and
+        /// nothing is opened.
+        #[arg(long, value_name = "KEY")]
+        external_key: Option<String>,
     },
     /// Publish a draft: show it publicly and tell subscribers once. Needs
     /// the `incident` scope.
@@ -302,6 +313,11 @@ pub enum IncidentCommand {
         /// A new planned end (maintenance), in RFC 3339.
         #[arg(long, value_name = "TIME")]
         end: Option<Timestamp>,
+
+        /// A new internal note, replacing the old; "" clears it. Never
+        /// shown publicly.
+        #[arg(long, value_name = "TEXT")]
+        internal_note: Option<String>,
     },
     /// Show one incident with every update. A draft needs a token with
     /// the `status:read` scope.
@@ -326,6 +342,11 @@ pub enum IncidentCommand {
         /// `next_before`.
         #[arg(long, value_name = "ID")]
         before: Option<i64>,
+
+        /// Only the incident with this external key. Needs a `status:read`
+        /// token.
+        #[arg(long, value_name = "KEY")]
+        external_key: Option<String>,
     },
     /// Write published incidents as markdown with front matter. Drafts are
     /// skipped by `--all` and refused by id.

@@ -160,6 +160,8 @@ struct IncidentPage {
     errors: Vec<FieldError>,
     /// Whether subscribers exist to be told, so the form offers the switch.
     can_notify: bool,
+    /// The internal note as HTML, for the people working the incident.
+    note_html: Option<String>,
 }
 
 impl IncidentPage {
@@ -283,10 +285,12 @@ async fn create(
             scheduled_end: None,
             notify: !form.quiet,
             draft: Some(form.draft),
+            internal_note: None,
+            external_key: None,
         };
         let writer = IncidentWriter::publishing(admin.actor());
         match incidents::open(&state, new, &writer).await {
-            Ok(incident) => {
+            Ok((incident, _)) => {
                 return Ok(
                     Redirect::to(&format!("/admin/incidents/{}", incident.id)).into_response()
                 );
@@ -425,6 +429,19 @@ async fn incident_page(
         .await
         .map_err(|error| HtmlError::internal(&error))?
         .ok_or_else(HtmlError::not_found)?;
+    // Signed-in people work the incident, so they see what the public
+    // never does: the internal note and the key it was opened under.
+    let incident = match state
+        .store
+        .incident_internals(vec![id])
+        .await
+        .map_err(|error| HtmlError::internal(&error))?
+        .remove(&id)
+    {
+        Some(internals) => incident.with_internals(internals),
+        None => incident,
+    };
+    let note_html = incident.internal_note.as_deref().map(markdown::render);
     let resolve = (!incident.status.is_terminal()).then(|| Resolve::for_kind(incident.kind));
     let page = IncidentPage {
         layout: Layout::admin(incident.title.clone(), admin),
@@ -450,6 +467,7 @@ async fn incident_page(
         message,
         errors,
         can_notify: state.subscribers.is_some(),
+        note_html,
         incident,
     };
     Ok(render(status, &page))

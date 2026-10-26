@@ -32,6 +32,9 @@ const OPERATOR: &str = "operator-secret-0123456789";
 const READER: &str = "reader-secret-0123456789";
 /// An `incident:draft` token, as an agent holds.
 const DRAFTER: &str = "drafter-secret-0123456789";
+/// `incident:draft` and `status:read`: an agent that drafts, then reads
+/// back what it drafted.
+const SWEEPER: &str = "sweeper-secret-0123456789";
 /// Where Turnstile is asked when it is not on: nothing listens.
 const NO_TURNSTILE: &str = "http://127.0.0.1:9/";
 
@@ -59,6 +62,7 @@ fn config(subscribers: &str) -> Config {
          [[token]]\nid = \"deploys\"\nsecret = \"${{ENV:DEPLOY_TOKEN}}\"\nscopes = [\"release\"]\n\n\
          [[token]]\nid = \"reader\"\nsecret = \"${{ENV:READER_TOKEN}}\"\nscopes = [\"status:read\"]\n\n\
          [[token]]\nid = \"drafter\"\nsecret = \"${{ENV:DRAFTER_TOKEN}}\"\nscopes = [\"incident:draft\"]\n\n\
+         [[token]]\nid = \"sweeper\"\nsecret = \"${{ENV:SWEEPER_TOKEN}}\"\nscopes = [\"incident:draft\", \"status:read\"]\n\n\
          {admin_token}"
     );
     let variable = |name: &str| match name {
@@ -68,6 +72,7 @@ fn config(subscribers: &str) -> Config {
         "OPERATOR_TOKEN" => Some(OPERATOR.to_owned()),
         "READER_TOKEN" => Some(READER.to_owned()),
         "DRAFTER_TOKEN" => Some(DRAFTER.to_owned()),
+        "SWEEPER_TOKEN" => Some(SWEEPER.to_owned()),
         "TURNSTILE_SECRET" => Some("turnstile-secret".to_owned()),
         "SLACK_CLIENT_ID" => Some(slack::CLIENT_ID.to_owned()),
         "SLACK_CLIENT_SECRET" => Some(slack::CLIENT_SECRET.to_owned()),
@@ -1375,6 +1380,190 @@ async fn a_drafting_token_discards_its_draft() {
         )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// What an agent keeps beside its draft: never on the public API or in a
+/// subscriber's mail, before or after a person publishes it.
+const NOTE: &str = "Evidence: production-01 load 40, ticket C-1.";
+/// The agent's key for the trouble the draft is about.
+const KEY: &str = "cluster/website-down/2026-10-25";
+
+/// The internal note and external key go only to `status:read`: not to
+/// a drafting token without it, not to the public, not to a subscriber,
+/// before or after the draft is published. A second create with the key
+/// answers the first incident with 200 and writes nothing.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // one incident's whole life, in order
+async fn the_internal_note_stays_internal_and_a_key_opens_one_incident() {
+    let site = site();
+    site.subscribe("reader@example.com").await;
+    let postman = site.postman();
+    let call = |method: Method, uri: String, token: Option<&'static str>, body: Option<Value>| {
+        let site = &site;
+        async move { site.api(method, &uri, token, body, 1).await }
+    };
+    let new = json!({
+        "title": "Website unavailable",
+        "components": ["api"],
+        "message": "We are investigating.",
+        "internal_note": NOTE,
+        "external_key": KEY,
+    });
+
+    // The sweeper reads back what it wrote; a drafter without
+    // `status:read` gets the incident but not its internals.
+    let (status, location, first) = call(
+        Method::POST,
+        "/api/v1/incidents".into(),
+        Some(SWEEPER),
+        Some(new.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    assert_eq!(first["internal_note"], NOTE, "{first}");
+    assert_eq!(first["external_key"], KEY, "{first}");
+    let id = first["id"].as_i64().unwrap();
+    let mut changed = new.clone();
+    changed["title"] = json!("Something else");
+    for (token, expect_internals) in [(SWEEPER, true), (DRAFTER, false)] {
+        let (status, again_location, again) = call(
+            Method::POST,
+            "/api/v1/incidents".into(),
+            Some(token),
+            Some(changed.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{again}");
+        assert_eq!(again["id"], id, "{again}");
+        assert_eq!(again["title"], "Website unavailable", "{again}");
+        assert_eq!(
+            again_location.get(header::LOCATION),
+            location.get(header::LOCATION)
+        );
+        assert_eq!(
+            again.get("internal_note").is_some(),
+            expect_internals,
+            "{again}"
+        );
+        assert_eq!(
+            again.get("external_key").is_some(),
+            expect_internals,
+            "{again}"
+        );
+    }
+    let drafts = site.state.store.draft_incidents().await.unwrap();
+    assert_eq!(drafts.len(), 1, "{drafts:?}");
+
+    // The key finds it for `status:read` and nobody else.
+    let by_key = format!("/api/v1/incidents?external_key={}", KEY.replace('/', "%2F"));
+    let (status, _, found) = call(Method::GET, by_key.clone(), Some(READER), None).await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!(found["incidents"][0]["id"], id, "{found}");
+    assert_eq!(found["incidents"][0]["internal_note"], NOTE, "{found}");
+    for token in [None, Some(DRAFTER), Some(ONCALL)] {
+        let (status, _, refused) = call(Method::GET, by_key.clone(), token, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{token:?}: {refused}");
+    }
+    let (status, _, none) = call(
+        Method::GET,
+        "/api/v1/incidents?external_key=nothing-has-this".into(),
+        Some(READER),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{none}");
+    assert_eq!(none["incidents"], json!([]), "{none}");
+
+    // An edit replaces the note; the drafter's answer still leaves it out.
+    let (status, _, edited) = call(
+        Method::PATCH,
+        format!("/api/v1/incidents/{id}"),
+        Some(DRAFTER),
+        Some(json!({"internal_note": format!("{NOTE} Still climbing.")})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    assert!(edited.get("internal_note").is_none(), "{edited}");
+    let (_, _, read) = call(
+        Method::GET,
+        format!("/api/v1/incidents/{id}"),
+        Some(READER),
+        None,
+    )
+    .await;
+    assert_eq!(
+        read["internal_note"],
+        format!("{NOTE} Still climbing."),
+        "{read}"
+    );
+
+    // A person publishes it. The public reads it without the internals,
+    // and the subscriber's mail never names them.
+    let (status, _, published) = call(
+        Method::POST,
+        format!("/api/v1/incidents/{id}/publish"),
+        Some(ONCALL),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{published}");
+    for uri in [
+        format!("/api/v1/incidents/{id}"),
+        "/api/v1/incidents".to_owned(),
+    ] {
+        for token in [None, Some(ONCALL), Some(DRAFTER)] {
+            let (status, _, public) = call(Method::GET, uri.clone(), token, None).await;
+            assert_eq!(status, StatusCode::OK, "{uri} {token:?}: {public}");
+            assert!(
+                public.to_string().contains("Website unavailable"),
+                "{public}"
+            );
+            for internal in [NOTE, KEY, "production-01"] {
+                assert!(
+                    !public.to_string().contains(internal),
+                    "{uri} {token:?}: {public}"
+                );
+            }
+        }
+    }
+    let (_, _, read) = call(
+        Method::GET,
+        format!("/api/v1/incidents/{id}"),
+        Some(READER),
+        None,
+    )
+    .await;
+    assert_eq!(read["external_key"], KEY, "{read}");
+
+    // A published incident keeps its key: no second incident.
+    let (status, _, again) = call(
+        Method::POST,
+        "/api/v1/incidents".into(),
+        Some(SWEEPER),
+        Some(new),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["id"], id, "{again}");
+
+    site.settled().await;
+    postman.stop().await;
+    let sent = site.sent.to("reader@example.com");
+    let told: Vec<&Sent> = sent
+        .iter()
+        .filter(|sent| !subject(sent).starts_with("Confirm"))
+        .collect();
+    assert_eq!(
+        told.len(),
+        1,
+        "{:?}",
+        told.iter().map(|sent| subject(sent)).collect::<Vec<_>>()
+    );
+    let mail = format!("{}\n{}", told[0].message, told[0].body());
+    assert!(mail.contains("Website unavailable"), "{mail}");
+    for internal in [NOTE, KEY, "production-01"] {
+        assert!(!mail.contains(internal), "{internal} mailed: {mail}");
+    }
 }
 
 mod slack;

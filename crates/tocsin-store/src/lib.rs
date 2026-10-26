@@ -36,7 +36,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, TransactionBehavior};
 use tocsin_core::Health;
-use tocsin_core::incident::{Actor, Incident, IncidentEdit, NewIncident, NewUpdate, Timestamp};
+use tocsin_core::incident::{
+    Actor, Incident, IncidentEdit, IncidentInternals, NewIncident, NewUpdate, Timestamp,
+};
 use tocsin_core::release::{DeployStamp, NewRelease, Release, Timeline};
 use tocsin_core::status::{CheckResult, OutageRecord};
 
@@ -48,7 +50,7 @@ use crate::checkpoint::Checkpointer;
 pub use crate::day::Day;
 pub use crate::error::{Error, Result};
 pub use crate::history::{Checks, HistoryPage, Newest, ResultFilter, ResultSlice};
-pub use crate::incident::{Drafts, OpenIncident};
+pub use crate::incident::{Drafts, OpenIncident, Opened};
 pub use crate::outage::{LastUp, LatestResult, Outage};
 use crate::readers::Readers;
 pub use crate::release::{ComponentScope, Order, Projects, ReleaseQuery, TimelineQuery, Written};
@@ -608,14 +610,45 @@ impl Store {
         actor: Actor,
         at: Timestamp,
     ) -> Result<Incident> {
+        Ok(self.open_incident(new, actor, at).await?.0)
+    }
+
+    /// [`Store::create_incident`], except that when an incident already
+    /// holds `new.external_key` nothing is written and that incident is
+    /// answered, with [`Opened::Existing`]. The lookup and the insert share
+    /// one IMMEDIATE transaction, so two creates with one key cannot both
+    /// insert.
+    ///
+    /// # Errors
+    ///
+    /// A value breaks a constraint, or the write fails.
+    pub async fn open_incident(
+        &self,
+        new: NewIncident,
+        actor: Actor,
+        at: Timestamp,
+    ) -> Result<(Incident, Opened)> {
         self.writer
             .run(move |conn| {
                 let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                let id = incident::insert(&transaction, &new, &actor, at)?;
+                let existing = match &new.external_key {
+                    Some(key) => incident::keyed(&transaction, key)?,
+                    None => None,
+                };
+                let (id, opened) = match existing {
+                    Some(id) => (id, Opened::Existing),
+                    None => (
+                        incident::insert(&transaction, &new, &actor, at)?,
+                        Opened::Created,
+                    ),
+                };
                 let incident = incident::load(&transaction, id)?;
                 transaction.commit()?;
-                // The row was inserted by this transaction, so it is there.
-                incident.ok_or(Error::Sqlite(rusqlite::Error::QueryReturnedNoRows))
+                // The row was found or inserted by this transaction, so it
+                // is there.
+                incident
+                    .map(|incident| (incident, opened))
+                    .ok_or(Error::Sqlite(rusqlite::Error::QueryReturnedNoRows))
             })
             .await
     }
@@ -840,6 +873,35 @@ impl Store {
     /// The read fails.
     pub async fn incident(&self, id: i64) -> Result<Option<Incident>> {
         self.read(move |conn| incident::load(conn, id)).await
+    }
+
+    /// The incident holding external key `key`, if any, drafts included.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn incident_keyed(&self, key: String) -> Result<Option<Incident>> {
+        self.read(move |conn| {
+            incident::snapshot(conn, |conn| match incident::keyed(conn, &key)? {
+                Some(id) => incident::load(conn, id),
+                None => Ok(None),
+            })
+        })
+        .await
+    }
+
+    /// The internal note and external key of each of `ids` that exists.
+    /// Every other incident read leaves them out; only a caller trusted
+    /// with them asks.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn incident_internals(
+        &self,
+        ids: Vec<i64>,
+    ) -> Result<std::collections::HashMap<i64, IncidentInternals>> {
+        self.read(move |conn| incident::internals(conn, &ids)).await
     }
 
     /// Up to `limit` incidents, newest first; with `before`, only those

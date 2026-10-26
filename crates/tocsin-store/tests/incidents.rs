@@ -11,7 +11,7 @@ use tocsin_core::incident::{
     Actor, ActorKind, Impact, IncidentEdit, IncidentKind, IncidentStatus, NewIncident, NewUpdate,
     Timestamp,
 };
-use tocsin_store::{Drafts, Error, Store};
+use tocsin_store::{Drafts, Error, Opened, Store};
 
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -52,6 +52,8 @@ fn outage() -> NewIncident {
         scheduled_end: None,
         notify: true,
         draft: None,
+        internal_note: None,
+        external_key: None,
     }
 }
 
@@ -67,6 +69,8 @@ fn maintenance() -> NewIncident {
         scheduled_end: Some(at(20_000)),
         notify: true,
         draft: None,
+        internal_note: None,
+        external_key: None,
     }
 }
 
@@ -606,4 +610,161 @@ async fn a_draft_is_discarded_with_its_updates_and_a_published_incident_never_is
     let refused = store.discard_incident(published.id).await;
     assert!(matches!(refused, Err(Error::Published(_))), "{refused:?}");
     assert!(store.incident(published.id).await.unwrap().is_some());
+}
+
+fn keyed(key: &str) -> NewIncident {
+    NewIncident {
+        internal_note: Some("Evidence: production-01 load 40.".into()),
+        external_key: Some(key.into()),
+        ..draft()
+    }
+}
+
+#[tokio::test]
+async fn reads_leave_the_internals_out_and_only_the_internals_read_has_them() {
+    let fixture = open();
+    let store = &fixture.store;
+    let created = store
+        .create_incident(keyed("cluster-a"), Actor::token("seat"), at(1000))
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            created.internal_note.as_deref(),
+            created.external_key.as_deref()
+        ),
+        (None, None)
+    );
+    let loaded = store.incident(created.id).await.unwrap().unwrap();
+    assert_eq!(loaded.internal_note, None);
+    let listed = store.incidents(Drafts::Include, None, 10).await.unwrap();
+    assert!(
+        listed
+            .iter()
+            .all(|incident| incident.internal_note.is_none() && incident.external_key.is_none())
+    );
+    let internals = store
+        .incident_internals(vec![created.id, 999])
+        .await
+        .unwrap();
+    assert_eq!(internals.len(), 1);
+    let internals = &internals[&created.id];
+    assert_eq!(
+        internals.internal_note.as_deref(),
+        Some("Evidence: production-01 load 40.")
+    );
+    assert_eq!(internals.external_key.as_deref(), Some("cluster-a"));
+}
+
+#[tokio::test]
+async fn a_second_create_with_a_key_answers_the_first_and_writes_nothing() {
+    let fixture = open();
+    let store = &fixture.store;
+    let (first, opened) = store
+        .open_incident(keyed("cluster-a"), Actor::token("seat"), at(1000))
+        .await
+        .unwrap();
+    assert_eq!(opened, Opened::Created);
+    let again = NewIncident {
+        title: "Something else".into(),
+        ..keyed("cluster-a")
+    };
+    let (second, opened) = store
+        .open_incident(again, Actor::token("seat"), at(2000))
+        .await
+        .unwrap();
+    assert_eq!(opened, Opened::Existing);
+    assert_eq!(second, first, "the second create changed the first");
+    let rows: i64 = raw(&fixture)
+        .query_row("SELECT count(*) FROM incident", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 1);
+    let (other, opened) = store
+        .open_incident(keyed("cluster-b"), Actor::token("seat"), at(3000))
+        .await
+        .unwrap();
+    assert_eq!(opened, Opened::Created);
+    assert_ne!(other.id, first.id);
+    assert_eq!(
+        store
+            .incident_keyed("cluster-b".into())
+            .await
+            .unwrap()
+            .map(|incident| incident.id),
+        Some(other.id)
+    );
+    assert_eq!(
+        store.incident_keyed("cluster-c".into()).await.unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn discarding_a_draft_frees_its_key_and_publishing_keeps_it() {
+    let fixture = open();
+    let store = &fixture.store;
+    let seat = Actor::token("seat");
+    let drafted = store
+        .create_incident(keyed("cluster-a"), seat.clone(), at(1000))
+        .await
+        .unwrap();
+    store.discard_incident(drafted.id).await.unwrap();
+    let (redrafted, opened) = store
+        .open_incident(keyed("cluster-a"), seat.clone(), at(2000))
+        .await
+        .unwrap();
+    assert_eq!(opened, Opened::Created);
+    assert_ne!(redrafted.id, drafted.id);
+    store
+        .publish_incident(redrafted.id, Actor::person("ops@example.com"), at(3000))
+        .await
+        .unwrap();
+    let (again, opened) = store
+        .open_incident(keyed("cluster-a"), seat, at(4000))
+        .await
+        .unwrap();
+    assert_eq!((again.id, opened), (redrafted.id, Opened::Existing));
+}
+
+#[tokio::test]
+async fn an_edit_replaces_the_note_and_empty_clears_it() {
+    let fixture = open();
+    let store = &fixture.store;
+    let seat = Actor::token("seat");
+    let created = store
+        .create_incident(keyed("cluster-a"), seat.clone(), at(1000))
+        .await
+        .unwrap();
+    let note = |text: &str| IncidentEdit {
+        internal_note: Some(text.into()),
+        ..IncidentEdit::default()
+    };
+    let edited = store
+        .edit_incident(
+            created.id,
+            note("Ticket C-1."),
+            true,
+            seat.clone(),
+            at(2000),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        edited.internal_note, None,
+        "an edit's answer carried the note"
+    );
+    let internals = store.incident_internals(vec![created.id]).await.unwrap();
+    assert_eq!(
+        internals[&created.id].internal_note.as_deref(),
+        Some("Ticket C-1.")
+    );
+    store
+        .edit_incident(created.id, note(""), true, seat, at(3000))
+        .await
+        .unwrap();
+    let mut internals = store.incident_internals(vec![created.id]).await.unwrap();
+    let cleared = internals.remove(&created.id).unwrap();
+    assert_eq!(cleared.internal_note, None);
+    assert_eq!(cleared.external_key.as_deref(), Some("cluster-a"));
 }

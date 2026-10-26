@@ -229,11 +229,14 @@ impl Site {
                 scheduled_end: scheduled.map(|(_, end)| end),
                 notify: true,
                 draft: None,
+                internal_note: None,
+                external_key: None,
             },
             &IncidentWriter::publishing(Actor::person("alice@example.com")),
         )
         .await
         .unwrap()
+        .0
         .id
     }
 

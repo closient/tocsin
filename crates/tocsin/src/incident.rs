@@ -31,6 +31,8 @@ pub fn run(command: IncidentCommand) -> Result<Report, Failure> {
             status,
             quiet,
             draft,
+            internal_note,
+            external_key,
         } => open_incident(
             &server,
             &NewIncident {
@@ -44,6 +46,8 @@ pub fn run(command: IncidentCommand) -> Result<Report, Failure> {
                 scheduled_end: None,
                 notify: !quiet,
                 draft: draft.then_some(true),
+                internal_note,
+                external_key,
             },
         ),
         IncidentCommand::Publish { server, id, quiet } => publish(&server, id, quiet),
@@ -76,6 +80,7 @@ pub fn run(command: IncidentCommand) -> Result<Report, Failure> {
             no_components,
             start,
             end,
+            internal_note,
         } => {
             let edit = IncidentEdit {
                 title,
@@ -83,6 +88,7 @@ pub fn run(command: IncidentCommand) -> Result<Report, Failure> {
                 components: (no_components || !components.is_empty()).then_some(components),
                 scheduled_start: start,
                 scheduled_end: end,
+                internal_note,
             };
             edit_incident(&server, id, &edit)
         }
@@ -91,18 +97,8 @@ pub fn run(command: IncidentCommand) -> Result<Report, Failure> {
             server,
             limit,
             before,
-        } => {
-            let mut path = format!("{INCIDENTS}?limit={limit}");
-            if let Some(before) = before {
-                let _ = write!(path, "&before={before}");
-            }
-            let list: IncidentList = Client::new(&server)?.read_as(&path)?;
-            Ok(Report {
-                exit: Exit::Ok,
-                json: to_json(&list),
-                text: table(&list),
-            })
-        }
+            external_key,
+        } => list(&server, limit, before, external_key.as_deref()),
         IncidentCommand::Export {
             server,
             id,
@@ -118,6 +114,29 @@ pub fn run(command: IncidentCommand) -> Result<Report, Failure> {
             }
         }
     }
+}
+
+/// `incident list`: a page of incidents, or the one with `external_key`.
+fn list(
+    server: &ServerArgs,
+    limit: u32,
+    before: Option<i64>,
+    external_key: Option<&str>,
+) -> Result<Report, Failure> {
+    let mut path = format!("{INCIDENTS}?limit={limit}");
+    if let Some(before) = before {
+        let _ = write!(path, "&before={before}");
+    }
+    if let Some(key) = external_key {
+        let key: String = url::form_urlencoded::byte_serialize(key.as_bytes()).collect();
+        let _ = write!(path, "&external_key={key}");
+    }
+    let list: IncidentList = Client::new(server)?.read_as(&path)?;
+    Ok(Report {
+        exit: Exit::Ok,
+        json: to_json(&list),
+        text: table(&list),
+    })
 }
 
 /// `incident publish`: shows draft `id` publicly, telling subscribers
@@ -157,7 +176,8 @@ fn edit_incident(server: &ServerArgs, id: i64, edit: &IncidentEdit) -> Result<Re
     if edit.is_empty() {
         return Err(Failure::new(
             Exit::InvalidInput,
-            "nothing to change: pass --title, --impact, --component, --no-components, --start or --end",
+            "nothing to change: pass --title, --impact, --component, --no-components, --start, --end \
+             or --internal-note",
         ));
     }
     let incident: Incident =
@@ -209,6 +229,8 @@ pub fn run_maintenance(command: MaintenanceCommand) -> Result<Report, Failure> {
                 scheduled_end: Some(end),
                 notify: true,
                 draft: None,
+                internal_note: None,
+                external_key: None,
             };
             let incident: Incident = Client::new(&server)?.write(&Method::POST, INCIDENTS, &new)?;
             Ok(written(&incident, "scheduled"))
@@ -294,6 +316,12 @@ fn describe(incident: &Incident) -> String {
     }
     if let (Some(start), Some(end)) = (incident.scheduled_start, incident.scheduled_end) {
         let _ = write!(text, "\nscheduled {start} to {end}");
+    }
+    if let Some(key) = &incident.external_key {
+        let _ = write!(text, "\nexternal key {key}");
+    }
+    if let Some(note) = &incident.internal_note {
+        let _ = write!(text, "\n\ninternal note (not public)\n{}", note.trim_end());
     }
     for update in &incident.updates {
         let _ = write!(

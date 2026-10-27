@@ -206,3 +206,30 @@ fn an_alertmanager_target_reposts_at_least_every_minute() {
         );
     }
 }
+
+#[test]
+fn a_subject_s_topology_node_is_pinned_among_its_labels_only_when_set() {
+    let toml = "[[check]]\nid = \"home\"\ntype = \"tcp\"\ntarget = \"www.example.com:443\"\n\
+                topology_node = \"production-01/web\"\n\n\
+                [[check]]\nid = \"rest\"\ntype = \"tcp\"\ntarget = \"api.example.com:443\"\n\n\
+                [[heartbeat]]\nid = \"backup\"\ninterval = \"1d\"\n\
+                topology_node = \"replication-03/job:backup\"\n";
+    let router = Router::new(&config(toml));
+    let node = |kind, subject: &str| {
+        router
+            .routing(kind, subject, None, Health::Down)
+            .labels
+            .get("topology_node")
+            .cloned()
+    };
+
+    assert_eq!(
+        node(SubjectKind::Check, "home").as_deref(),
+        Some("production-01/web")
+    );
+    assert_eq!(
+        node(SubjectKind::Heartbeat, "backup").as_deref(),
+        Some("replication-03/job:backup")
+    );
+    assert_eq!(node(SubjectKind::Check, "rest"), None);
+}

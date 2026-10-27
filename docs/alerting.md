@@ -55,6 +55,33 @@ alert opens, like the [configured labels](#notifiers): a reload that
 changes it takes effect from the next alert. `class` cannot be set under
 `labels`; set the check's or heartbeat's `class` instead.
 
+## Topology nodes
+
+A check or heartbeat can name the node it watches in a map of the estate
+with `topology_node`, such as `operations-01` or
+`operations-01/job:backup`. Every alert it raises carries it as the
+`topology_node` label, from the fire to the resolve, so a receiver can
+group alerts by the node that broke:
+
+```toml
+[[check]]
+id = "gatus"
+type = "http"
+target = "https://status.internal.example/health"
+topology_node = "operations-01"
+```
+
+```yaml
+# alertmanager.yml
+route:
+  group_by: ['topology_node']
+```
+
+An alert without one carries no `topology_node` label. Like the class, it
+is pinned when an alert opens, so a reload that changes it takes effect
+from the next alert, and it cannot be set under `labels`.
+[`[topology]`](config.md#topology) can limit the ids allowed.
+
 ## Routes
 
 `[[route]]` sends alerts matching its filters to its notifiers (see
@@ -321,7 +348,8 @@ whole label set, so tocsin's own labels are the identity and nothing else:
 `alertname` (`TocsinCheckFailing`, `TocsinHeartbeatFailing`, or
 `TocsinTestAlert` for `tocsin notify test`), `node`, `subject_kind`,
 `subject_id`, and `class`, the check's or heartbeat's
-[probe class](#probe-classes) (a test alert has none). Everything of tocsin's that can change while an alert fires is
+[probe class](#probe-classes) (a test alert has none), and `topology_node` when
+the check or heartbeat sets [one](#topology-nodes). Everything of tocsin's that can change while an alert fires is
 an annotation: `summary`, `description`, `health`, `name`, `component` and
 `component_name` when there is one, `tocsin_test` on a test alert, and
 `ended_by = "config"` on the resolve of an alert the configuration ended. A

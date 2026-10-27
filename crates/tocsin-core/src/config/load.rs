@@ -17,7 +17,8 @@ use toml::Spanned;
 use toml::de::{DeTable, DeValue, ValueDeserializer};
 
 use super::alerting::{
-    Alerting, AlertingRule, CLASS_LABEL, OWN_ANNOTATIONS, OWN_LABELS, is_label_name,
+    Alerting, AlertingRule, CLASS_LABEL, OWN_ANNOTATIONS, OWN_LABELS, TOPOLOGY_NODE_LABEL,
+    is_label_name,
 };
 use super::assertion::{Condition, TextAssertion};
 use super::check::{CheckType, MAX_BODY_CEILING};
@@ -28,7 +29,7 @@ use super::telemetry::OWN_RESOURCE_ATTRIBUTES;
 use super::values::{Id, Secret, Text, email_address, is_unanswerable};
 use super::{
     Auth, AuthMode, Check, Component, Config, Group, Heartbeat, Link, MAX_APP_NAME, Notifier, Page,
-    Project, Route, Server, Slack, Subscribers, Telemetry, Token,
+    Project, Route, Server, Slack, Subscribers, Telemetry, Token, Topology, TopologyNode,
 };
 use crate::link::{http_url, site_path};
 
@@ -67,6 +68,7 @@ pub(crate) const TOP_LEVEL_KEYS: &[&str] = &[
     "slack",
     "telemetry",
     "alerting",
+    "topology",
 ];
 
 /// Parses, merges and validates configuration files, given in merge order.
@@ -180,6 +182,7 @@ struct Items {
     slack: Option<Item<Slack>>,
     telemetry: Option<Item<Telemetry>>,
     alerting: Option<Item<Alerting>>,
+    topology: Option<Item<Topology>>,
 }
 
 struct ParsedFile<'a> {
@@ -364,6 +367,9 @@ impl<'a> Loader<'a> {
                     }
                     "alerting" => {
                         items.alerting = self.singleton(&origin, "alerting", items.alerting.take());
+                    }
+                    "topology" => {
+                        items.topology = self.singleton(&origin, "topology", items.topology.take());
                     }
                     _ => {
                         let hint = closest(&key, TOP_LEVEL_KEYS.iter().copied()).map_or_else(
@@ -630,6 +636,7 @@ impl<'a> Loader<'a> {
         if let Some(alerting) = &items.alerting {
             self.validate_alerting(alerting);
         }
+        self.validate_topology_nodes(items);
         for check in &mut items.checks {
             self.validate_check(check);
             self.validate_links(&check.origin, &check.value.links);
@@ -1237,6 +1244,66 @@ impl<'a> Loader<'a> {
                 }
             }
         }
+    }
+
+    /// Every check's and heartbeat's `topology_node`: with `[topology]`, one
+    /// of the nodes it lists.
+    fn validate_topology_nodes(&mut self, items: &Items) {
+        let Some(topology) = &items.topology else {
+            return;
+        };
+        let checks = items.checks.iter().map(|check| {
+            let value = &check.value;
+            (
+                &check.origin,
+                format!("check `{}`", value.id),
+                value.topology_node.as_ref(),
+            )
+        });
+        let heartbeats = items.heartbeats.iter().map(|heartbeat| {
+            let value = &heartbeat.value;
+            (
+                &heartbeat.origin,
+                format!("heartbeat `{}`", value.id),
+                value.topology_node.as_ref(),
+            )
+        });
+        for (origin, subject, node) in checks.chain(heartbeats) {
+            if let Some(node) = node {
+                self.validate_topology_node(origin, &subject, node, &topology.value);
+            }
+        }
+    }
+
+    /// One `topology_node` against the nodes `[topology]` lists.
+    fn validate_topology_node(
+        &mut self,
+        origin: &Origin,
+        subject: &str,
+        node: &TopologyNode,
+        topology: &Topology,
+    ) {
+        if topology.nodes.contains(node) {
+            return;
+        }
+        let hint = closest(
+            node.as_str(),
+            topology.nodes.iter().map(TopologyNode::as_str),
+        )
+        .map_or_else(
+            || {
+                format!(
+                    "it must be one of the {} nodes `[topology]` lists; add it there if it is new",
+                    topology.nodes.len()
+                )
+            },
+            |near| format!("did you mean `{near}`?"),
+        );
+        self.report(
+            &origin.key("topology_node"),
+            format!("{subject}: topology node `{node}` is not in `[topology]`"),
+            Some(hint),
+        );
     }
 
     /// `[subscribers]`: its emails link back to the page, and its limits
@@ -2041,6 +2108,7 @@ impl<'a> Loader<'a> {
             slack: items.slack.map(|item| item.value),
             telemetry: items.telemetry.map(|item| item.value),
             alerting: items.alerting.map(|item| item.value),
+            topology: items.topology.map(|item| item.value),
         })
     }
 }
@@ -2094,6 +2162,8 @@ impl AlertField {
         self.reserved().contains(&name).then(|| {
             let hint = if matches!(self, AlertField::Labels) && name == CLASS_LABEL {
                 "set the check's or heartbeat's `class` instead".to_owned()
+            } else if matches!(self, AlertField::Labels) && name == TOPOLOGY_NODE_LABEL {
+                "set the check's or heartbeat's `topology_node` instead".to_owned()
             } else {
                 format!(
                     "tocsin sets {} on every alert; choose another name",
@@ -2431,6 +2501,7 @@ mod tests {
             ),
             ("telemetry", "[telemetry.otlp]\n"),
             ("alerting", "[alerting.labels.team]\n"),
+            ("topology", "[topology]\n"),
         ];
         let kinds: BTreeSet<&str> = TOP_LEVEL_KEYS.iter().copied().collect();
         let covered: BTreeSet<&str> = samples.iter().map(|(kind, _)| *kind).collect();

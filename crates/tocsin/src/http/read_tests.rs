@@ -62,12 +62,14 @@ component = "api"
 type = "tcp"
 target = "db.internal.example.com:5432"
 interval = "1h30m"
+topology_node = "internal-01/postgres"
 
 [[heartbeat]]
 id = "backup"
 name = "Nightly backup"
 component = "jobs"
 interval = "1d"
+topology_node = "internal-01/job:backup"
 
 [[project]]
 id = "secret"
@@ -368,7 +370,7 @@ async fn a_component_shows_its_checks_and_an_unknown_one_is_404() {
 }
 
 #[tokio::test]
-async fn checks_carry_their_live_state_and_only_a_reader_sees_targets() {
+async fn checks_carry_their_live_state_and_only_a_reader_sees_targets_and_nodes() {
     let api = api();
     let (status, public) = api.get("/api/v1/checks", None).await;
     assert_eq!(status, StatusCode::OK, "{public}");
@@ -411,6 +413,20 @@ async fn checks_carry_their_live_state_and_only_a_reader_sees_targets() {
     assert!(
         trusted["checks"][2].get("target").is_none(),
         "a heartbeat has none"
+    );
+    let nodes: Vec<_> = trusted["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|member| member.get("topology_node").cloned())
+        .collect();
+    assert_eq!(
+        nodes,
+        [
+            None,
+            Some(json!("internal-01/postgres")),
+            Some(json!("internal-01/job:backup")),
+        ]
     );
     let (_, detail) = api.get("/api/v1/components/api", Some(READER)).await;
     assert_eq!(

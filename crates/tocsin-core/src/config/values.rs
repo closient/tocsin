@@ -78,6 +78,87 @@ impl JsonSchema for Id {
     }
 }
 
+/// The id of the node a check or heartbeat watches in an external map of
+/// the estate, such as `operations-01` or `operations-01/job:backup`: runs
+/// of lowercase letters and digits joined by single `-`, `.`, `_`, `/` or
+/// `:`, at most [`TOPOLOGY_NODE_MAX`] characters.
+///
+/// Unlike an [`Id`], it names nothing in tocsin's own configuration; it is
+/// carried so whatever reads tocsin's alerts can join them to that map.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct TopologyNode(String);
+
+/// The pattern every [`TopologyNode`] matches, as published in the JSON
+/// Schema.
+pub const TOPOLOGY_NODE_PATTERN: &str = "^[a-z0-9]+([-._/:][a-z0-9]+)*$";
+
+/// The longest a [`TopologyNode`] may be.
+pub const TOPOLOGY_NODE_MAX: usize = 128;
+
+impl TopologyNode {
+    /// Parses a topology node id, explaining what is wrong when it is not
+    /// one.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when `text` does not match
+    /// [`TOPOLOGY_NODE_PATTERN`] or is longer than [`TOPOLOGY_NODE_MAX`].
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let alphanumeric =
+            |character: char| character.is_ascii_lowercase() || character.is_ascii_digit();
+        let runs_joined = text
+            .split(['-', '.', '_', '/', ':'])
+            .all(|run| !run.is_empty() && run.chars().all(alphanumeric));
+        if !runs_joined {
+            return Err(format!(
+                "invalid topology node `{text}`: use lowercase letters and digits joined by single `-`, `.`, `_`, `/` or `:`, such as `operations-01/job:backup`"
+            ));
+        }
+        if text.len() > TOPOLOGY_NODE_MAX {
+            return Err(format!(
+                "topology node `{text}` is {} characters, more than {TOPOLOGY_NODE_MAX}",
+                text.len()
+            ));
+        }
+        Ok(TopologyNode(text.to_owned()))
+    }
+
+    /// The id as written.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for TopologyNode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for TopologyNode {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        TopologyNode::parse(&text).map_err(serde::de::Error::custom)
+    }
+}
+
+impl JsonSchema for TopologyNode {
+    fn schema_name() -> Cow<'static, str> {
+        "TopologyNode".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "pattern": TOPOLOGY_NODE_PATTERN,
+            "maxLength": TOPOLOGY_NODE_MAX,
+            "description": "A node id in an external map of the estate: lowercase letters and digits joined by single `-`, `.`, `_`, `/` or `:`."
+        })
+    }
+}
+
 /// A length of time, written as one or more number-and-unit pairs such as
 /// `"500ms"`, `"30s"`, `"5m"`, `"1h30m"` or `"1d"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -652,6 +733,59 @@ mod tests {
         assert!(Id::parse("0").is_ok());
         for bad in ["", "-web", "Web", "web_1", "web 1", "wéb"] {
             assert!(Id::parse(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn topology_nodes_are_joined_runs() {
+        for good in [
+            "operations-01",
+            "operations-01/job:bugsink-issues",
+            "production-01/web-a",
+            "db.example",
+            "a_b",
+            "0",
+        ] {
+            assert!(
+                TopologyNode::parse(good).is_ok(),
+                "{good:?} should be accepted"
+            );
+        }
+        for bad in [
+            "", "-web", "web-", "web--1", "web/", "/web", "Web", "web 1", "wéb", "a//b", "a\n",
+        ] {
+            assert!(
+                TopologyNode::parse(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+        let longest = "a".repeat(TOPOLOGY_NODE_MAX);
+        assert!(TopologyNode::parse(&longest).is_ok());
+        assert!(TopologyNode::parse(&format!("{longest}a")).is_err());
+    }
+
+    #[test]
+    fn the_topology_node_pattern_takes_what_the_parser_does() {
+        let pattern = regex::Regex::new(TOPOLOGY_NODE_PATTERN).unwrap();
+        for text in [
+            "operations-01/job:bugsink-issues",
+            "db.example",
+            "a_b",
+            "",
+            "-web",
+            "web-",
+            "web--1",
+            "a//b",
+            "Web",
+            "wéb",
+            "a\n",
+            "a:",
+        ] {
+            assert_eq!(
+                pattern.is_match(text),
+                TopologyNode::parse(text).is_ok(),
+                "{text:?}"
+            );
         }
     }
 

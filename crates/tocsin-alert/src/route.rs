@@ -78,14 +78,21 @@ pub struct Router {
     routes: Vec<CompiledRoute>,
 }
 
-/// A subject's configured labels with its `class` among them, which every
-/// alert of it carries.
-fn with_class(
+/// A subject's configured labels with its `class` and, when it has one, its
+/// `topology_node` among them, which every alert of it carries.
+fn pinned_labels(
     labels: &BTreeMap<String, String>,
     class: config::ProbeClass,
+    topology_node: Option<&config::TopologyNode>,
 ) -> BTreeMap<String, String> {
     let mut labels = labels.clone();
     labels.insert(config::CLASS_LABEL.to_owned(), class.as_str().to_owned());
+    if let Some(node) = topology_node {
+        labels.insert(
+            config::TOPOLOGY_NODE_LABEL.to_owned(),
+            node.as_str().to_owned(),
+        );
+    }
     labels
 }
 
@@ -102,7 +109,11 @@ impl Router {
             let id = heartbeat.id.as_str().to_owned();
             let subject = Subject {
                 name: heartbeat.name.clone().unwrap_or_else(|| id.clone()),
-                labels: with_class(&heartbeat.labels, heartbeat.class),
+                labels: pinned_labels(
+                    &heartbeat.labels,
+                    heartbeat.class,
+                    heartbeat.topology_node.as_ref(),
+                ),
                 annotations: heartbeat.annotations.clone(),
             };
             subjects.insert((SubjectKind::Heartbeat, id), subject);
@@ -111,7 +122,7 @@ impl Router {
             let id = check.id.as_str().to_owned();
             let subject = Subject {
                 name: check.name.clone().unwrap_or_else(|| id.clone()),
-                labels: with_class(&check.labels, check.class),
+                labels: pinned_labels(&check.labels, check.class, check.topology_node.as_ref()),
                 annotations: check.annotations.clone(),
             };
             subjects.insert((SubjectKind::Check, id), subject);

@@ -181,7 +181,15 @@ fn state_now(reading: &Reading, node: &str, db_size_bytes: u64) -> Registry {
     let last_run = Family::<Labels, Gauge>::default();
     let last_ping = Family::<Labels, Gauge>::default();
     let component_status = Family::<Labels, Gauge>::default();
+    let info = Family::<Labels, Gauge>::default();
     for member in &reading.members {
+        let mut labels = check_labels(&member.id, &member.component, node);
+        labels.push(("kind", kind_name(member.kind).to_owned()));
+        labels.push((
+            "topology_node",
+            member.topology_node.clone().unwrap_or_default(),
+        ));
+        info.get_or_create(&labels).set(1);
         if let Some(health) = member.health {
             let mut labels = check_labels(&member.id, &member.component, node);
             labels.push(("kind", kind_name(member.kind).to_owned()));
@@ -225,6 +233,11 @@ fn state_now(reading: &Reading, node: &str, db_size_bytes: u64) -> Registry {
         "tocsin_heartbeat_last_ping_timestamp",
         "When each heartbeat was last pinged, in unix seconds; absent until its first ping since tocsin started",
         last_ping,
+    );
+    registry.register(
+        "tocsin_check_info",
+        "Always 1, one series per check and heartbeat; topology_node is the node it watches, empty when it names none",
+        info,
     );
     registry.register(
         "tocsin_component_status",
@@ -392,6 +405,9 @@ pub struct CheckMetrics {
     observed: Arc<Mutex<HashSet<Labels>>>,
     /// Each configured check's type, by id, as last configured.
     types: Arc<Mutex<HashMap<String, CheckType>>>,
+    /// Each check's and heartbeat's `topology_node`, for those that set
+    /// one, as last configured.
+    topology_nodes: Arc<Mutex<HashMap<(MemberKind, String), String>>>,
     /// Each heartbeat's last ping, unix seconds, by heartbeat id.
     pings: Arc<Mutex<HashMap<String, i64>>>,
     /// The results each check and heartbeat recorded since tocsin started
@@ -405,6 +421,7 @@ impl CheckMetrics {
             durations: Family::new_with_constructor(DurationHistogram::new),
             observed: Arc::default(),
             types: Arc::default(),
+            topology_nodes: Arc::default(),
             pings: Arc::default(),
             results: Arc::default(),
         };
@@ -428,13 +445,30 @@ impl CheckMetrics {
         observed.insert(labels);
     }
 
-    /// Takes each check's type from `config`, the configuration running
-    /// now.
+    /// Takes each check's type, and each check's and heartbeat's
+    /// topology node, from `config`, the configuration running now.
     pub fn configured(&self, config: &Config) {
         *lock(&self.types) = config
             .checks
             .iter()
             .map(|check| (check.id.as_str().to_owned(), check.check_type))
+            .collect();
+        let checks = config
+            .checks
+            .iter()
+            .map(|check| (MemberKind::Check, &check.id, check.topology_node.as_ref()));
+        let heartbeats = config.heartbeats.iter().map(|heartbeat| {
+            (
+                MemberKind::Heartbeat,
+                &heartbeat.id,
+                heartbeat.topology_node.as_ref(),
+            )
+        });
+        *lock(&self.topology_nodes) = checks
+            .chain(heartbeats)
+            .filter_map(|(kind, id, node)| {
+                node.map(|node| ((kind, id.as_str().to_owned()), node.as_str().to_owned()))
+            })
             .collect();
     }
 
@@ -461,6 +495,7 @@ impl CheckMetrics {
     ) -> (Reading, MutexGuard<'_, HashSet<Labels>>) {
         let observed = self.retain(snapshot, node);
         let types = lock(&self.types).clone();
+        let topology_nodes = lock(&self.topology_nodes).clone();
         let pings = self.last_pings(snapshot);
         let results = self.last_results(snapshot);
         let members = snapshot
@@ -477,6 +512,7 @@ impl CheckMetrics {
                 MemberReading {
                     kind: check.kind,
                     check_type: is_check.then(|| types.get(&check.id).copied()).flatten(),
+                    topology_node: topology_nodes.get(&(check.kind, check.id.clone())).cloned(),
                     health: check.state.map(|state| state.health),
                     last_run: (check.kind == MemberKind::Check)
                         .then_some(check.last)
@@ -653,6 +689,8 @@ pub struct MemberReading {
     pub component: String,
     /// A check's type, as configured; `None` for a heartbeat.
     pub check_type: Option<CheckType>,
+    /// Its `topology_node`, as configured; `None` when it sets none.
+    pub topology_node: Option<String>,
     /// Its confirmed health; `None` until confirmed.
     pub health: Option<Health>,
     /// When a check's latest probe started, unix seconds.

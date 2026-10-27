@@ -242,6 +242,7 @@ A probe run on an interval.
 | `timeout` | duration | `"10s"` | Must be shorter than `interval`. |
 | `confirm` | integer | `1` | Consecutive results needed before the state changes. At least 1. |
 | `class` | string | `"production"` | What kind of probe this is: `production`, `test`, `drill` or `canary`. Its alerts carry it as the `class` label. See [`alerting.md`](alerting.md#probe-classes). |
+| `topology_node` | string | none | The node this check watches in a map of the estate, such as `operations-01` or `operations-01/job:backup`. Its alerts carry it as the `topology_node` label. See [`[topology]`](#topology). |
 | `labels` | table of strings | `{}` | Labels its alerts carry, for a receiver to route on. See [`[alerting]`](#alerting). |
 | `annotations` | table of strings | `{}` | Annotations its alerts carry, such as a ticket or a runbook. See [`[alerting]`](#alerting). |
 
@@ -348,6 +349,7 @@ A ping tocsin expects to receive, such as a cron job reporting in. Pings arrive 
 | `interval` | duration | | Required. How often a ping is expected. At least `1s`. |
 | `grace` | duration | `"60s"` | How late a ping may be before the heartbeat is down: it is missed once `interval + grace` passes after its last result. |
 | `class` | string | `"production"` | As on a [check](#check). |
+| `topology_node` | string | none | As on a [check](#check). |
 | `labels` | table of strings | `{}` | As on a [check](#check). |
 | `annotations` | table of strings | `{}` | As on a [check](#check). |
 
@@ -444,7 +446,23 @@ labels = { page_class = "page", team = "web" }
 annotations = { ticket = "OPS-12" }
 ```
 
-Names the contract does not cover are allowed and unchecked. Whether or not `[alerting]` is declared, a label or annotation name must be letters, digits and underscores, not starting with a digit or `__`, as Alertmanager requires; its value may not be empty; and it may not be a name tocsin sets itself: the labels `alertname`, `node`, `subject_kind`, `subject_id` and `class` (set the check's or heartbeat's [`class`](alerting.md#probe-classes) instead), and the annotations `summary`, `description`, `health`, `name`, `component`, `component_name`, `tocsin_test` and `ended_by`. [`alerting.md`](alerting.md) shows where each notifier puts them. An alert keeps the labels and annotations it opened with until it resolves, so a reload that changes them takes effect from the next alert.
+Names the contract does not cover are allowed and unchecked. Whether or not `[alerting]` is declared, a label or annotation name must be letters, digits and underscores, not starting with a digit or `__`, as Alertmanager requires; its value may not be empty; and it may not be a name tocsin sets itself: the labels `alertname`, `node`, `subject_kind`, `subject_id`, `class` (set the check's or heartbeat's [`class`](alerting.md#probe-classes) instead) and `topology_node` (set its [`topology_node`](#topology) instead), and the annotations `summary`, `description`, `health`, `name`, `component`, `component_name`, `tocsin_test` and `ended_by`. [`alerting.md`](alerting.md) shows where each notifier puts them. An alert keeps the labels and annotations it opened with until it resolves, so a reload that changes them takes effect from the next alert.
+
+## `[topology]`
+
+The node ids a `topology_node` may name. A `topology_node` names the node a check or heartbeat watches in a map of the estate, so a receiver can group alerts by what broke rather than by host names that drift. It is lowercase letters and digits in runs joined by single `-`, `.`, `_`, `/` or `:`, at most 128 characters. Without `[topology]` any well-formed id is allowed; with it, an id it does not list fails `tocsin config check`, with a suggestion when one is close, and a [reload](#reloading) that adds one keeps the last good configuration. At most one file may hold `[topology]`.
+
+| Key | Type | Default | |
+|-----|------|---------|-|
+| `nodes` | strings | `[]` | Every node id a `topology_node` may name. |
+
+```toml
+# topology.toml, generated from the estate's map
+[topology]
+nodes = ["operations-01", "operations-01/job:backup", "production-01"]
+```
+
+The list is usually generated from the map into a file of its own in the configuration folder, so a node added to the map is allowed from the next reload. `topology_node` is one of tocsin's own labels, so `[alerting]` cannot require it or limit its values; `[topology]` is how its values are checked.
 
 ## `[subscribers]`
 

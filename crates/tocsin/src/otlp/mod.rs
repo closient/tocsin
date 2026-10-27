@@ -81,6 +81,7 @@ pub const DISABLED: &str = "`[telemetry.otlp]` is set, but OTEL_SDK_DISABLED=tru
 const CHECK_ID: &str = "tocsin.check.id";
 const CHECK_KIND: &str = "tocsin.check.kind";
 const CHECK_TYPE: &str = "tocsin.check.type";
+const CHECK_TOPOLOGY_NODE: &str = "tocsin.check.topology_node";
 const CHECK_HEALTH: &str = "tocsin.check.health";
 const COMPONENT_ID: &str = "tocsin.component.id";
 const COMPONENT_STATUS: &str = "tocsin.component.status";
@@ -631,6 +632,9 @@ fn member_attributes(member: &MemberReading, node: &str) -> Vec<KeyValue> {
     attributes.push(attribute(NODE_ID, node));
     if let Some(check_type) = member.check_type {
         attributes.push(attribute(CHECK_TYPE, check_type.as_str()));
+    }
+    if let Some(node) = &member.topology_node {
+        attributes.push(attribute(CHECK_TOPOLOGY_NODE, node));
     }
     attributes
 }

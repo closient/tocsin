@@ -17,9 +17,22 @@ pub const IDENTITY_LABELS: &[&str] = &["alertname", "node", "subject_kind", "sub
 /// `class`.
 pub const CLASS_LABEL: &str = "class";
 
-/// Every label tocsin sets: [`IDENTITY_LABELS`] and [`CLASS_LABEL`]. A check
-/// or heartbeat may not set them in `labels`.
-pub const OWN_LABELS: &[&str] = &["alertname", "node", "subject_kind", "subject_id", "class"];
+/// The label carrying a check's or heartbeat's `topology_node`, pinned on
+/// each of its alerts when the alert opens, and absent when it has none.
+/// Configuration sets it only through `topology_node`.
+pub const TOPOLOGY_NODE_LABEL: &str = "topology_node";
+
+/// Every label tocsin sets: [`IDENTITY_LABELS`], [`CLASS_LABEL`] and
+/// [`TOPOLOGY_NODE_LABEL`]. A check or heartbeat may not set them in
+/// `labels`.
+pub const OWN_LABELS: &[&str] = &[
+    "alertname",
+    "node",
+    "subject_kind",
+    "subject_id",
+    "class",
+    "topology_node",
+];
 
 /// The annotations tocsin sets on alerts it posts to Alertmanager (and, for
 /// `ended_by`, to a webhook). A check or heartbeat may not set them.

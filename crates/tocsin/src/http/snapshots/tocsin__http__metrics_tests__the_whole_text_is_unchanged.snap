@@ -65,6 +65,11 @@ tocsin_check_last_run_timestamp{check="db",component="",node="node-a"} 176000006
 # HELP tocsin_heartbeat_last_ping_timestamp When each heartbeat was last pinged, in unix seconds; absent until its first ping since tocsin started.
 # TYPE tocsin_heartbeat_last_ping_timestamp gauge
 tocsin_heartbeat_last_ping_timestamp{check="backup",component="jobs",node="node-a"} 1760000030
+# HELP tocsin_check_info Always 1, one series per check and heartbeat; topology_node is the node it watches, empty when it names none.
+# TYPE tocsin_check_info gauge
+tocsin_check_info{check="api-https",component="api",node="node-a",kind="check",topology_node=""} 1
+tocsin_check_info{check="backup",component="jobs",node="node-a",kind="heartbeat",topology_node=""} 1
+tocsin_check_info{check="db",component="",node="node-a",kind="check",topology_node="internal-01/postgres"} 1
 # HELP tocsin_component_status 1 for the status each component shows on the status page, 0 for the others.
 # TYPE tocsin_component_status gauge
 tocsin_component_status{component="api",node="node-a",status="degraded"} 0

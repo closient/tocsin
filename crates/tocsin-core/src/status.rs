@@ -132,6 +132,11 @@ pub struct CheckState {
     /// name internal hosts; absent otherwise and for heartbeats.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    /// The node it watches in the estate's map, as configured. Only with a
+    /// `status:read` token, since an id can name internal hosts; absent
+    /// otherwise and when none is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topology_node: Option<String>,
     /// Its confirmed health; `null` until confirmed.
     pub health: Option<Health>,
     /// Since when it has had that health.

@@ -21,6 +21,12 @@ tests:
         values: "1 0"
       - series: 'tocsin_slack_connection_up{notifier="team-slack",connection="team"}'
         values: "1 1"
+      - series: 'tocsin_push_failures_total{upstream="hub"}'
+        values: "0+1x30"
+      - series: 'tocsin_push_failures_total{upstream="recovered"}'
+        values: "0+1x3 3x30"
+      - series: 'tocsin_push_rows_expired_total{upstream="hub"}'
+        values: "0 0 5"
       - series: "tocsin_config_reload_success"
         values: "1 0x10"
       - series: 'up{job="tocsin",instance="tocsin:8080"}'
@@ -97,6 +103,28 @@ tests:
               connection: ops-alerts
             exp_annotations:
               summary: "Notifier ops-slack cannot post: Slack connection ops-alerts is missing or revoked"
+      - eval_time: 10m
+        alertname: TocsinPushFailing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: TocsinPushFailing
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              upstream: hub
+            exp_annotations:
+              summary: "tocsin cannot push its history to node hub"
+      - eval_time: 1m
+        alertname: TocsinPushRowsExpired
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: TocsinPushRowsExpired
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              upstream: hub
+            exp_annotations:
+              summary: "Check results expired before node hub received them"
       - eval_time: 5m
         alertname: TocsinConfigReloadFailed
         exp_alerts: []

@@ -19,7 +19,9 @@
 //! running server. A reload keeps the running `[server]` and warns when the
 //! files say something else. `[subscribers]` is the same: its rate limits
 //! and mailer start with the server. So is `[telemetry]`: its exporter
-//! starts with the server.
+//! starts with the server. The nodes this node pushes its history to, and
+//! how often, are read at startup as well; a reload that changes them warns
+//! and the running pushers keep going.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
@@ -43,6 +45,7 @@ use crate::exit::Exit;
 use crate::http::{self, AppState};
 use crate::metrics::ConfigMetrics;
 use crate::output::Failure;
+use crate::push;
 use crate::serve::{Monitor, ReloadError};
 
 /// How long the configuration folder must be quiet before a change to it
@@ -140,6 +143,9 @@ pub struct Reloading {
     pub status: watch::Sender<ConfigStatus>,
     /// Each attempt's outcome, as metrics.
     pub metrics: ConfigMetrics,
+    /// Where and how often startup had this node push, which no reload
+    /// changes.
+    pub(crate) push: push::PushSettings,
 }
 
 /// The task that reloads the configuration. It owns the running checks
@@ -271,6 +277,12 @@ impl Running {
             );
         }
         config.telemetry.clone_from(&running.telemetry);
+        if push::PushSettings::of(&config) != self.reloading.push {
+            tracing::warn!(
+                "this node's `push_to` or `[federation] push_interval` changed; they are read \
+                 only at startup, so the running pushers keep going until tocsin restarts"
+            );
+        }
 
         let unfinished = match self.monitor.reload(&config).await {
             Ok(()) => None,
@@ -645,6 +657,7 @@ scopes = ["release"]
                     node: None,
                     data: data_dir.path().to_owned(),
                     variables,
+                    push: crate::push::PushSettings::of(&state.config),
                     state,
                     app,
                     status: sender,
@@ -984,6 +997,38 @@ values = ["false", "true"]
         let monitor = served.reloader.into_monitor().await;
         assert_eq!(running(&monitor), ["kept"]);
         monitor.stop().await;
+    }
+
+    #[tokio::test]
+    async fn every_reload_says_the_push_settings_wait_for_a_restart() {
+        const WARNING: &str = "the running pushers keep going until tocsin restarts";
+        let log = Captured::default();
+        let _log = log.capture();
+        let (target, _accepting) = target().await;
+        let mut served = Served::start(&target).await;
+        let warnings = || log.text().matches(WARNING).count();
+
+        let slower = format!(
+            "[server]\nnode_id = \"{node}\"\n\n[[node]]\nid = \"{node}\"\npublic_keys = [\"{key}\"]\n\n\
+             [federation]\ndefault_nodes = [\"{node}\"]\npush_interval = \"1m\"\n",
+            node = served.node,
+            key = tocsin_core::federation::NodeKey::from_seed([2; 32]).public_key(),
+        );
+        let status = served.change("push.toml", Some(&slower)).await;
+        assert!(status.ok, "{status:?}");
+        assert_eq!(warnings(), 1);
+
+        // Measured against what startup read, not the last reload: an
+        // unrelated edit still says so.
+        let extra = EXTRA.replace("TARGET", &target);
+        let status = served.change("extra.toml", Some(&extra)).await;
+        assert!(status.ok, "{status:?}");
+        assert_eq!(warnings(), 2);
+
+        // Back to what startup read: nothing to say.
+        let status = served.change("push.toml", None).await;
+        assert!(status.ok, "{status:?}");
+        assert_eq!(warnings(), 2);
     }
 
     #[tokio::test]

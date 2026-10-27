@@ -57,6 +57,7 @@ the number of series is fixed by what is configured:
   none.
 - `status`: one of the five component statuses.
 - `notifier`: a `[[notifier]]` id.
+- `upstream`: a `[[node]]` this node's `push_to` names.
 
 When a reload removes a check, heartbeat, component or notifier, its
 series go from the next scrape. Prometheus marks them stale, so an alert
@@ -82,6 +83,8 @@ on a removed check resolves rather than firing on forever.
 | `tocsin_slack_connection_up` | gauge | `notifier`, `connection` | 1 when the Slack `connection` a notifier names is connected and live; 0 when it is missing or dead, so its alerts fail. |
 | `tocsin_node_clock_offset_seconds` | gauge | `node` | How far ahead of this server's clock a node's clock was at its last push: its `sent_at` less when this server took the push, transit included; negative when behind. |
 | `tocsin_node_backlog_rows` | gauge | `node` | The results and outage changes a node had yet to push here after its last push: its store's head less the cursor this server answered. |
+| `tocsin_push_failures_total` | counter | `upstream` | Attempts to push history to a node that failed, retried or not: unanswered within the timeout, refused, or answered with a receipt tocsin could not read. |
+| `tocsin_push_rows_expired_total` | counter | `upstream` | Check results retention deleted before the node had acknowledged them, so the node never gets them; tocsin also logs each pass that loses any at `error`. |
 | `tocsin_build_info` | gauge | `version` | Always 1; `version` is the running tocsin's. |
 | `tocsin_otlp_export_failures_total` | counter | | Attempts to send an OTLP metric export that failed, retried or not: refused, partly rejected, unanswered within the timeout, or never sent. |
 
@@ -114,6 +117,10 @@ Some series are absent until there is something to say:
 - The notifier counters appear after a notifier's first failure. Wrap
   them in `increase()` or `rate()`, which treat a series that appears as
   starting from zero.
+- The two `tocsin_push_*` families have a series for each node in this
+  node's `push_to`, from 0 when tocsin starts, and none on a node that
+  pushes nowhere. The nodes pushed to are read at startup, so a reload
+  that changes `push_to` changes neither the pushers nor these series.
 - `tocsin_otlp_export_failures_total` appears only when
   [`[telemetry.otlp]`](#opentelemetry) is configured, from 0 when the
   export starts. Without the table the page is exactly what it was
@@ -169,6 +176,17 @@ groups:
         labels:
           severity: page
 
+      - alert: TocsinPushFailing
+        expr: rate(tocsin_push_failures_total[5m]) > 0
+        for: 15m
+        labels:
+          severity: ticket
+
+      - alert: TocsinPushRowsExpired
+        expr: increase(tocsin_push_rows_expired_total[1d]) > 0
+        labels:
+          severity: ticket
+
       - alert: TocsinConfigReloadFailed
         expr: tocsin_config_reload_success == 0
         for: 5m
@@ -181,6 +199,12 @@ groups:
         labels:
           severity: page
 ```
+
+`TocsinPushFailing` waits 15 minutes because a pusher retries on its own,
+backing off to a minute between attempts; a node that came back sends
+everything it missed. `TocsinPushRowsExpired` means it did not come back
+in time: retention deleted results the node never had, and its copy of this
+node's history has a hole that only the daily rollups cover.
 
 `tocsin_check_up` is already confirmed, so `TocsinCheckDown` needs no
 `for:`; adding one delays the page by that much on top of `confirm`.

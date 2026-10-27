@@ -24,6 +24,37 @@ One alert spans every outage from the change that fires it to the recovery
 that ends it. A check that goes from degraded to down stays one alert; it
 fires again with the new health, under the same identity.
 
+## Probe classes
+
+A check or heartbeat says what kind of probe it is with `class`:
+`production` (the default), `test`, `drill` or `canary`. Every alert it
+raises carries the class as the `class` label, from the fire to the
+resolve, so a receiver can keep a drill or a canary off the pager by rule
+instead of by matching ids:
+
+```toml
+[[check]]
+id = "pager-drill"
+type = "tcp"
+target = "192.0.2.1:9"
+class = "drill"
+```
+
+```yaml
+# alertmanager.yml
+route:
+  routes:
+    - matchers: ['class=~"drill|test|canary"']
+      receiver: ops-log
+```
+
+A class tocsin does not know fails `tocsin config check`, and a
+[reload](config.md#reloading) that sets one keeps the last good
+configuration. The class is part of the label set, so it is pinned when an
+alert opens, like the [configured labels](#notifiers): a reload that
+changes it takes effect from the next alert. `class` cannot be set under
+`labels`; set the check's or heartbeat's `class` instead.
+
 ## Routes
 
 `[[route]]` sends alerts matching its filters to its notifiers (see
@@ -285,8 +316,9 @@ the alert stays firing while tocsin is up, and resolves by itself within
 five minutes if tocsin goes away. Alertmanager identifies an alert by its
 whole label set, so tocsin's own labels are the identity and nothing else:
 `alertname` (`TocsinCheckFailing`, `TocsinHeartbeatFailing`, or
-`TocsinTestAlert` for `tocsin notify test`), `node`, `subject_kind` and
-`subject_id`. Everything of tocsin's that can change while an alert fires is
+`TocsinTestAlert` for `tocsin notify test`), `node`, `subject_kind`,
+`subject_id`, and `class`, the check's or heartbeat's
+[probe class](#probe-classes) (a test alert has none). Everything of tocsin's that can change while an alert fires is
 an annotation: `summary`, `description`, `health`, `name`, `component` and
 `component_name` when there is one, `tocsin_test` on a test alert, and
 `ended_by = "config"` on the resolve of an alert the configuration ended. A

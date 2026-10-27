@@ -4,8 +4,8 @@
 //! column.
 
 use tocsin_core::config::{
-    AuthMode, CheckType, Config, DARK, Diagnostic, Environment, Id, NotifierType, Secret, Source,
-    TokenScope, load,
+    AuthMode, CheckType, Config, DARK, Diagnostic, Environment, Id, NotifierType, ProbeClass,
+    Secret, Source, TokenScope, load,
 };
 
 const HOSTNAME: &str = "probe-01";
@@ -1644,9 +1644,66 @@ annotations = { summary = "mine" }
         shown,
         [
             "checks.toml:6:28: check `api`: `needs-human` is not a valid label name (check[0].labels.needs-human)\n  hint: use letters, digits and underscores, not starting with a digit or `__`, as Alertmanager requires",
-            "checks.toml:6:49: check `api`: label `subject_id` is set by tocsin (check[0].labels.subject_id)\n  hint: tocsin sets `alertname`, `node`, `subject_kind`, `subject_id` on every alert; choose another name",
+            "checks.toml:6:49: check `api`: label `subject_id` is set by tocsin (check[0].labels.subject_id)\n  hint: tocsin sets `alertname`, `node`, `subject_kind`, `subject_id`, `class` on every alert; choose another name",
             "checks.toml:6:65: check `api`: label `team` is empty (check[0].labels.team)\n  hint: Alertmanager drops an empty label: give it a value or remove it",
             "checks.toml:7:27: check `api`: annotation `summary` is set by tocsin (check[0].annotations.summary)\n  hint: tocsin sets `summary`, `description`, `health`, `name`, `component`, `component_name`, `tocsin_test`, `ended_by` on every alert; choose another name",
+        ]
+    );
+}
+
+#[test]
+fn a_probe_s_class_is_one_tocsin_knows_and_production_unless_set() {
+    let config = run(&[(
+        "checks.toml",
+        r#"
+[[check]]
+id = "api"
+type = "icmp"
+target = "192.0.2.1"
+
+[[check]]
+id = "drill"
+type = "icmp"
+target = "192.0.2.2"
+class = "drill"
+
+[[heartbeat]]
+id = "backup"
+interval = "1h"
+class = "canary"
+"#,
+    )])
+    .expect("valid");
+    let classes: Vec<ProbeClass> = config.checks.iter().map(|check| check.class).collect();
+    assert_eq!(classes, [ProbeClass::Production, ProbeClass::Drill]);
+    assert_eq!(config.heartbeats[0].class, ProbeClass::Canary);
+
+    let text =
+        "[[check]]\nid = \"api\"\ntype = \"icmp\"\ntarget = \"192.0.2.1\"\nclass = \"exercise\"\n";
+    let shown = errors(&[("checks.toml", text)]);
+    assert_eq!(shown.len(), 1, "{shown:?}");
+    assert!(shown[0].starts_with("checks.toml:5:"), "{shown:?}");
+    assert!(shown[0].contains("exercise"), "{shown:?}");
+}
+
+#[test]
+fn a_class_label_points_at_the_class_setting() {
+    let text = r#"
+[[check]]
+id = "api"
+type = "icmp"
+target = "192.0.2.1"
+labels = { class = "drill" }
+"#;
+    let shown: Vec<String> = run(&[("checks.toml", text)])
+        .expect_err("invalid")
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            "checks.toml:6:20: check `api`: label `class` is set by tocsin (check[0].labels.class)\n  hint: set the check's or heartbeat's `class` instead",
         ]
     );
 }

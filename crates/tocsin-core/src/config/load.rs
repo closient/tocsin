@@ -16,7 +16,9 @@ use serde::de::DeserializeOwned;
 use toml::Spanned;
 use toml::de::{DeTable, DeValue, ValueDeserializer};
 
-use super::alerting::{Alerting, AlertingRule, IDENTITY_LABELS, OWN_ANNOTATIONS, is_label_name};
+use super::alerting::{
+    Alerting, AlertingRule, CLASS_LABEL, OWN_ANNOTATIONS, OWN_LABELS, is_label_name,
+};
 use super::assertion::{Condition, TextAssertion};
 use super::check::{CheckType, MAX_BODY_CEILING};
 use super::colour::{AA_TEXT, DARK, LIGHT};
@@ -2068,7 +2070,7 @@ impl AlertField {
     /// What tocsin sets itself, which configuration may not.
     fn reserved(self) -> &'static [&'static str] {
         match self {
-            AlertField::Labels => IDENTITY_LABELS,
+            AlertField::Labels => OWN_LABELS,
             AlertField::Annotations => OWN_ANNOTATIONS,
         }
     }
@@ -2090,13 +2092,15 @@ impl AlertField {
             ));
         }
         self.reserved().contains(&name).then(|| {
-            (
-                format!("{noun} `{name}` is set by tocsin"),
+            let hint = if matches!(self, AlertField::Labels) && name == CLASS_LABEL {
+                "set the check's or heartbeat's `class` instead".to_owned()
+            } else {
                 format!(
                     "tocsin sets {} on every alert; choose another name",
                     list(self.reserved())
-                ),
-            )
+                )
+            };
+            (format!("{noun} `{name}` is set by tocsin"), hint)
         })
     }
 }

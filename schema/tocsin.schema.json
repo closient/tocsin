@@ -326,6 +326,14 @@
           },
           "type": "array"
         },
+        "class": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ProbeClass"
+            }
+          ],
+          "description": "What kind of probe this is: `production` (the default), `test`,\n`drill` or `canary`. Every alert of the check carries it as the\n`class` label, so a receiver can tell a drill from an outage without\nmatching names."
+        },
         "component": {
           "anyOf": [
             {
@@ -777,6 +785,14 @@
             "pattern": "^([A-Za-z][A-Za-z0-9_]*|_([A-Za-z0-9][A-Za-z0-9_]*)?)$"
           },
           "type": "object"
+        },
+        "class": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ProbeClass"
+            }
+          ],
+          "description": "What kind of probe this is: `production` (the default), `test`,\n`drill` or `canary`. Every alert of the heartbeat carries it as the\n`class` label."
         },
         "component": {
           "anyOf": [
@@ -1404,6 +1420,31 @@
         }
       },
       "type": "object"
+    },
+    "ProbeClass": {
+      "description": "What kind of probe a check or heartbeat is, carried on its alerts as the\n`class` label.",
+      "oneOf": [
+        {
+          "const": "production",
+          "description": "Watches something real; its alerts are real.",
+          "type": "string"
+        },
+        {
+          "const": "test",
+          "description": "Exercises tocsin or a receiver; its alerts are not outages.",
+          "type": "string"
+        },
+        {
+          "const": "drill",
+          "description": "A rehearsal of an outage, such as a paging drill.",
+          "type": "string"
+        },
+        {
+          "const": "canary",
+          "description": "Watches a canary, which is expected to fail now and then.",
+          "type": "string"
+        }
+      ]
     },
     "Project": {
       "additionalProperties": false,

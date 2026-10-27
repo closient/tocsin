@@ -27,7 +27,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub use alerting::{
-    Alerting, AlertingRule, IDENTITY_LABELS, LABEL_NAME_PATTERN, OWN_ANNOTATIONS, is_label_name,
+    Alerting, AlertingRule, CLASS_LABEL, IDENTITY_LABELS, LABEL_NAME_PATTERN, OWN_ANNOTATIONS,
+    OWN_LABELS, is_label_name,
 };
 pub use assertion::{
     Assertion, CONDITION_KEYS, Comparison, Condition, FailureState, HeaderAssertion, JsonAssertion,
@@ -35,7 +36,7 @@ pub use assertion::{
 };
 pub use check::{
     BasicAuth, Check, CheckType, DEFAULT_MAX_BODY, DnsSettings, HttpMethod, HttpSettings,
-    MAX_BODY_CEILING, RecordType, TcpSettings, TlsSettings,
+    MAX_BODY_CEILING, ProbeClass, RecordType, TcpSettings, TlsSettings,
 };
 pub use colour::{AA_TEXT, COLOUR_PATTERN, Colour, DARK, LIGHT, Scheme};
 pub use diagnostic::Diagnostic;
@@ -482,6 +483,11 @@ pub struct Heartbeat {
     /// each a `[[heartbeat.link]]` table.
     #[serde(default, rename = "link", skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
+    /// What kind of probe this is: `production` (the default), `test`,
+    /// `drill` or `canary`. Every alert of the heartbeat carries it as the
+    /// `class` label.
+    #[serde(default, skip_serializing_if = "ProbeClass::is_production")]
+    pub class: ProbeClass,
     /// Labels on the heartbeat's alerts, such as `{ team = "ops" }`: a
     /// receiver like Alertmanager routes on them. `[alerting]` can require
     /// some and limit their values.

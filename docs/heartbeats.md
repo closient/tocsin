@@ -31,7 +31,9 @@ scopes = ["heartbeat"]
 `interval` is how often the job runs; `grace` (default one minute) is how
 late a ping may be. Heartbeat and check ids share one namespace, since both
 name rows in the same tables; loading refuses a heartbeat that reuses a
-check's id. The full reference is in [`config.md`](config.md#heartbeat).
+check's id. A heartbeat takes a [`class`](alerting.md#probe-classes) like a
+check, so a drill's or a canary's alerts can be routed away from the pager.
+The full reference is in [`config.md`](config.md#heartbeat).
 
 `interval + grace` must be at most half of `[server] retention_days`
 (90 days unless set), and `tocsin config check` refuses a heartbeat that

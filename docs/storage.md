@@ -560,8 +560,9 @@ under their origin key are skipped, an outage change that matches what is
 stored is a no-op, and one that differs is refused as a conflict with
 nothing written. Outage changes must arrive in seq order, after any already
 applied from that store. A result dated before `purged_before` is skipped and
-counted; one dated past `FUTURE_TOLERANCE` stops that kind of row for the
-batch, keeping the ones before it. Rollups another node pushed are stored as
+counted; a result or outage change dated past `FUTURE_TOLERANCE` stops
+that kind of row for the batch, keeping the ones before it, and a rollup
+for a day that far ahead is left out on its own. Rollups another node pushed are stored as
 they came, and the local recompute counts only this node's raw results and
 those of nodes with no `node_store` row, so it never overwrites them.
 

@@ -1832,11 +1832,15 @@ fn join(writer: std::thread::JoinHandle<()>, checkpointer: Checkpointer) -> Resu
     checkpointer.map_err(|_| Error::CheckpointerPanicked)
 }
 
+/// The latest time a write may give: [`FUTURE_TOLERANCE`] past `now_ms`.
+pub(crate) fn future_horizon_ms(now_ms: i64) -> i64 {
+    now_ms.saturating_add(i64::try_from(FUTURE_TOLERANCE.as_millis()).unwrap_or(i64::MAX))
+}
+
 /// Refuses a result that starts more than [`FUTURE_TOLERANCE`] after now.
 fn not_future(result: &NewCheckResult) -> Result<()> {
     let now_ms = now_ms();
-    let tolerance_ms = i64::try_from(FUTURE_TOLERANCE.as_millis()).unwrap_or(i64::MAX);
-    if result.started_at_ms > now_ms.saturating_add(tolerance_ms) {
+    if result.started_at_ms > future_horizon_ms(now_ms) {
         return Err(Error::FutureResult {
             started_at_ms: result.started_at_ms,
             now_ms,

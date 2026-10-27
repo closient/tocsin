@@ -7,13 +7,14 @@
 //! ending), and applying one twice changes nothing.
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use tocsin_core::Health;
 use tocsin_core::incident::FieldError;
 use tocsin_core::status::OutageEnding;
 
 use crate::day::Day;
 use crate::error::{Error, Result};
 use crate::rollup::{self, DailyRollup};
-use crate::{FUTURE_TOLERANCE, NewCheckResult, NewOutage, SubjectKind, node};
+use crate::{NewCheckResult, NewOutage, SubjectKind, future_horizon_ms, node};
 
 /// What one node pushed from one of its stores.
 #[derive(Debug, Clone, PartialEq)]
@@ -91,10 +92,11 @@ pub struct BatchReport {
     pub outages_through: Option<i64>,
     /// Rollups written.
     pub rollups_applied: usize,
-    /// When the first row more than [`FUTURE_TOLERANCE`] ahead of this
-    /// node's clock says it happened (unix milliseconds), if any: that row
-    /// and the rest of its kind wait, unapplied, until the clocks agree.
-    /// Rows before it are applied.
+    /// The earliest time a row more than [`FUTURE_TOLERANCE`](crate::FUTURE_TOLERANCE) ahead of
+    /// this node's clock says it happened (unix milliseconds), if any. Such
+    /// a result or outage change and the rest of its kind wait, unapplied,
+    /// until the clocks agree, while the rows before it are applied; such a
+    /// rollup waits alone.
     pub skewed_at_ms: Option<i64>,
 }
 
@@ -106,8 +108,9 @@ pub struct BatchReport {
 /// open is stored unless already here, an end ends its outage unless it
 /// already ended the same way. Rollups are upserted, days retention has
 /// finalized included, since the origin's rollup for such a day is
-/// complete. A row more than [`FUTURE_TOLERANCE`] ahead stops its kind at
-/// that row; what came before it is kept, and the report says where.
+/// complete. A result or outage change more than [`FUTURE_TOLERANCE`](crate::FUTURE_TOLERANCE)
+/// ahead stops its kind at that row, keeping what came before it; a rollup
+/// for a day that has not begun by then is left out. The report says where.
 ///
 /// The batch's `node_store` row is made on first sight; its state and last
 /// push are the caller's to keep.
@@ -115,9 +118,10 @@ pub struct BatchReport {
 /// # Errors
 ///
 /// Nothing is written when any of these fail. [`Error::Invalid`] if the
-/// batch is from this node or this store, holds another node's row, is out
-/// of order, opens an outage while the same check's last one is still open,
-/// or ends one it never opened; [`Error::Conflict`] if it differs from what
+/// batch is from this node or this store, holds another node's row or a
+/// value the schema refuses, is out of order, opens an outage while the
+/// same check's last one is still open, or ends one it never opened or
+/// before it started; [`Error::Conflict`] if it differs from what
 /// the same store already sent for an outage, which means two machines are
 /// writing as one node; otherwise the write fails.
 pub(crate) fn apply_batch(
@@ -128,19 +132,22 @@ pub(crate) fn apply_batch(
 ) -> Result<BatchReport> {
     let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     validate(&transaction, batch, local_node_id)?;
-    let store = remote_store(&transaction, batch, now_ms)?;
-    let horizon_ms =
-        now_ms.saturating_add(i64::try_from(FUTURE_TOLERANCE.as_millis()).unwrap_or(i64::MAX));
+    let origin = Origin {
+        row: remote_store(&transaction, batch, now_ms)?,
+        batch,
+    };
+    let horizon_ms = future_horizon_ms(now_ms);
     let mut report = BatchReport::default();
-    apply_results(&transaction, store, &batch.results, horizon_ms, &mut report)?;
-    apply_outages(&transaction, store, &batch.outages, horizon_ms, &mut report)?;
+    apply_results(&transaction, &origin, horizon_ms, &mut report)?;
+    apply_outages(&transaction, &origin, horizon_ms, &mut report)?;
     apply_rollups(&transaction, &batch.rollups, horizon_ms, &mut report)?;
     transaction.commit()?;
     Ok(report)
 }
 
 /// Refuses a batch from this node or store, one holding another node's
-/// row, and one out of order.
+/// row, one out of order, and one holding a value the schema would refuse,
+/// so the sender learns which field rather than seeing a database error.
 fn validate(conn: &Connection, batch: &RemoteBatch, local_node_id: &str) -> Result<()> {
     let mut errors = Vec::new();
     if batch.node_id.is_empty() {
@@ -148,46 +155,121 @@ fn validate(conn: &Connection, batch: &RemoteBatch, local_node_id: &str) -> Resu
     } else if batch.node_id == local_node_id {
         errors.push(FieldError::new("node_id", "is this node's own"));
     }
-    if batch.store_id == node::local_store_id(conn)? {
+    if batch.store_id.len() != 32
+        || !batch
+            .store_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        errors.push(FieldError::new(
+            "store_id",
+            "is not 32 lowercase hex digits",
+        ));
+    } else if batch.store_id == node::local_store_id(conn)? {
         errors.push(FieldError::new("store_id", "is this database's own store"));
     }
-    let mut previous = 0;
-    for (index, remote) in batch.results.iter().enumerate() {
-        if remote.result.node_id != batch.node_id {
-            errors.push(not_own(format!("results[{index}].node_id"), batch));
-        }
-        if remote.origin_id <= previous {
-            errors.push(FieldError::new(
-                format!("results[{index}].origin_id"),
-                format!("{} does not follow {previous}", remote.origin_id),
-            ));
-        }
-        previous = remote.origin_id;
-    }
-    let mut previous = 0;
-    for (index, change) in batch.outages.iter().enumerate() {
-        if let RemoteOutageChange::Open { outage, .. } = change
-            && outage.node_id != batch.node_id
-        {
-            errors.push(not_own(format!("outages[{index}].node_id"), batch));
-        }
-        if change.seq() <= previous {
-            errors.push(FieldError::new(
-                format!("outages[{index}].seq"),
-                format!("{} does not follow {previous}", change.seq()),
-            ));
-        }
-        previous = change.seq();
-    }
-    for (index, rollup) in batch.rollups.iter().enumerate() {
-        if rollup.node_id != batch.node_id {
-            errors.push(not_own(format!("rollups[{index}].node_id"), batch));
-        }
-    }
+    validate_results(batch, &mut errors);
+    validate_outages(batch, &mut errors);
+    validate_rollups(batch, &mut errors);
     if errors.is_empty() {
         Ok(())
     } else {
         Err(Error::Invalid(errors))
+    }
+}
+
+fn validate_results(batch: &RemoteBatch, errors: &mut Vec<FieldError>) {
+    let mut previous = 0;
+    for (index, remote) in batch.results.iter().enumerate() {
+        let path = format!("results[{index}]");
+        let result = &remote.result;
+        if result.node_id != batch.node_id {
+            errors.push(not_own(format!("{path}.node_id"), batch));
+        }
+        if remote.origin_id <= previous {
+            errors.push(FieldError::new(
+                format!("{path}.origin_id"),
+                format!("{} does not follow {previous}", remote.origin_id),
+            ));
+        }
+        previous = remote.origin_id;
+        if result.check_id.is_empty() {
+            errors.push(FieldError::new(format!("{path}.check_id"), "is empty"));
+        }
+        if result.started_at_ms < 0 {
+            errors.push(FieldError::new(format!("{path}.started_at"), "is negative"));
+        }
+        if result.duration_ms < 0 {
+            errors.push(FieldError::new(
+                format!("{path}.duration_ms"),
+                "is negative",
+            ));
+        }
+        if result
+            .status_code
+            .is_some_and(|code| !(0..=999).contains(&code))
+        {
+            errors.push(FieldError::new(
+                format!("{path}.status_code"),
+                "is not between 0 and 999",
+            ));
+        }
+    }
+}
+
+fn validate_outages(batch: &RemoteBatch, errors: &mut Vec<FieldError>) {
+    let mut previous = 0;
+    for (index, change) in batch.outages.iter().enumerate() {
+        let path = format!("outages[{index}]");
+        if change.seq() <= previous {
+            errors.push(FieldError::new(
+                format!("{path}.seq"),
+                format!("{} does not follow {previous}", change.seq()),
+            ));
+        }
+        previous = change.seq();
+        let RemoteOutageChange::Open { outage, .. } = change else {
+            continue;
+        };
+        if outage.node_id != batch.node_id {
+            errors.push(not_own(format!("{path}.node_id"), batch));
+        }
+        if outage.check_id.is_empty() {
+            errors.push(FieldError::new(format!("{path}.check_id"), "is empty"));
+        }
+        if outage.health == Health::Up {
+            errors.push(FieldError::new(
+                format!("{path}.health"),
+                "is up; an outage is degraded or down",
+            ));
+        }
+        if outage.started_at_ms < 0 {
+            errors.push(FieldError::new(format!("{path}.started_at"), "is negative"));
+        }
+    }
+}
+
+fn validate_rollups(batch: &RemoteBatch, errors: &mut Vec<FieldError>) {
+    for (index, rollup) in batch.rollups.iter().enumerate() {
+        let path = format!("rollups[{index}]");
+        if rollup.node_id != batch.node_id {
+            errors.push(not_own(format!("{path}.node_id"), batch));
+        }
+        if rollup.check_id.is_empty() {
+            errors.push(FieldError::new(format!("{path}.check_id"), "is empty"));
+        }
+        let parts = [rollup.up, rollup.degraded, rollup.down];
+        if parts.iter().any(|part| *part < 0)
+            || parts
+                .iter()
+                .try_fold(0_i64, |sum, part| sum.checked_add(*part))
+                != Some(rollup.total)
+        {
+            errors.push(FieldError::new(
+                format!("{path}.total"),
+                "is not up + degraded + down, each at least 0",
+            ));
+        }
     }
 }
 
@@ -213,10 +295,31 @@ fn remote_store(conn: &Connection, batch: &RemoteBatch, now_ms: i64) -> Result<i
     )?)
 }
 
+/// The store a batch came from: its `node_store` row here, and the batch.
+struct Origin<'a> {
+    row: i64,
+    batch: &'a RemoteBatch,
+}
+
+impl Origin<'_> {
+    /// The conflict error for outage `origin_id`, naming the node and store
+    /// an operator would recognise.
+    fn conflict(&self, origin_id: i64, what: &str) -> Error {
+        Error::Conflict(format!(
+            "outage {origin_id} from node {} store {} {what}",
+            self.batch.node_id, self.batch.store_id
+        ))
+    }
+}
+
+/// Records a row too far ahead, keeping the earliest across kinds.
+fn skewed(report: &mut BatchReport, at_ms: i64) {
+    report.skewed_at_ms = Some(report.skewed_at_ms.map_or(at_ms, |seen| seen.min(at_ms)));
+}
+
 fn apply_results(
     conn: &Connection,
-    store: i64,
-    results: &[RemoteResult],
+    origin: &Origin<'_>,
     horizon_ms: i64,
     report: &mut BatchReport,
 ) -> Result<()> {
@@ -227,10 +330,10 @@ fn apply_results(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT (origin_store, origin_id) WHERE origin_store IS NOT NULL DO NOTHING",
     )?;
-    for remote in results {
+    for remote in &origin.batch.results {
         let result = &remote.result;
         if result.started_at_ms > horizon_ms {
-            report.skewed_at_ms = Some(result.started_at_ms);
+            skewed(report, result.started_at_ms);
             break;
         }
         if floor.is_some_and(|floor| result.started_at_ms < floor) {
@@ -246,7 +349,7 @@ fn apply_results(
                 result.error,
                 result.status_code,
                 remote.kind.as_str(),
-                store,
+                origin.row,
                 remote.origin_id,
             ])?;
         }
@@ -299,8 +402,7 @@ fn stored_outage(conn: &Connection, store: i64, origin_id: i64) -> Result<Option
 
 fn apply_outages(
     conn: &Connection,
-    store: i64,
-    changes: &[RemoteOutageChange],
+    origin: &Origin<'_>,
     horizon_ms: i64,
     report: &mut BatchReport,
 ) -> Result<()> {
@@ -309,16 +411,16 @@ fn apply_outages(
     let mut high_seq: i64 = conn.query_row(
         "SELECT max(coalesce(max(opened_seq), 0), coalesce(max(ended_seq), 0))
          FROM outage WHERE origin_store = ?1",
-        params![store],
+        params![origin.row],
         |row| row.get(0),
     )?;
-    for (index, change) in changes.iter().enumerate() {
+    for (index, change) in origin.batch.outages.iter().enumerate() {
         let at_ms = match change {
             RemoteOutageChange::Open { outage, .. } => outage.started_at_ms,
             RemoteOutageChange::End { ended_at_ms, .. } => *ended_at_ms,
         };
         if at_ms > horizon_ms {
-            report.skewed_at_ms.get_or_insert(at_ms);
+            skewed(report, at_ms);
             break;
         }
         let applied = match change {
@@ -326,7 +428,7 @@ fn apply_outages(
                 seq,
                 origin_id,
                 outage,
-            } => open_outage(conn, store, index, *seq, *origin_id, outage, high_seq)?,
+            } => open_outage(conn, origin, index, *seq, *origin_id, outage, high_seq)?,
             RemoteOutageChange::End {
                 seq,
                 origin_id,
@@ -334,7 +436,7 @@ fn apply_outages(
                 ending,
             } => {
                 let end = (*seq, *ended_at_ms, *ending);
-                end_outage(conn, store, index, *origin_id, end, high_seq)?
+                end_outage(conn, origin, index, *origin_id, end, high_seq)?
             }
         };
         if applied {
@@ -357,14 +459,14 @@ fn out_of_order(index: usize, seq: i64, high_seq: i64) -> Error {
 /// whether it was stored.
 fn open_outage(
     conn: &Connection,
-    store: i64,
+    origin: &Origin<'_>,
     index: usize,
     seq: i64,
     origin_id: i64,
     outage: &NewOutage,
     high_seq: i64,
 ) -> Result<bool> {
-    if let Some(stored) = stored_outage(conn, store, origin_id)? {
+    if let Some(stored) = stored_outage(conn, origin.row, origin_id)? {
         let same = stored.node_id == outage.node_id
             && stored.subject_kind == outage.subject_kind.as_str()
             && stored.check_id == outage.check_id
@@ -376,9 +478,7 @@ fn open_outage(
         return if same {
             Ok(false)
         } else {
-            Err(Error::Conflict(format!(
-                "outage {origin_id} from store {store} was opened differently before"
-            )))
+            Err(origin.conflict(origin_id, "was opened differently before"))
         };
     }
     if seq <= high_seq {
@@ -418,7 +518,7 @@ fn open_outage(
         outage.started_at_ms,
         outage.alerted,
         seq,
-        store,
+        origin.row,
         origin_id,
     ])?;
     Ok(true)
@@ -428,13 +528,13 @@ fn open_outage(
 /// Returns whether it was ended now.
 fn end_outage(
     conn: &Connection,
-    store: i64,
+    origin: &Origin<'_>,
     index: usize,
     origin_id: i64,
     (seq, ended_at_ms, ending): (i64, i64, OutageEnding),
     high_seq: i64,
 ) -> Result<bool> {
-    let Some(stored) = stored_outage(conn, store, origin_id)? else {
+    let Some(stored) = stored_outage(conn, origin.row, origin_id)? else {
         return Err(Error::Invalid(vec![FieldError::new(
             format!("outages[{index}].origin_id"),
             format!("ends outage {origin_id}, which this store never opened"),
@@ -447,13 +547,20 @@ fn end_outage(
         return if same {
             Ok(false)
         } else {
-            Err(Error::Conflict(format!(
-                "outage {origin_id} from store {store} already ended differently"
-            )))
+            Err(origin.conflict(origin_id, "already ended differently"))
         };
     }
     if seq <= high_seq {
         return Err(out_of_order(index, seq, high_seq));
+    }
+    if ended_at_ms < stored.started_at {
+        return Err(Error::Invalid(vec![FieldError::new(
+            format!("outages[{index}].ended_at"),
+            format!(
+                "{ended_at_ms} is before outage {origin_id} started, {}",
+                stored.started_at
+            ),
+        )]));
     }
     conn.prepare_cached(
         "UPDATE outage SET ended_at = ?2, ending = ?3, ended_seq = ?4 WHERE id = ?1",
@@ -463,7 +570,8 @@ fn end_outage(
 }
 
 /// Upserts the origin's rollups, days before the watermark included. A
-/// rollup for a day that has not begun by `horizon_ms` stops the rest.
+/// rollup for a day that has not begun by `horizon_ms` is left out; the
+/// others still apply, since each day's row stands alone.
 fn apply_rollups(
     conn: &Connection,
     rollups: &[DailyRollup],
@@ -471,13 +579,17 @@ fn apply_rollups(
     report: &mut BatchReport,
 ) -> Result<()> {
     let last_day = Day::containing(horizon_ms);
-    let fresh = rollups
+    if let Some(future) = rollups
         .iter()
-        .position(|rollup| rollup.date > last_day)
-        .unwrap_or(rollups.len());
-    if let Some(future) = rollups.get(fresh) {
-        report.skewed_at_ms.get_or_insert(future.date.start_ms());
+        .filter(|rollup| rollup.date > last_day)
+        .map(|rollup| rollup.date)
+        .min()
+    {
+        skewed(report, future.start_ms());
     }
-    report.rollups_applied = rollup::upsert_all(conn, &rollups[..fresh])?;
+    report.rollups_applied = rollup::upsert_all(
+        conn,
+        rollups.iter().filter(|rollup| rollup.date <= last_day),
+    )?;
     Ok(())
 }

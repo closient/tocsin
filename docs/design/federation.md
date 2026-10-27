@@ -270,8 +270,13 @@ needs no change.
 `purged_before` is skipped, counted, and reported in the response; the
 cursor moves past it and its rollup covers it. A result from more than
 `FUTURE_TOLERANCE` ahead stops results at that row (see clock skew);
-an outage change or rollup that far ahead does the same for its kind.
-Each kind has its own cursor, so the others still apply.
+an outage change that far ahead does the same for outages. A rollup for
+a day that has not begun by then waits alone, since each day's row
+stands by itself. Each kind has its own cursor, so the others still
+apply, and the report names the earliest such time across kinds. A row
+whose values the schema would refuse (an empty check, a negative
+duration, an outage that is up, a rollup whose counts don't add up, an
+end before its start) refuses the batch with the field named.
 
 ## Failure modes
 
@@ -578,7 +583,8 @@ Migrations for `node_store`, origin columns, outage seqs and the
 recreated trigger, and `push_cursor`. A store function that applies one
 batch in one `IMMEDIATE` transaction: insert-or-ignore results and
 outage opens, monotone ends, rollup upserts, expired rows skipped and
-counted, a future row stopping its kind, a differing end refused as a
+counted, a future row stopping its kind (a future rollup only itself), a
+differing end refused as a
 conflict. The local rollup recompute skips nodes that push to it.
 Acceptance: applying a batch twice leaves the database byte-for-byte the
 same as applying it once (row counts and contents); a batch whose outage

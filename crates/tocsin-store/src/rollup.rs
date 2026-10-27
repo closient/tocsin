@@ -218,18 +218,16 @@ fn weigh_heartbeats(heartbeats: &[HeartbeatResult], now_ms: i64) -> Vec<DailyRol
 /// Returns how many rows were written.
 pub(crate) fn upsert(conn: &Connection, rollups: &[DailyRollup]) -> Result<usize> {
     let floor = purged_before(conn)?.unwrap_or(0);
-    let kept: Vec<DailyRollup> = rollups
-        .iter()
-        .filter(|r| r.date.start_ms() >= floor)
-        .cloned()
-        .collect();
-    upsert_all(conn, &kept)
+    upsert_all(conn, rollups.iter().filter(|r| r.date.start_ms() >= floor))
 }
 
 /// Inserts or replaces each rollup, days before the retention watermark
 /// included: another node's rollups, which are complete wherever its raw
 /// results went. Returns how many rows were written.
-pub(crate) fn upsert_all(conn: &Connection, rollups: &[DailyRollup]) -> Result<usize> {
+pub(crate) fn upsert_all<'a>(
+    conn: &Connection,
+    rollups: impl IntoIterator<Item = &'a DailyRollup>,
+) -> Result<usize> {
     let mut statement = conn.prepare_cached(
         "INSERT INTO daily_rollup (check_id, node_id, date, total, up, degraded, down, worst, kind)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -295,17 +293,25 @@ pub(crate) fn since(conn: &Connection, since: Day) -> Result<Vec<DailyRollup>> {
 /// rolled up (it may have been partial), but never later than yesterday, so
 /// yesterday and today are recomputed every pass even if some rollup is
 /// dated in the future. With no rollups yet, the day of the oldest result.
+/// Nodes that push to this one are left out: their rollups arrive whenever
+/// they push, and say nothing about how far this node has rolled up.
 pub(crate) fn resume_day(conn: &Connection, today: Day) -> Result<Option<Day>> {
-    let latest: Option<String> =
-        conn.query_row("SELECT max(date) FROM daily_rollup", [], |row| row.get(0))?;
+    let latest: Option<String> = conn.query_row(
+        "SELECT max(date) FROM daily_rollup
+         WHERE node_id NOT IN (SELECT node_id FROM node_store WHERE local = 0)",
+        [],
+        |row| row.get(0),
+    )?;
     if let Some(latest) = latest {
         let latest: Day = parse_column(0, &latest)?;
         return Ok(Some(latest.min(today.plus(-1))));
     }
-    let oldest: Option<i64> =
-        conn.query_row("SELECT min(started_at) FROM check_result", [], |row| {
-            row.get(0)
-        })?;
+    let oldest: Option<i64> = conn.query_row(
+        "SELECT min(started_at) FROM check_result
+             WHERE node_id NOT IN (SELECT node_id FROM node_store WHERE local = 0)",
+        [],
+        |row| row.get(0),
+    )?;
     Ok(oldest.map(Day::containing))
 }
 

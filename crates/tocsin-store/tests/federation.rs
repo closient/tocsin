@@ -513,3 +513,105 @@ async fn local_outages_are_numbered_as_they_open_and_end() {
         5
     );
 }
+
+#[tokio::test]
+async fn a_rollup_from_the_future_leaves_the_others_and_skew_is_the_earliest_across_kinds() {
+    let fixture = open();
+    let base = day("2026-01-05").start_ms();
+    let outage_ahead = noon() + 2 * 3_600_000;
+    let result_ahead = noon() + 3 * 3_600_000;
+    let mut other_check = rollup("2026-01-05", 7, 1);
+    other_check.check_id = "api".into();
+    let report = apply(
+        &fixture,
+        batch(
+            vec![result(1, base), result(2, result_ahead)],
+            vec![open_change(1, 3, base), end_change(2, 3, outage_ahead)],
+            // Not ordered by day: the future one comes first.
+            vec![rollup("2026-01-07", 5, 0), other_check],
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.rollups_applied, 1);
+    assert_eq!(report.skewed_at_ms, Some(outage_ahead));
+    assert_eq!(
+        count(
+            &fixture.path,
+            "SELECT count(*) FROM daily_rollup WHERE check_id = 'api'"
+        ),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_value_the_schema_refuses_is_named_rather_than_failing_the_write() {
+    let fixture = open();
+    let base = day("2026-01-05").start_ms();
+    let mut bad = batch(
+        vec![result(1, base), result(2, base)],
+        vec![open_change(1, 3, base)],
+        vec![rollup("2026-01-05", 5, 1)],
+    );
+    bad.store_id = "0123456789ABCDEF0123456789ABCDEF".into();
+    bad.results[0].result.check_id = String::new();
+    bad.results[0].result.duration_ms = -1;
+    bad.results[1].result.status_code = Some(1_000);
+    if let RemoteOutageChange::Open { outage, .. } = &mut bad.outages[0] {
+        outage.health = Health::Up;
+    }
+    bad.rollups[0].total = 7;
+    let error = invalid(apply(&fixture, bad).await);
+    for field in [
+        "store_id",
+        "results[0].check_id",
+        "results[0].duration_ms",
+        "results[1].status_code",
+        "outages[0].health",
+        "rollups[0].total",
+    ] {
+        assert!(error.contains(field), "{field} missing from {error}");
+    }
+
+    apply(
+        &fixture,
+        batch(vec![], vec![open_change(1, 3, base)], vec![]),
+    )
+    .await
+    .unwrap();
+    let early = batch(vec![], vec![end_change(2, 3, base - 1)], vec![]);
+    let error = invalid(apply(&fixture, early).await);
+    assert!(error.contains("outages[0].ended_at"), "{error}");
+    assert_eq!(
+        count(
+            &fixture.path,
+            "SELECT count(*) FROM outage WHERE ended_at IS NULL"
+        ),
+        1
+    );
+}
+
+#[tokio::test]
+async fn the_hourly_rollup_resumes_from_this_nodes_own_days() {
+    let fixture = open();
+    fixture
+        .store
+        .append(NewCheckResult {
+            node_id: LOCAL.into(),
+            ..result(0, day("2026-01-02").start_ms()).result
+        })
+        .await
+        .unwrap();
+    apply(
+        &fixture,
+        batch(
+            vec![result(1, day("2026-01-05").start_ms())],
+            vec![],
+            vec![rollup("2026-01-05", 5, 0)],
+        ),
+    )
+    .await
+    .unwrap();
+    let report = fixture.store.rollup_recent().await.unwrap();
+    assert_eq!(report.since, Some(day("2026-01-02")));
+}

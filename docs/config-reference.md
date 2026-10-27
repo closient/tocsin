@@ -271,6 +271,18 @@ A `[[check.link]]` or `[[heartbeat.link]]`: a named link to somewhere an operato
 | `name` | string |  |  | Display name; the id is shown when it is absent. |
 | `topology_node` | [`TopologyNode`](#type-topologynode) |  |  | The node this heartbeat watches in a map of the estate, such as `operations-01/job:backup`. Every alert of the heartbeat carries it as the `topology_node` label; `[topology]` can limit the ids allowed. |
 
+<a id="table-node"></a>
+
+### `[[node]]`
+
+`[[node]]`: one tocsin server of a federation.
+
+Today a node is only a name: listing nodes makes `node_id` required and limits it to the listed ids. Without any `[[node]]`, a single server runs as before, named by `node_id` or its hostname.
+
+| Key | Type | Required | Default | Description |
+|-----|------|----------|---------|-------------|
+| `id` | [`Id`](#type-id) | yes |  | The node's id, which a server running as it gives as `--node`, `TOCSIN_NODE_ID` or `[server] node_id`. |
+
 <a id="table-notifier"></a>
 
 ### `[[notifier]]`

@@ -136,7 +136,7 @@ it cannot publish at all.
 | `create_silence` | `POST /api/v1/silences` | `silence` | The new [silence](alerting.md#silences). `reason` is required, and exactly one of `expires_in` (such as `"30m"`, from the server's clock) or `expires_at`, at most `[server] max_silence` away. Give `episode`, an outage id from `list_outages`, to quiet one outage: the silence ends with it. Who made it is the token. |
 | `list_silences` | `GET /api/v1/silences` | `silence` | Silences, newest first, each with the messages it held back. |
 | `expire_silence` | `POST /api/v1/silences/{id}/expire` | `silence` | The silence, ended now. Nothing extends one. |
-| `validate_config` | none; `tocsin mcp` only | none | `tocsin config check --json` on a folder: `ok` and what it holds, or `ok: false` with every error. |
+| `validate_config` | none; `tocsin mcp` only | none | `tocsin config check --json` on a folder: `ok` and what it holds, or `ok: false` with every error. `node` checks it as that [node](config.md#node), as `--node` does; it defaults to `TOCSIN_NODE_ID`, then to the configuration's own. |
 
 "Any token" is any known token on `/mcp`, and no token at all through
 `tocsin mcp`. Arguments and fields are the route's query parameters and

@@ -1083,6 +1083,24 @@
       ],
       "type": "object"
     },
+    "Node": {
+      "additionalProperties": false,
+      "description": "`[[node]]`: one tocsin server of a federation.\n\nToday a node is only a name: listing nodes makes `node_id` required and\nlimits it to the listed ids. Without any `[[node]]`, a single server\nruns as before, named by `node_id` or its hostname.",
+      "properties": {
+        "id": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Id"
+            }
+          ],
+          "description": "The node's id, which a server running as it gives as `--node`,\n`TOCSIN_NODE_ID` or `[server] node_id`."
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
     "Notifier": {
       "additionalProperties": false,
       "description": "A destination for operator alerts. Every alert it sends is followed by\na resolve with the same identity.",
@@ -2251,6 +2269,13 @@
       "description": "Pings tocsin expects to receive on an interval.",
       "items": {
         "$ref": "#/definitions/Heartbeat"
+      },
+      "type": "array"
+    },
+    "node": {
+      "description": "The tocsin servers of a federation. Listing any makes `node_id`\nrequired, and one of these ids.",
+      "items": {
+        "$ref": "#/definitions/Node"
       },
       "type": "array"
     },

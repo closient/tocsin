@@ -59,11 +59,11 @@ fn required(rules: Option<&BTreeMap<String, AlertingRule>>) -> BTreeMap<String, 
 }
 
 /// `tocsin notify test`.
-pub fn test(notifier_id: &str, folder: &Path) -> Result<Report, Failure> {
+pub fn test(notifier_id: &str, folder: &Path, node: Option<&str>) -> Result<Report, Failure> {
     let Loaded {
         config: configuration,
         ..
-    } = config::load(folder)?;
+    } = config::load(folder, node)?;
     let Some(notifier) = configuration
         .notifiers
         .iter()

@@ -85,6 +85,7 @@ fn config(subscribers: &str) -> Config {
         }],
         &Environment {
             hostname: "test".into(),
+            node_id: None,
             variable: &variable,
         },
     )

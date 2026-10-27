@@ -64,19 +64,36 @@ pub(crate) fn open(conn: &Connection, node_id: &str) -> Result<Vec<Outage>> {
              subject_kind
          FROM outage WHERE node_id = ?1 AND ended_at IS NULL ORDER BY subject_kind, check_id",
     )?;
-    let rows = statement.query_map(params![node_id], |row| {
-        Ok(Outage {
-            id: row.get(0)?,
-            node_id: row.get(1)?,
-            subject_kind: parse_column(8, &row.get::<_, String>(8)?)?,
-            check_id: row.get(2)?,
-            component_id: row.get(3)?,
-            health: parse_column(4, &row.get::<_, String>(4)?)?,
-            started_at_ms: row.get(5)?,
-            ended_at_ms: row.get(6)?,
-            alerted: row.get(7)?,
-        })
-    })?;
+    let rows = statement.query_map(params![node_id], outage_row)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// An outage from a row selecting, in order, `id, node_id, check_id,
+/// component_id, health, started_at, ended_at, alerted, subject_kind`.
+fn outage_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Outage> {
+    Ok(Outage {
+        id: row.get(0)?,
+        node_id: row.get(1)?,
+        subject_kind: parse_column(8, &row.get::<_, String>(8)?)?,
+        check_id: row.get(2)?,
+        component_id: row.get(3)?,
+        health: parse_column(4, &row.get::<_, String>(4)?)?,
+        started_at_ms: row.get(5)?,
+        ended_at_ms: row.get(6)?,
+        alerted: row.get(7)?,
+    })
+}
+
+/// Every open outage recorded by a node other than `node_id`, ordered by
+/// node, then check.
+pub(crate) fn open_elsewhere(conn: &Connection, node_id: &str) -> Result<Vec<Outage>> {
+    let mut statement = conn.prepare_cached(
+        "SELECT id, node_id, check_id, component_id, health, started_at, ended_at, alerted,
+             subject_kind
+         FROM outage WHERE node_id <> ?1 AND ended_at IS NULL
+         ORDER BY node_id, subject_kind, check_id",
+    )?;
+    let rows = statement.query_map(params![node_id], outage_row)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 

@@ -76,26 +76,38 @@ fn run(cli: Cli) -> Result<Report, Failure> {
         return Ok(Report::version());
     }
     match cli.command {
-        Some(Command::Serve { config, data }) => serve::run(&config, data.as_deref()),
+        Some(Command::Serve { config, node, data }) => {
+            serve::run(&config, node.as_deref(), data.as_deref())
+        }
         Some(Command::Config { command }) => match command {
-            ConfigCommand::Check { config, data } => config::check(&config, data.as_deref()),
-            ConfigCommand::Show { config } => config::show(&config),
+            ConfigCommand::Check { config, node, data } => {
+                config::check(&config, node.as_deref(), data.as_deref())
+            }
+            ConfigCommand::Show { config, node } => config::show(&config, node.as_deref()),
             ConfigCommand::Schema => Ok(config::schema()),
             ConfigCommand::Status { server } => config::status(&server),
         },
         Some(Command::Db { command }) => db::run(command),
         Some(Command::Probe { command }) => match command {
-            ProbeCommand::Run { check, config } => probe::run(&check, &config),
+            ProbeCommand::Run {
+                check,
+                config,
+                node,
+            } => probe::run(&check, &config, node.as_deref()),
         },
         Some(Command::Incident { command }) => incident::run(command),
         Some(Command::Maintenance { command }) => incident::run_maintenance(command),
         Some(Command::Release { command }) => release::run(command),
         Some(Command::Silence { command }) => silence::run(command),
         Some(Command::Notify { command }) => match command {
-            NotifyCommand::Test { notifier, config } => notify::test(&notifier, &config),
+            NotifyCommand::Test {
+                notifier,
+                config,
+                node,
+            } => notify::test(&notifier, &config, node.as_deref()),
         },
         Some(Command::Slack { command }) => match command {
-            SlackCommand::Setup { config } => slack::setup(&config),
+            SlackCommand::Setup { config, node } => slack::setup(&config, node.as_deref()),
         },
         Some(Command::Heartbeat { command }) => heartbeat::run(command),
         Some(Command::Openapi) => Ok(Report {

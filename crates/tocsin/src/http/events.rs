@@ -396,6 +396,7 @@ pub(crate) mod tests {
             }],
             &tocsin_core::config::Environment {
                 hostname: "test".into(),
+                node_id: None,
                 variable: &|_| None,
             },
         )

@@ -256,6 +256,9 @@ struct DeployInput {
 struct ValidateInput {
     /// A folder of `*.toml` configuration files on this machine.
     folder: String,
+    /// The node to validate it as, as `--node` gives it. Defaults to
+    /// `TOCSIN_NODE_ID`, then to the configuration's own.
+    node: Option<String>,
 }
 
 #[tool_router(router = tool_router)]
@@ -762,8 +765,11 @@ impl Server {
         Parameters(input): Parameters<ValidateInput>,
     ) -> CallToolResult {
         let folder = PathBuf::from(input.folder);
-        let checked =
-            tokio::task::spawn_blocking(move || crate::config::check(&folder, None)).await;
+        let node = input.node.or_else(|| std::env::var("TOCSIN_NODE_ID").ok());
+        let checked = tokio::task::spawn_blocking(move || {
+            crate::config::check(&folder, node.as_deref(), None)
+        })
+        .await;
         match checked {
             Ok(Ok(report)) => CallToolResult::structured(report.json),
             Ok(Err(failure)) => CallToolResult::structured(json!({

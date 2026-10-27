@@ -151,6 +151,7 @@ fn site_from(text: &str) -> Site {
         }],
         &Environment {
             hostname: "test".into(),
+            node_id: None,
             variable: &variable,
         },
     )

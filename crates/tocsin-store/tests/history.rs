@@ -602,3 +602,45 @@ async fn outages_of_removed_checks_follow_the_component_they_recorded() {
         .collect();
     assert_eq!(checks, ["gone", "moved-on"]);
 }
+
+#[tokio::test]
+async fn outages_open_under_other_nodes_are_found() {
+    let (_dir, store) = open();
+    let on = |node: &str, check: &str| NewOutage {
+        node_id: node.into(),
+        ..outage(check, 1_000, Down)
+    };
+    store.open_outage(on("node-a", "a")).await.unwrap();
+    store.open_outage(on("old-host", "c")).await.unwrap();
+    store.open_outage(on("old-host", "b")).await.unwrap();
+    let ended = store.open_outage(on("old-host", "d")).await.unwrap();
+    store.end_outage(ended, 2_000).await.unwrap();
+
+    let elsewhere = store.open_outages_elsewhere("node-a").await.unwrap();
+    let found: Vec<(&str, SubjectKind, &str)> = elsewhere
+        .iter()
+        .map(|outage| {
+            (
+                outage.node_id.as_str(),
+                outage.subject_kind,
+                outage.check_id.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("old-host", SubjectKind::Check, "b"),
+            ("old-host", SubjectKind::Heartbeat, "c"),
+        ],
+        "open ones only, never this node's"
+    );
+    assert!(
+        store
+            .open_outages_elsewhere("old-host")
+            .await
+            .unwrap()
+            .iter()
+            .all(|outage| outage.node_id == "node-a")
+    );
+}

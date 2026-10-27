@@ -531,6 +531,24 @@ failed, and finished rows are deleted after 30 days. Marking a connection
 dead fails every delivery still queued for it in the same transaction.
 Deleting a connection deletes its subscriptions and deliveries.
 
+### `node_store`
+
+Which store this is, and the stores of other nodes it has heard from, added
+by 0018. The migration writes one row with `local = 1` and a random
+`store_id` (32 lowercase hex digits), so every database has an identity of
+its own that survives restarts and renames, and a fresh database is a new
+one; a partial unique index (`node_store_local`) allows only one such row.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | integer | Row id. |
+| `node_id` | text | The node a remote store belongs to. Null only on the local row, whose node is whatever this server runs as. |
+| `store_id` | text | 32 lowercase hex digits. Unique with `node_id`. |
+| `local` | integer | 1 for this database's own row, else 0. |
+| `state` | text | `active`, `retired` or `conflicted`. |
+| `first_seen_at`, `last_push_at` | integer | When the row was made, and the last push received from that store. |
+| `next_seq` | integer | The next sequence number this store will stamp; set on the local row only, and at least 1. |
+
 ## Rollups
 
 Rollups are recomputed from raw results, never incremented, so recomputing

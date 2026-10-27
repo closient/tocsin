@@ -13,7 +13,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use tocsin_core::Health::{self, Degraded, Down, Up};
 use tocsin_core::incident::Timestamp;
-use tocsin_store::{NewCheckResult, NewOutage, Store, SubjectKind};
+use tocsin_store::{
+    AlertRouting, AlertTarget, DeliveryOutcome, NewCheckResult, NewOutage, OutageChange, OutageEnd,
+    Store, SubjectKind,
+};
 
 #[allow(dead_code)]
 mod support;
@@ -212,7 +215,9 @@ fn now_ms() -> i64 {
 /// Results for `api-https` 3h, 90, 30, 20 and 10 minutes ago, and four
 /// outages: one 10 days ago, one from 8 to 6 days ago, one 2 days ago, and
 /// one open since 20 minutes ago, which the engine resumes so the API
-/// starts down.
+/// starts down. The one 2 days ago alerted `slack`, whose fire failed
+/// for good; its resolve is queued to a notifier the server no longer
+/// has.
 fn seed(path: &Path) {
     fn result(started_at_ms: i64, health: Health) -> NewCheckResult {
         NewCheckResult {
@@ -263,12 +268,41 @@ fn seed(path: &Path) {
                 .await
                 .unwrap();
             store.end_outage(straddles, now - 6 * DAY).await.unwrap();
+            let routing = AlertRouting {
+                targets: vec![AlertTarget {
+                    notifier_id: "slack".into(),
+                    route_id: "ops".into(),
+                    repeat_ms: None,
+                }],
+                ..AlertRouting::default()
+            };
+            let opened = OutageChange {
+                end: None,
+                open: Some(outage(now - 2 * DAY, Degraded)),
+            };
             let recent = store
-                .open_outage(outage(now - 2 * DAY, Degraded))
+                .change_outage_alerting(opened, Some(routing), now - 2 * DAY)
+                .await
+                .unwrap()
+                .opened
+                .unwrap();
+            let fire = store.outbox().await.unwrap().pending[0].id;
+            let failed = DeliveryOutcome::Failed {
+                error: "HTTP 410 Gone".into(),
+            };
+            store
+                .finish_delivery(fire, failed, now - 2 * DAY + MINUTE)
                 .await
                 .unwrap();
+            let ended = OutageChange {
+                end: Some(OutageEnd {
+                    id: recent,
+                    ended_at_ms: now - 2 * DAY + 15 * MINUTE,
+                }),
+                open: None,
+            };
             store
-                .end_outage(recent, now - 2 * DAY + 15 * MINUTE)
+                .change_outage_alerting(ended, None, now - 2 * DAY + 15 * MINUTE)
                 .await
                 .unwrap();
             store
@@ -402,6 +436,37 @@ fn history_needs_a_reader_and_a_known_check() {
             .starts_with("check \"../outages\""),
         "never sent: {error}"
     );
+}
+
+#[test]
+fn alerts_need_a_reader_and_show_each_delivery() {
+    let server = Server::start();
+    for token in [None, Some(ONCALL)] {
+        let (code, error) = server.run(token, &["alerts"]);
+        assert_eq!(code, Some(2), "{error}");
+        assert!(
+            error["error"]["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("`status:read` scope")),
+            "{error}"
+        );
+    }
+
+    let (code, list) = server.run(Some(READER), &["alerts", "--state", "resolved"]);
+    assert_eq!(code, Some(0), "{list}");
+    let [alert] = list["alerts"].as_array().unwrap().as_slice() else {
+        panic!("one alert: {list}");
+    };
+    assert_eq!(alert["notifier_id"], "slack", "{alert}");
+    assert_eq!(
+        alert["labels"]["alertname"], "TocsinCheckFailing",
+        "{alert}"
+    );
+    assert_eq!(alert["deliveries"][0]["kind"], "fire", "{alert}");
+    assert_eq!(alert["deliveries"][0]["status"], "failed", "{alert}");
+    assert_eq!(alert["deliveries"][0]["last_error"], "HTTP 410 Gone");
+    let (_, firing) = server.run(Some(READER), &["alerts", "--state", "firing"]);
+    assert_eq!(firing["alerts"], serde_json::json!([]), "{firing}");
 }
 
 #[test]

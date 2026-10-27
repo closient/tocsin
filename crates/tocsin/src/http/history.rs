@@ -18,8 +18,8 @@ use serde::Deserialize;
 use tocsin_alert::notifiers::alertmanager;
 use tocsin_core::alert::{AlertEnding, AlertHistory, AlertRecord, AlertState};
 use tocsin_core::incident::{FieldError, Timestamp};
-use tocsin_core::status::{CheckKind, CheckResults, OutageList};
-use tocsin_store::{AlertEntry, EndedBy, HistoryPage, SubjectKind};
+use tocsin_core::status::{CheckResults, OutageList};
+use tocsin_store::{AlertEntry, EndedBy, HistoryPage};
 use utoipa::IntoParams;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -85,8 +85,9 @@ pub struct OutageParams {
 pub struct AlertParams {
     /// The start of the window (RFC 3339): alerts still firing at or after
     /// it. At most 366 days ago; default 30 days ago. Keep it the same
-    /// while paging. An alert is kept only while one of its deliveries is,
-    /// so the history reaches back no further than delivery retention.
+    /// while paging. A firing alert is always kept; a resolved one only
+    /// while one of its deliveries is, so resolved alerts reach back no
+    /// further than delivery retention.
     pub since: Option<Timestamp>,
     /// Only alerts after the previous page's last: its `next_before`. One
     /// that names no alert of this read (pruned since, or from a read with
@@ -248,10 +249,7 @@ fn alert_record(entry: AlertEntry) -> AlertRecord {
         labels: alertmanager::stored_labels(&alert),
         id: alert.id,
         node_id: alert.node_id,
-        subject_kind: match alert.subject_kind {
-            SubjectKind::Check => CheckKind::Check,
-            SubjectKind::Heartbeat => CheckKind::Heartbeat,
-        },
+        subject_kind: alert.subject_kind.into(),
         subject_id: alert.subject_id,
         component_id: alert.component_id,
         notifier_id: alert.notifier_id,
@@ -272,6 +270,8 @@ fn alert_record(entry: AlertEntry) -> AlertRecord {
                 EndedBy::Config => AlertEnding::Config,
             }),
         annotations: alert.annotations,
+        notified: alert.notified,
+        attempted: alert.attempted,
         deliveries,
     }
 }

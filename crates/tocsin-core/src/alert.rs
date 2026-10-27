@@ -126,7 +126,15 @@ pub struct AlertRecord {
     /// The subject's configured annotations as they were when it opened.
     /// An Alertmanager message adds `summary`, `description` and the rest.
     pub annotations: BTreeMap<String, String>,
-    /// Every message queued for it that is still kept, oldest first.
+    /// Whether its notifier has accepted a fire or repeat for its current
+    /// fire, the one for its latest outage or health. A long-firing alert
+    /// can outlive its deliveries, so this says what they no longer can.
+    pub notified: bool,
+    /// Whether a send of a fire or repeat was ever started, whatever came
+    /// of it. Until one was, its notifier cannot have heard of it.
+    pub attempted: bool,
+    /// Every message queued for it that delivery retention still keeps,
+    /// oldest first.
     pub deliveries: Vec<AlertDelivery>,
 }
 

@@ -193,7 +193,12 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
   after a week and failed and silenced ones after 90 days, and an ended
   alert goes with its last delivery (see
   [alerting.md](alerting.md#delivery)). So a month back shows every
-  failure but only the past week's successes.
+  failure but only the past week's successes. A firing alert is never
+  pruned, but its early deliveries can be, so `notified` says whether
+  its notifier accepted a fire or repeat for its current health, and
+  `attempted` whether one was ever sent at all. A cursor only places
+  the page: one whose alert resolved since still pages `state=firing`
+  on.
 - **`timeline`** merges outages, incidents, deploys and releases; see
   [releases.md](releases.md#http-api). `component=` narrows it to one
   component's checks, incidents and projects. Without `status:read` its

@@ -21,7 +21,10 @@ use rmcp::{Peer, ServiceExt};
 use serde_json::{Value, json};
 use tocsin_core::Health::{self, Down, Up};
 use tocsin_core::incident::Timestamp;
-use tocsin_store::{NewCheckResult, NewOutage, Store, SubjectKind};
+use tocsin_store::{
+    AlertRouting, AlertTarget, DeliveryOutcome, NewCheckResult, NewOutage, OutageChange, OutageEnd,
+    Store, SubjectKind,
+};
 
 #[allow(dead_code)]
 mod support;
@@ -241,7 +244,9 @@ fn now_ms() -> i64 {
 }
 
 /// Three results for `api-https`, the last one down, and the outage it
-/// opened 10 minutes ago, plus an older outage that ended.
+/// opened 10 minutes ago, plus an older outage that ended and alerted
+/// `slack`: its fire failed for good and its resolve was delivered, so
+/// nothing is left for the server's worker to change between two reads.
 fn seed(path: &Path) {
     fn result(started_at_ms: i64, health: Health) -> NewCheckResult {
         NewCheckResult {
@@ -288,8 +293,51 @@ fn seed_with(
             for (ago, health) in [(30 * MINUTE, Up), (20 * MINUTE, Up), (10 * MINUTE, Down)] {
                 store.append(result(now - ago, health)).await.unwrap();
             }
-            let old = store.open_outage(outage(now - 2 * DAY)).await.unwrap();
-            store.end_outage(old, now - 2 * DAY + MINUTE).await.unwrap();
+            let routing = AlertRouting {
+                targets: vec![AlertTarget {
+                    notifier_id: "slack".into(),
+                    route_id: "ops".into(),
+                    repeat_ms: None,
+                }],
+                ..AlertRouting::default()
+            };
+            let opened = OutageChange {
+                end: None,
+                open: Some(outage(now - 2 * DAY)),
+            };
+            let old = store
+                .change_outage_alerting(opened, Some(routing), now - 2 * DAY)
+                .await
+                .unwrap()
+                .opened
+                .unwrap();
+            // As the worker does: marked attempted before the send.
+            let pending = store.outbox().await.unwrap().pending.remove(0);
+            store.attempt_alert(pending.alert.id).await.unwrap();
+            let fire = pending.id;
+            let failed = DeliveryOutcome::Failed {
+                error: "HTTP 410 Gone".into(),
+            };
+            store
+                .finish_delivery(fire, failed, now - 2 * DAY)
+                .await
+                .unwrap();
+            let ended = OutageChange {
+                end: Some(OutageEnd {
+                    id: old,
+                    ended_at_ms: now - 2 * DAY + MINUTE,
+                }),
+                open: None,
+            };
+            store
+                .change_outage_alerting(ended, None, now - 2 * DAY + MINUTE)
+                .await
+                .unwrap();
+            let resolve = store.outbox().await.unwrap().pending[0].id;
+            store
+                .finish_delivery(resolve, DeliveryOutcome::Delivered, now - 2 * DAY + MINUTE)
+                .await
+                .unwrap();
             store.open_outage(outage(now - 10 * MINUTE)).await.unwrap();
             store.close().await.unwrap();
         });
@@ -402,6 +450,12 @@ async fn drives_every_tool(peer: &Peer<RoleClient>, node: &Node) {
         .rest(AGENT, &format!("/api/v1/alerts/history?since={week_ago}"))
         .await;
     assert_eq!(alerts, rest);
+    assert_eq!(alerts["alerts"].as_array().unwrap().len(), 1, "{alerts}");
+    assert_eq!(
+        alerts["alerts"][0]["deliveries"][0]["last_error"], "HTTP 410 Gone",
+        "{alerts}"
+    );
+    assert_eq!(alerts["alerts"][0]["attempted"], true, "{alerts}");
 
     let history = ok(
         peer,

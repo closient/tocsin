@@ -52,11 +52,10 @@ use std::time::Duration;
 
 use tocsin_core::incident::Timestamp;
 use tocsin_core::silence::Target;
-use tocsin_core::status::CheckKind;
 use tocsin_engine::ports::Clock;
 use tocsin_store::{
     ActiveSilence, DeliveryKind, DeliveryOutcome, DeliveryRetention, EndedBy, PendingDelivery,
-    Store, StoredAlert, SubjectKind,
+    Store, StoredAlert,
 };
 use tokio::sync::{Notify, watch};
 use tokio::task::{self, JoinHandle, JoinSet};
@@ -318,10 +317,7 @@ impl Alerter {
 fn applies(silence: &ActiveSilence, alert: &StoredAlert) -> bool {
     let target = Target {
         node: &alert.node_id,
-        subject_kind: match alert.subject_kind {
-            SubjectKind::Check => CheckKind::Check,
-            SubjectKind::Heartbeat => CheckKind::Heartbeat,
-        },
+        subject_kind: alert.subject_kind.into(),
         subject: &alert.subject_id,
         component: alert.component_id.as_deref(),
         notifier: &alert.notifier_id,

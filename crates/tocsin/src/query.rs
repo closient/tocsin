@@ -263,6 +263,9 @@ struct AlertView {
     health: String,
     subject_id: String,
     notifier_id: String,
+    route_id: String,
+    ended_by: Option<String>,
+    notified: bool,
     deliveries: Vec<DeliveryView>,
 }
 
@@ -272,6 +275,7 @@ struct DeliveryView {
     status: String,
     attempts: u32,
     last_error: Option<String>,
+    silence_id: Option<i64>,
 }
 
 /// `GET /api/v1/timeline`, as the table reads it.
@@ -390,13 +394,30 @@ fn describe_alerts(list: &AlertsView) -> String {
     let mut text = String::new();
     for alert in &list.alerts {
         let ended = alert.ended_at.as_deref().unwrap_or("firing");
-        let _ = writeln!(
-            text,
-            "{}  {:<24}  {:<8}  {:<20}  {}",
-            alert.started_at, ended, alert.health, alert.subject_id, alert.notifier_id
+        let mut line = format!(
+            "{}  {:<24}  {:<8}  {:<20}  {} via {}",
+            alert.started_at,
+            ended,
+            alert.health,
+            alert.subject_id,
+            alert.notifier_id,
+            alert.route_id
         );
+        match &alert.ended_by {
+            Some(ended_by) => {
+                let _ = write!(line, "  ended by {ended_by}");
+            }
+            // Its deliveries may be gone; this still says whether it got
+            // through.
+            None if !alert.notified => line.push_str("  not notified yet"),
+            None => {}
+        }
+        let _ = writeln!(text, "{line}");
         for delivery in &alert.deliveries {
             let mut line = format!("    {:<7}  {:<9}", delivery.kind, delivery.status);
+            if let Some(silence) = delivery.silence_id {
+                let _ = write!(line, "  silence {silence}");
+            }
             match delivery.attempts {
                 0 => {}
                 1 => line.push_str("  1 attempt"),
@@ -554,18 +575,22 @@ mod tests {
                     {
                         "started_at": "2026-10-23T14:00:00.000Z", "ended_at": null,
                         "health": "down", "subject_id": "api", "notifier_id": "pager",
+                        "route_id": "oncall", "ended_by": null, "notified": false,
                         "deliveries": [{
                             "kind": "fire", "status": "pending", "attempts": 3,
-                            "last_error": "connection refused",
+                            "last_error": "connection refused", "silence_id": null,
                         }],
                     },
                     {
                         "started_at": "2026-10-23T13:00:00.000Z",
                         "ended_at": "2026-10-23T13:05:00.000Z",
                         "health": "degraded", "subject_id": "db", "notifier_id": "slack",
+                        "route_id": "team", "ended_by": "config", "notified": true,
                         "deliveries": [
-                            {"kind": "fire", "status": "failed", "attempts": 12, "last_error": "410"},
-                            {"kind": "resolve", "status": "delivered", "attempts": 1, "last_error": null},
+                            {"kind": "fire", "status": "failed", "attempts": 12,
+                             "last_error": "410", "silence_id": null},
+                            {"kind": "resolve", "status": "silenced", "attempts": 0,
+                             "last_error": null, "silence_id": 4},
                         ],
                     },
                 ],
@@ -575,16 +600,20 @@ mod tests {
         );
         let lines: Vec<&str> = list.lines().collect();
         assert!(
-            lines[0].contains("firing") && lines[0].ends_with("pager"),
+            lines[0].contains("firing") && lines[0].ends_with("pager via oncall  not notified yet"),
             "{list}"
         );
         assert_eq!(
             lines[1],
             "    fire     pending    3 attempts  connection refused"
         );
-        assert!(lines[2].contains("2026-10-23T13:05:00.000Z"), "{list}");
+        assert!(
+            lines[2].contains("2026-10-23T13:05:00.000Z")
+                && lines[2].ends_with("slack via team  ended by config"),
+            "{list}"
+        );
         assert_eq!(lines[3], "    fire     failed     12 attempts  410");
-        assert_eq!(lines[4], "    resolve  delivered  1 attempt");
+        assert_eq!(lines[4], "    resolve  silenced   silence 4");
         assert_eq!(lines[5], "more: --before 7");
     }
 }

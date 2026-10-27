@@ -16,11 +16,11 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, named_params,
 use tocsin_core::Health;
 use tocsin_core::alert::{AlertDelivery, AlertState};
 use tocsin_core::incident::Timestamp;
-use tocsin_core::status::OutageEnding;
+use tocsin_core::status::{CheckKind, OutageEnding};
 
 use crate::error::{Error, Result};
 use crate::history::{HistoryPage, lost_cursor};
-use crate::incident::text;
+use crate::incident::{snapshot, text};
 use crate::rollup::parse_column;
 use crate::writer::{apply_outage_change, insert_result};
 use crate::{NewCheckResult, NewOutage, OutageChange};
@@ -44,6 +44,15 @@ impl SubjectKind {
         match self {
             SubjectKind::Check => "check",
             SubjectKind::Heartbeat => "heartbeat",
+        }
+    }
+}
+
+impl From<SubjectKind> for CheckKind {
+    fn from(kind: SubjectKind) -> Self {
+        match kind {
+            SubjectKind::Check => CheckKind::Check,
+            SubjectKind::Heartbeat => CheckKind::Heartbeat,
         }
     }
 }
@@ -1034,8 +1043,9 @@ pub struct AlertEntry {
 
 /// The alerts firing at any moment since `page.since`, newest start first,
 /// ties by id, each with its deliveries; only firing or resolved ones when
-/// `state` says so. Alerts and deliveries are kept as long as delivery
-/// retention keeps them, so the window reaches back no further than that.
+/// `state` says so. A firing alert is always kept; a resolved one only
+/// until delivery retention has dropped every delivery of it, so the window
+/// reaches back no further than that. All three reads see one snapshot.
 ///
 /// # Errors
 ///
@@ -1045,19 +1055,29 @@ pub(crate) fn alert_history(
     page: HistoryPage,
     state: Option<AlertState>,
 ) -> Result<Vec<AlertEntry>> {
+    snapshot(conn, |conn| alert_history_page(conn, page, state))
+}
+
+fn alert_history_page(
+    conn: &Connection,
+    page: HistoryPage,
+    state: Option<AlertState>,
+) -> Result<Vec<AlertEntry>> {
     let since = page.since.as_millis();
     let state = state.map(AlertState::as_str);
     let (at, before) = match page.before {
         None => (i64::MAX, i64::MAX),
         Some(before) => {
+            // The cursor only places the page, so it need not match
+            // `state`: paging firing alerts goes on past one that resolved
+            // since the last page.
             let at = conn
                 .prepare_cached(
                     "SELECT a.started_at FROM alert a WHERE a.id = :before
-                       AND (a.ended_at IS NULL OR a.ended_at >= :since)
-                       AND (:state IS NULL OR (:state = 'firing') = (a.ended_at IS NULL))",
+                       AND (a.ended_at IS NULL OR a.ended_at >= :since)",
                 )?
                 .query_row(
-                    named_params! { ":before": before, ":since": since, ":state": state },
+                    named_params! { ":before": before, ":since": since },
                     |row| row.get(0),
                 )
                 .optional()?

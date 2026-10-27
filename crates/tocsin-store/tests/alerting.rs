@@ -939,14 +939,24 @@ async fn alert_history_pages_by_cursor_and_refuses_a_lost_one() {
         .unwrap();
     assert_eq!(last.len(), 0, "the last page is empty");
 
-    // A cursor naming no alert, or one outside this read's state, is
+    // The cursor only places the page: one whose alert has since left
+    // this read's state, as a firing alert does when it resolves between
+    // pages, still pages on.
+    let resolved_after_firing = store
+        .alert_history(
+            history_page(T0, Some(firing), 1),
+            Some(AlertState::Resolved),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolved_after_firing.len(), 1);
+    assert_eq!(resolved_after_firing[0].alert.id, resolved);
+
+    // A cursor naming no alert, or one that ended before the window, is
     // refused rather than read as the last page.
-    for (before, state) in [
-        (resolved + firing + 100, None),
-        (resolved, Some(AlertState::Firing)),
-    ] {
+    for (since, before) in [(T0, resolved + firing + 100), (T0 + 1_001, resolved)] {
         let error = store
-            .alert_history(history_page(T0, Some(before), 1), state)
+            .alert_history(history_page(since, Some(before), 1), None)
             .await
             .unwrap_err();
         assert!(matches!(error, Error::Invalid(_)), "{error:?}");

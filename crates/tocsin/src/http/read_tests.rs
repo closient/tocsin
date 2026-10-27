@@ -830,7 +830,10 @@ async fn failed_alert(api: &Api) -> i64 {
         .unwrap()
         .opened
         .unwrap();
-    let fire = store.outbox().await.unwrap().pending[0].id;
+    // As the worker does: marked attempted before the send goes out.
+    let pending = store.outbox().await.unwrap().pending.remove(0);
+    store.attempt_alert(pending.alert.id).await.unwrap();
+    let fire = pending.id;
     store
         .finish_delivery(
             fire,
@@ -893,6 +896,9 @@ async fn the_alert_history_shows_an_alert_s_labels_and_how_each_delivery_went() 
     assert_eq!(alert["route_id"], "ops");
     assert_eq!(alert["state"], "resolved");
     assert_eq!(alert["ended_by"], "recovery");
+    // Its fire was sent and refused, so the notifier never had it.
+    assert_eq!(alert["attempted"], true);
+    assert_eq!(alert["notified"], false);
     assert_eq!(
         alert["started_at"],
         Timestamp::from_millis(started).to_string()

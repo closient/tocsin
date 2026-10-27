@@ -21,7 +21,7 @@
           {
             "name": "since",
             "in": "query",
-            "description": "The start of the window (RFC 3339): alerts still firing at or after\nit. At most 366 days ago; default 30 days ago. Keep it the same\nwhile paging. An alert is kept only while one of its deliveries is,\nso the history reaches back no further than delivery retention.",
+            "description": "The start of the window (RFC 3339): alerts still firing at or after\nit. At most 366 days ago; default 30 days ago. Keep it the same\nwhile paging. A firing alert is always kept; a resolved one only\nwhile one of its deliveries is, so resolved alerts reach back no\nfurther than delivery retention.",
             "required": false,
             "schema": {
               "$ref": "#/components/schemas/Timestamp"
@@ -2318,6 +2318,8 @@
           "started_at",
           "labels",
           "annotations",
+          "notified",
+          "attempted",
           "deliveries"
         ],
         "properties": {
@@ -2331,6 +2333,10 @@
               "type": "string"
             }
           },
+          "attempted": {
+            "type": "boolean",
+            "description": "Whether a send of a fire or repeat was ever started, whatever came\nof it. Until one was, its notifier cannot have heard of it."
+          },
           "component_id": {
             "type": [
               "string",
@@ -2343,7 +2349,7 @@
             "items": {
               "$ref": "#/components/schemas/AlertDelivery"
             },
-            "description": "Every message queued for it that is still kept, oldest first."
+            "description": "Every message queued for it that delivery retention still keeps,\noldest first."
           },
           "ended_at": {
             "oneOf": [
@@ -2389,6 +2395,10 @@
           "node_id": {
             "type": "string",
             "description": "The node that saw it."
+          },
+          "notified": {
+            "type": "boolean",
+            "description": "Whether its notifier has accepted a fire or repeat for its current\nfire, the one for its latest outage or health. A long-firing alert\ncan outlive its deliveries, so this says what they no longer can."
           },
           "notifier_id": {
             "type": "string",

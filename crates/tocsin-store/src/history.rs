@@ -331,10 +331,7 @@ pub(crate) fn lost_cursor(before: i64, what: &str) -> Error {
 
 /// Column `index`, an outage's `subject_kind`, as the API spells it.
 pub(crate) fn subject_kind(index: usize, row: &rusqlite::Row<'_>) -> rusqlite::Result<CheckKind> {
-    Ok(match parse_column(index, &row.get::<_, String>(index)?)? {
-        SubjectKind::Check => CheckKind::Check,
-        SubjectKind::Heartbeat => CheckKind::Heartbeat,
-    })
+    Ok(parse_column::<SubjectKind>(index, &row.get::<_, String>(index)?)?.into())
 }
 
 /// Column `index`, how an outage ended; `None` while it is open.

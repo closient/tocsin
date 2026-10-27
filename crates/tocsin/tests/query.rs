@@ -286,7 +286,10 @@ fn seed(path: &Path) {
                 .unwrap()
                 .opened
                 .unwrap();
-            let fire = store.outbox().await.unwrap().pending[0].id;
+            // As the worker does: marked attempted before the send.
+            let pending = store.outbox().await.unwrap().pending.remove(0);
+            store.attempt_alert(pending.alert.id).await.unwrap();
+            let fire = pending.id;
             let failed = DeliveryOutcome::Failed {
                 error: "HTTP 410 Gone".into(),
             };

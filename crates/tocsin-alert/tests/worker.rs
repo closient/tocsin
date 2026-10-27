@@ -874,6 +874,12 @@ fn a_notifier_removed_across_a_restart_abandons_its_alert_and_counts_it() {
         let id = running.change(down(T0)).await.unwrap();
         next_from(&mut receiver, "old").await;
         next_from(&mut receiver, "kept").await;
+        // A notifier has the fire before the worker records it sent; stop
+        // before that and the fire stays queued and goes again after the
+        // restart. Wait until both are recorded.
+        while !fixture.store.outbox().await.unwrap().pending.is_empty() {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
         let Running { alerter, history } = running;
         alerter.stop().await;
         drop(history);

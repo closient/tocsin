@@ -11,6 +11,8 @@
 //! Both keys are written `ed25519:<base64>`: the public key's 32 bytes,
 //! and the private key's 32-byte seed.
 
+pub mod wire;
+
 use std::borrow::Cow;
 use std::fmt::{self, Write as _};
 

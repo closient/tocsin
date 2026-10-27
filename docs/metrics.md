@@ -48,7 +48,9 @@ the number of series is fixed by what is configured:
 - `component`: the check's `component`; empty, and so absent in
   Prometheus, for a check without one.
 - `node`: this server's `node_id`, the hostname unless `[server]` sets
-  it. It tells nodes apart when several tocsins feed one Prometheus.
+  it. It tells nodes apart when several tocsins feed one Prometheus. On
+  the `tocsin_node_*` families it is instead the `[[node]]` that pushed
+  to this one.
 - `kind`: `check` or `heartbeat`.
 - `topology_node`: the check's or heartbeat's `topology_node`, only on
   `tocsin_check_info`; empty, and so absent in Prometheus, when it sets
@@ -78,6 +80,8 @@ on a removed check resolves rather than firing on forever.
 | `tocsin_db_size_bytes` | gauge | | The SQLite database's size on disk, its write-ahead log included. |
 | `tocsin_slack_connections` | gauge | `purpose`, `state` | Slack channels connected by signing in: `purpose` is `operator` (alert channels on `/admin/slack`) or `subscriber` (added from the subscribe page), `state` is `live` or `dead` (Slack revoked it). |
 | `tocsin_slack_connection_up` | gauge | `notifier`, `connection` | 1 when the Slack `connection` a notifier names is connected and live; 0 when it is missing or dead, so its alerts fail. |
+| `tocsin_node_clock_offset_seconds` | gauge | `node` | How far ahead of this server's clock a node's clock was at its last push: its `sent_at` less when this server took the push, transit included; negative when behind. |
+| `tocsin_node_backlog_rows` | gauge | `node` | The results and outage changes a node had yet to push here after its last push: its store's head less the cursor this server answered. |
 | `tocsin_build_info` | gauge | `version` | Always 1; `version` is the running tocsin's. |
 | `tocsin_otlp_export_failures_total` | counter | | Attempts to send an OTLP metric export that failed, retried or not: refused, partly rejected, unanswered within the timeout, or never sent. |
 
@@ -93,6 +97,10 @@ Some series are absent until there is something to say:
 - `tocsin_heartbeat_last_ping_timestamp` appears after the first ping
   since tocsin started. Until then use `tocsin_check_up{kind="heartbeat"}`,
   which goes to 0 when a deadline passes.
+- The two `tocsin_node_*` families have a series for each configured
+  `[[node]]` once it has pushed here since tocsin started; they are held
+  in memory, so a restart clears them until the next push. A node
+  removed from the configuration loses its series at the next reload.
 - The two Slack families appear only with `[slack]` or a notifier naming
   a Slack `connection`. All four
   `tocsin_slack_connections` series are always there then, at 0 when
@@ -270,6 +278,8 @@ counters at the same moment, so the two never disagree:
 | `tocsin.component.status` | gauge | `1` | `tocsin_component_status` |
 | `tocsin.slack.connections` | gauge | `{connection}` | `tocsin_slack_connections` |
 | `tocsin.slack.connection.up` | gauge | `1` | `tocsin_slack_connection_up` |
+| `tocsin.node.clock_offset` | gauge | `s` | `tocsin_node_clock_offset_seconds` |
+| `tocsin.node.backlog` | gauge | `{row}` | `tocsin_node_backlog_rows` |
 
 `tocsin.check.results` counts the results each check and heartbeat has
 recorded since tocsin started, one series per `tocsin.check.health`:
@@ -291,7 +301,7 @@ The attributes carry the Prometheus labels under namespaced names:
 | `tocsin.check.topology_node` | `topology_node` | every check metric, when the check or heartbeat sets one; OTLP has no counterpart of `tocsin_check_info` |
 | `tocsin.check.type` | none | checks: `http`, `tcp`, `dns`, `icmp` or `tls`; absent on heartbeats |
 | `tocsin.component.id` | `component` | when the check has a component, and on `tocsin.component.status` |
-| `tocsin.node.id` | `node` | every check and component metric |
+| `tocsin.node.id` | `node` | every check and component metric, and the two node metrics, where it names the pushing node |
 | `tocsin.check.health` | none | `tocsin.check.results` |
 | `tocsin.component.status` | `status` | `tocsin.component.status` |
 | `tocsin.slack.purpose` | `purpose` | `tocsin.slack.connections` |

@@ -58,6 +58,15 @@ impl From<SubjectKind> for CheckKind {
     }
 }
 
+impl From<CheckKind> for SubjectKind {
+    fn from(kind: CheckKind) -> Self {
+        match kind {
+            CheckKind::Check => SubjectKind::Check,
+            CheckKind::Heartbeat => SubjectKind::Heartbeat,
+        }
+    }
+}
+
 impl fmt::Display for SubjectKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())

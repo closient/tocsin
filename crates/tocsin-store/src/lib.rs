@@ -58,6 +58,7 @@ pub use crate::error::{Error, Result};
 pub use crate::federation::{BatchReport, RemoteBatch, RemoteOutageChange, RemoteResult};
 pub use crate::history::{Checks, HistoryPage, Newest, ResultFilter, ResultSlice};
 pub use crate::incident::{Drafts, OpenIncident, Opened};
+pub use crate::node::RemoteStore;
 pub use crate::outage::{LastUp, LatestResult, Outage};
 use crate::readers::Readers;
 pub use crate::release::{ComponentScope, Order, Projects, ReleaseQuery, TimelineQuery, Written};
@@ -1300,6 +1301,8 @@ impl Store {
 
     /// Applies a batch another node pushed, as this node (`local_node_id`)
     /// at `now_ms`, in one transaction: see `docs/design/federation.md`.
+    /// The store's `node_store` row is made on first sight and its last
+    /// push moved to `now_ms` in the same transaction.
     /// Applying the same batch twice changes nothing the second time.
     ///
     /// # Errors
@@ -1318,6 +1321,16 @@ impl Store {
         self.writer
             .run(move |conn| federation::apply_batch(conn, &batch, &local_node_id, now_ms))
             .await
+    }
+
+    /// Every other node's store this database knows: each one whose pushes
+    /// were applied here, by node, then by when it was first seen.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn remote_stores(&self) -> Result<Vec<RemoteStore>> {
+        self.read(node::remote_stores).await
     }
 
     /// Signs `signup.email` up, or refreshes the confirmation of an address

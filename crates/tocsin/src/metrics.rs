@@ -70,6 +70,8 @@ pub struct Metrics {
     pub checks: CheckMetrics,
     /// How the OpenTelemetry export goes.
     pub export: ExportMetrics,
+    /// What the other nodes' pushes say of them.
+    pub federation: FederationMetrics,
     /// The Slack connections the running configuration's notifiers name,
     /// as [`slack_names`] gives them, for [`Metrics::read`].
     slack: Mutex<Option<Vec<(String, String)>>>,
@@ -100,6 +102,7 @@ impl Metrics {
             config,
             checks,
             export,
+            federation: FederationMetrics::default(),
             slack: Mutex::default(),
         }
     }
@@ -108,6 +111,7 @@ impl Metrics {
     /// running now.
     pub fn configured(&self, config: &Config) {
         self.checks.configured(config);
+        self.federation.configured(config);
         *lock(&self.slack) = slack_names(config);
     }
 
@@ -141,6 +145,7 @@ impl Metrics {
         });
         reading.slack =
             slack.map(|census| SlackReading::of(census, &slack_names(config).unwrap_or_default()));
+        reading.nodes = self.federation.reading();
         let now = state_now(&reading, node, db_size_bytes);
         let mut text = String::new();
         prometheus_client::encoding::text::encode_registry(&mut text, &self.registry)
@@ -160,6 +165,7 @@ impl Metrics {
         if let Some(names) = &*lock(&self.slack) {
             reading.slack = slack.map(|census| SlackReading::of(census, names));
         }
+        reading.nodes = self.federation.reading();
         reading
     }
 
@@ -252,7 +258,32 @@ fn state_now(reading: &Reading, node: &str, db_size_bytes: u64) -> Registry {
     if let Some(slack) = &reading.slack {
         slack_now(&mut registry, slack);
     }
+    if !reading.nodes.is_empty() {
+        nodes_now(&mut registry, &reading.nodes);
+    }
     registry
+}
+
+/// Adds `nodes`' gauges to `registry`: each other node's clock offset and
+/// backlog, as its last push gave them.
+fn nodes_now(registry: &mut Registry, nodes: &[NodeReading]) {
+    let offset = Family::<Labels, FloatGauge>::default();
+    let backlog = Family::<Labels, Gauge>::default();
+    for each in nodes {
+        let labels = vec![("node", each.node.clone())];
+        offset.get_or_create(&labels).set(each.clock_offset_seconds);
+        backlog.get_or_create(&labels).set(each.backlog_rows);
+    }
+    registry.register(
+        "tocsin_node_clock_offset_seconds",
+        "How far ahead of this node's clock each other node's was at its last push, transit included, in seconds; negative when behind. Absent until the node's first push since tocsin started",
+        offset,
+    );
+    registry.register(
+        "tocsin_node_backlog_rows",
+        "The results and outage changes each other node had not yet pushed here, as its last push counted them. Absent until the node's first push since tocsin started",
+        backlog,
+    );
 }
 
 /// Adds `slack`'s gauges to `registry`: how many connections there are
@@ -537,6 +568,7 @@ impl CheckMetrics {
                 members,
                 components,
                 slack: None,
+                nodes: Vec::new(),
             },
             observed,
         )
@@ -606,6 +638,100 @@ pub struct Reading {
     pub components: Vec<(String, ComponentStatus)>,
     /// The Slack connections, when there are any to describe.
     pub slack: Option<SlackReading>,
+    /// Each configured node that pushed here since tocsin started, in the
+    /// configuration's order.
+    pub nodes: Vec<NodeReading>,
+}
+
+/// What a node's last push here said of it, in a [`Reading`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeReading {
+    /// The node's id.
+    pub node: String,
+    /// How far ahead of this node's clock the node's was, transit
+    /// included: its `sent_at` less this node's `received_at`, in seconds.
+    pub clock_offset_seconds: f64,
+    /// The results and outage changes it had yet to push.
+    pub backlog_rows: i64,
+}
+
+/// A node's last push here, as the ingest route took it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodePush {
+    /// The store the push came from.
+    pub store: String,
+    /// When the node said it sent it, by its clock.
+    pub sent_at: Timestamp,
+    /// When it arrived, by this node's clock.
+    pub received_at: Timestamp,
+    /// The results and outage changes past the new cursor: the node's head
+    /// less where this receiver now is, for each kind.
+    pub backlog_rows: i64,
+    /// The digest of the node's merged configuration, if it gave one.
+    pub config_digest: Option<String>,
+}
+
+impl NodePush {
+    /// `sent_at` less `received_at`, in seconds: positive when the node's
+    /// clock is ahead of this one's.
+    #[allow(clippy::cast_precision_loss)] // A millisecond difference fits f64 exactly.
+    pub fn clock_offset_seconds(&self) -> f64 {
+        (self.sent_at.as_millis() - self.received_at.as_millis()) as f64 / 1000.0
+    }
+}
+
+/// Each configured node's last push here since tocsin started. Pushes from
+/// a node the configuration no longer lists are dropped, so the series are
+/// bounded by it.
+///
+/// Cheap to clone; clones share the pushes.
+#[derive(Debug, Clone, Default)]
+pub struct FederationMetrics {
+    /// The configured nodes' ids, in the configuration's order.
+    nodes: Arc<Mutex<Vec<String>>>,
+    /// Each node's last push, by node id.
+    pushes: Arc<Mutex<HashMap<String, NodePush>>>,
+}
+
+impl FederationMetrics {
+    /// Takes the nodes `config` lists, forgetting the pushes of any other.
+    fn configured(&self, config: &Config) {
+        let nodes: Vec<String> = config
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str().to_owned())
+            .collect();
+        lock(&self.pushes).retain(|node, _| nodes.contains(node));
+        *lock(&self.nodes) = nodes;
+    }
+
+    /// `node` pushed `push`.
+    pub fn pushed(&self, node: &str, push: NodePush) {
+        if lock(&self.nodes).iter().any(|known| known == node) {
+            lock(&self.pushes).insert(node.to_owned(), push);
+        }
+    }
+
+    /// `node`'s last push here, if it pushed since tocsin started.
+    pub fn last_push(&self, node: &str) -> Option<NodePush> {
+        lock(&self.pushes).get(node).cloned()
+    }
+
+    /// Each configured node that pushed, in the configuration's order.
+    fn reading(&self) -> Vec<NodeReading> {
+        let pushes = lock(&self.pushes);
+        lock(&self.nodes)
+            .iter()
+            .filter_map(|node| {
+                let push = pushes.get(node)?;
+                Some(NodeReading {
+                    node: node.clone(),
+                    clock_offset_seconds: push.clock_offset_seconds(),
+                    backlog_rows: push.backlog_rows,
+                })
+            })
+            .collect()
+    }
 }
 
 /// The Slack connections' part of a [`Reading`].

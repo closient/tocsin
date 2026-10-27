@@ -128,6 +128,8 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
 | `POST /api/v1/subscribers` | none | 202, the same for every address; 429 past a limit. Only with `[subscribers]`; see [subscribers.md](subscribers.md#signing-up) |
 | `GET /api/v1/subscribers?after=&limit=` | `subscribers:admin` | 200, `{subscribers, next_after, totals}`; see [subscribers.md](subscribers.md#for-operators) |
 | `DELETE /api/v1/subscribers/{id}` | `subscribers:admin` | 204 |
+| `POST /api/v1/federation/batch` | none: signed by a `[[node]]`'s key | 200, the receipt; see [Federation](#federation) |
+| `GET /api/v1/federation/nodes` | `status:read` | 200, `{nodes}`, in the configuration's order |
 
 ### Status now
 
@@ -268,6 +270,39 @@ component, releases of private ones, and events about draft incidents.
 A stream without `status:read` also ends when the configuration reloads,
 since a component may have changed sides; reconnect. The status page's live updates are this stream; the internal board
 has its own, `/internal/events`.
+
+### Federation
+
+`POST /api/v1/federation/batch` is how another node of a federation pushes
+its results, outage changes and rollups here (see
+[the design](design/federation.md)). It takes no token. Instead the push
+carries three headers: `Tocsin-Node` (its `[[node]]` id), `Tocsin-Store`
+(the store the rows come from, 32 lowercase hex digits) and
+`Tocsin-Signature` (base64), the node key's signature over the node, the
+store and the body together, which must verify against one of the
+node's `public_keys`.
+
+| Status | When |
+|---|---|
+| 200 | The batch is applied and committed. The receipt counts what was applied and gives the new `cursor`; a pusher moves its own cursor only on this. |
+| 401 | A header is missing, the node is not listed, or the signature does not verify. All three get the same answer, so a caller learns nothing about which nodes exist. |
+| 403 | The node is `retired`. |
+| 409 | The store conflicts with what this server already holds from it: it is marked `conflicted`, or it resent an outage change that differs from the one applied. Both mean two machines pushing as one node. |
+| 413 | The body is over the size limit. |
+| 422 | The body names another node or store than the headers, holds a row that is not the pushing node's, is out of order, or holds a bad value. Nothing is written; `fields[].path` names each problem. |
+
+Applying a batch twice is harmless: rows already stored are skipped and
+the receipt's cursor stays where it was.
+
+`GET /api/v1/federation/nodes` lists every `[[node]]`: whether it is
+retired or this server (`local`), each of its stores this server has
+applied a push from with that store's state and when it was first and last
+heard from, and what its latest push said (`last_push`: when it was sent
+and taken, the clock offset between them, the rows it had yet to push, and
+its configuration digest). `last_push` is kept in memory, so it is absent
+after a restart until the node pushes again; the stores are in the
+database. The same offset and backlog are on `/metrics` as
+`tocsin_node_clock_offset_seconds` and `tocsin_node_backlog_rows`.
 
 ## `/llms.txt`
 

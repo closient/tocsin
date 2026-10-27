@@ -503,7 +503,9 @@ queried):
   MCP tool.
 - `GET /api/v1/federation/nodes` (`status:read`): each node's state,
   store, last push by the receiver's clock, clock offset, backlog, config
-  match and liveness.
+  match and liveness. TOC-79 serves the state, stores, last push, clock
+  offset and backlog; config match and liveness come with the liveness
+  work.
 
 **Metrics** (labels from configuration only, per
 [metrics.md](../metrics.md)): `tocsin_node_up`,
@@ -587,7 +589,8 @@ counted, a future row stopping its kind (a future rollup only itself), a
 differing end refused as a
 conflict. The local rollup recompute skips nodes that push to it.
 Acceptance: applying a batch twice leaves the database byte-for-byte the
-same as applying it once (row counts and contents); a batch whose outage
+same as applying it once (row counts and contents), but for the
+store's last push time; a batch whose outage
 open precedes the previous outage's end in seq order applies, and one
 reordered is refused; a differing end returns the conflict error and
 writes nothing; a row before `purged_before` is skipped and counted; a

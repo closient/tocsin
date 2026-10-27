@@ -201,6 +201,17 @@ async fn applying_a_batch_twice_changes_nothing() {
     assert_eq!(second.results_through, Some(9));
     assert_eq!(second.outage_changes_applied, 0);
     assert_eq!(second.outages_through, Some(3));
+
+    // The second push is heard, and nothing else changes.
+    let stores = fixture.store.remote_stores().await.unwrap();
+    assert_eq!(stores.len(), 1);
+    assert_eq!(stores[0].last_push_at_ms, Some(noon() + 60_000));
+    raw(&fixture.path)
+        .execute(
+            "UPDATE node_store SET last_push_at = ?1 WHERE local = 0",
+            [noon()],
+        )
+        .unwrap();
     assert_eq!(dump(&fixture.path), once);
 }
 

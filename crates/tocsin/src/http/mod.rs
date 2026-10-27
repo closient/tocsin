@@ -15,6 +15,7 @@ pub mod auth;
 pub mod config_status;
 pub mod error;
 pub mod events;
+pub mod federation;
 pub mod heartbeats;
 pub mod history;
 pub mod incidents;
@@ -28,6 +29,8 @@ pub mod status;
 pub mod subscribers;
 pub mod timeline;
 
+#[cfg(test)]
+mod federation_tests;
 #[cfg(test)]
 mod metrics_tests;
 #[cfg(test)]

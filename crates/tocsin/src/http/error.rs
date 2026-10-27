@@ -249,7 +249,10 @@ fn not_json() -> ApiError {
 }
 
 /// The whole body, or 413 past [`super::BODY_LIMIT`].
-async fn body<S: Send + Sync>(request: Request, state: &S) -> Result<axum::body::Bytes, ApiError> {
+pub(super) async fn body<S: Send + Sync>(
+    request: Request,
+    state: &S,
+) -> Result<axum::body::Bytes, ApiError> {
     axum::body::Bytes::from_request(request, state)
         .await
         .map_err(|rejection| match rejection.status() {

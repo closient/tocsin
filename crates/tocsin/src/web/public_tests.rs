@@ -286,6 +286,18 @@ const ROUTES: &[(&str, Class, &[&str])] = &[
         Class::Refused,
         &["/api/v1/silences/1/expire"],
     ),
+    // Federation: a push must be signed by a configured node, and the
+    // node list needs `status:read`.
+    (
+        "/api/v1/federation/batch",
+        Class::Refused,
+        &["/api/v1/federation/batch"],
+    ),
+    (
+        "/api/v1/federation/nodes",
+        Class::Refused,
+        &["/api/v1/federation/nodes"],
+    ),
     // Behind proxy auth.
     ("/admin", Class::Redirect, &["/admin"]),
     ("/admin/", Class::Refused, &["/admin/"]),

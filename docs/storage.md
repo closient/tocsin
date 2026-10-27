@@ -551,7 +551,7 @@ one; a partial unique index (`node_store_local`) allows only one such row.
 | `store_id` | text | 32 lowercase hex digits. Unique with `node_id`. |
 | `local` | integer | 1 for this database's own row, else 0. |
 | `state` | text | `active`, `retired` or `conflicted`. |
-| `first_seen_at`, `last_push_at` | integer | When the row was made, and the last push received from that store. |
+| `first_seen_at`, `last_push_at` | integer | When the row was made, and when the last push from that store was applied, both by this server's clock. Every applied push, empty or not, moves `last_push_at`. |
 | `next_seq` | integer | The next sequence number this store will stamp; set on the local row only, and at least 1. Each outage open and end takes one. |
 
 A row with `local = 0` is made the first time a batch from that store is

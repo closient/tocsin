@@ -433,7 +433,27 @@ impl Worker {
     /// has nothing in flight, while its notifier has a free slot and is not
     /// paused; returns when to look again. Repeats are queued, a write,
     /// only when one is due.
+    ///
+    /// The sends start together once the last store call is answered, not
+    /// one by one between them, so a notifier's free slots fill at once. A
+    /// send chosen before a store call fails still starts: its attempt may
+    /// already be recorded.
     async fn dispatch(&mut self, now: i64) -> tocsin_store::Result<i64> {
+        let mut starts = Vec::new();
+        let wake_at = self.choose(now, &mut starts).await;
+        for delivery in &starts {
+            self.spawn(delivery, now);
+        }
+        wake_at
+    }
+
+    /// [`Worker::dispatch`]'s choice of what to start, each counted against
+    /// its lane and notifier as it is chosen.
+    async fn choose(
+        &mut self,
+        now: i64,
+        starts: &mut Vec<PendingDelivery>,
+    ) -> tocsin_store::Result<i64> {
         self.retire().await?;
         let mut silences = None;
         self.refire(now, &mut silences).await?;
@@ -512,7 +532,10 @@ impl Worker {
             {
                 self.store.attempt_alert(delivery.alert.id).await?;
             }
-            self.spawn(&delivery, now);
+            self.busy
+                .insert((delivery.alert.id, Lane::of(delivery.kind)));
+            *self.sending.entry(notifier_id.clone()).or_default() += 1;
+            starts.push(delivery);
         }
         // Look again the moment a silence expires: what it held may have
         // to fire.
@@ -637,8 +660,6 @@ impl Worker {
             identity: alert.identity(),
             attempts: delivery.attempts,
         };
-        self.busy.insert((meta.alert_id, lane));
-        *self.sending.entry(notifier_id.clone()).or_default() += 1;
         let handle = self.in_flight.spawn(async move {
             let Some(notifier) = notifier else {
                 return Err(SendError::permanent(format!(

@@ -229,6 +229,12 @@ const ROUTES: &[(&str, Class, &[&str])] = &[
             "/api/v1/checks/nightly-dump/results",
         ],
     ),
+    // The alert history names internal checks, notifiers and labels.
+    (
+        "/api/v1/alerts/history",
+        Class::Refused,
+        &["/api/v1/alerts/history"],
+    ),
     (
         "/api/v1/config/status",
         Class::Refused,

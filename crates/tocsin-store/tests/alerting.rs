@@ -7,9 +7,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use tocsin_core::Health;
+use tocsin_core::alert::{AlertState, DeliveryStatus, MessageKind};
+use tocsin_core::incident::Timestamp;
 use tocsin_store::{
     AlertRouting, AlertTarget, DeliveryKind, DeliveryOutcome, DeliveryPrune, DeliveryRetention,
-    EndedBy, NewOutage, OutageChange, OutageEnd, Store, SubjectKind,
+    EndedBy, Error, HistoryPage, NewOutage, OutageChange, OutageEnd, Store, SubjectKind,
 };
 
 const T0: i64 = 1_800_000_000_000;
@@ -782,4 +784,181 @@ async fn alerts_whose_notifier_is_gone_end_with_a_queued_resolve() {
         .find(|alert| alert.notifier_id == "slack")
         .unwrap();
     assert_eq!(slack.ended_by, Some(EndedBy::Recovery));
+}
+
+fn history_page(since_ms: i64, before: Option<i64>, limit: u32) -> HistoryPage {
+    HistoryPage {
+        since: Timestamp::from_millis(since_ms),
+        before,
+        limit,
+    }
+}
+
+/// One resolved alert whose fire failed for good after a retry, and a
+/// later one still firing whose fire is pending; resolves with their ids.
+async fn two_alerts(store: &Store) -> (i64, i64) {
+    let first = open_outage(
+        store,
+        None,
+        outage(Health::Down, T0, true),
+        routing(vec![target("slack", None)]),
+    )
+    .await;
+    recover(store, first, T0 + 1_000).await;
+    let fire = store.outbox().await.unwrap().pending[0].id;
+    store
+        .finish_delivery(
+            fire,
+            DeliveryOutcome::Retry {
+                at_ms: T0 + 60_000,
+                error: "503".into(),
+            },
+            T0 + 2_000,
+        )
+        .await
+        .unwrap();
+    store
+        .finish_delivery(
+            fire,
+            DeliveryOutcome::Failed {
+                error: "410".into(),
+            },
+            T0 + 60_000,
+        )
+        .await
+        .unwrap();
+    drain(store, T0 + 61_000).await;
+    open_outage(
+        store,
+        None,
+        outage(Health::Degraded, T0 + 100_000, true),
+        routing(vec![target("slack", None)]),
+    )
+    .await;
+    let alerts = store.alerts().await.unwrap();
+    assert_eq!(alerts.len(), 2);
+    (alerts[0].id, alerts[1].id)
+}
+
+#[tokio::test]
+async fn alert_history_lists_each_alert_newest_first_with_how_its_deliveries_went() {
+    let Fixture { _dir, store, .. } = open();
+    let (resolved, firing) = two_alerts(&store).await;
+
+    let entries = store
+        .alert_history(history_page(T0, None, 10), None)
+        .await
+        .unwrap();
+    let ids: Vec<i64> = entries.iter().map(|entry| entry.alert.id).collect();
+    assert_eq!(ids, [firing, resolved]);
+
+    let now = &entries[0];
+    assert_eq!(now.alert.ended_at_ms, None);
+    assert_eq!(now.alert.health, Health::Degraded);
+    assert_eq!(now.deliveries.len(), 1);
+    assert_eq!(now.deliveries[0].kind, MessageKind::Fire);
+    assert_eq!(now.deliveries[0].status, DeliveryStatus::Pending);
+    assert_eq!(now.deliveries[0].attempts, 0);
+    assert_eq!(now.deliveries[0].finished_at, None);
+
+    let then = &entries[1];
+    assert_eq!(then.alert.ended_at_ms, Some(T0 + 1_000));
+    let kinds: Vec<_> = then
+        .deliveries
+        .iter()
+        .map(|delivery| (delivery.kind, delivery.status, delivery.attempts))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            (MessageKind::Fire, DeliveryStatus::Failed, 2),
+            (MessageKind::Resolve, DeliveryStatus::Delivered, 1),
+        ]
+    );
+    assert_eq!(then.deliveries[0].last_error.as_deref(), Some("410"));
+    assert_eq!(
+        then.deliveries[0].finished_at,
+        Some(Timestamp::from_millis(T0 + 60_000))
+    );
+    assert_eq!(then.deliveries[1].last_error, None);
+}
+
+#[tokio::test]
+async fn alert_history_keeps_to_its_window_and_state() {
+    let Fixture { _dir, store, .. } = open();
+    let (resolved, firing) = two_alerts(&store).await;
+    let ids = |entries: Vec<tocsin_store::AlertEntry>| -> Vec<i64> {
+        entries.iter().map(|entry| entry.alert.id).collect()
+    };
+
+    // An alert that ended at `since` is in the window; one that ended
+    // before it is not, while a firing one always is.
+    let at_end = store
+        .alert_history(history_page(T0 + 1_000, None, 10), None)
+        .await
+        .unwrap();
+    assert_eq!(ids(at_end), [firing, resolved]);
+    let after_end = store
+        .alert_history(history_page(T0 + 1_001, None, 10), None)
+        .await
+        .unwrap();
+    assert_eq!(ids(after_end), [firing]);
+
+    let only_firing = store
+        .alert_history(history_page(T0, None, 10), Some(AlertState::Firing))
+        .await
+        .unwrap();
+    assert_eq!(ids(only_firing), [firing]);
+    let only_resolved = store
+        .alert_history(history_page(T0, None, 10), Some(AlertState::Resolved))
+        .await
+        .unwrap();
+    assert_eq!(ids(only_resolved), [resolved]);
+}
+
+#[tokio::test]
+async fn alert_history_pages_by_cursor_and_refuses_a_lost_one() {
+    let Fixture { _dir, store, .. } = open();
+    let (resolved, firing) = two_alerts(&store).await;
+
+    let first = store
+        .alert_history(history_page(T0, None, 1), None)
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].alert.id, firing);
+    let second = store
+        .alert_history(history_page(T0, Some(firing), 1), None)
+        .await
+        .unwrap();
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].alert.id, resolved);
+    let last = store
+        .alert_history(history_page(T0, Some(resolved), 1), None)
+        .await
+        .unwrap();
+    assert_eq!(last.len(), 0, "the last page is empty");
+
+    // The cursor only places the page: one whose alert has since left
+    // this read's state, as a firing alert does when it resolves between
+    // pages, still pages on.
+    let resolved_after_firing = store
+        .alert_history(
+            history_page(T0, Some(firing), 1),
+            Some(AlertState::Resolved),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolved_after_firing.len(), 1);
+    assert_eq!(resolved_after_firing[0].alert.id, resolved);
+
+    // A cursor naming no alert, or one that ended before the window, is
+    // refused rather than read as the last page.
+    for (since, before) in [(T0, resolved + firing + 100), (T0 + 1_001, resolved)] {
+        let error = store
+            .alert_history(history_page(since, Some(before), 1), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::Invalid(_)), "{error:?}");
+    }
 }

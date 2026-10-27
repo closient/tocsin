@@ -23,11 +23,12 @@
 //! labels; a check removed while it fires is withdrawn without a resolve,
 //! and Alertmanager expires its alert at `endsAt`.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 use tocsin_engine::ports::BoxFuture;
-use tocsin_store::SubjectKind;
+use tocsin_store::{StoredAlert, SubjectKind};
 
 use crate::alert::{Alert, rfc3339};
 use crate::notifier::{Notifier, Redactor, SendError};
@@ -67,20 +68,49 @@ impl Alertmanager {
 /// has an `alertname` of its own, so it never pairs with a real one.
 #[must_use]
 pub fn labels(alert: &Alert) -> Map<String, Value> {
-    let alertname = match (alert.test, alert.subject_kind) {
+    label_set(
+        &alert.labels,
+        alert.test,
+        alert.subject_kind,
+        &alert.node_id,
+        &alert.subject_id,
+    )
+    .into_iter()
+    .map(|(name, value)| (name, value.into()))
+    .collect()
+}
+
+/// The labels every post of a stored alert carries, fire, repeat and
+/// resolve alike: what [`labels`] gives the messages the delivery worker
+/// builds from it.
+#[must_use]
+pub fn stored_labels(alert: &StoredAlert) -> BTreeMap<String, String> {
+    label_set(
+        &alert.labels,
+        false,
+        alert.subject_kind,
+        &alert.node_id,
+        &alert.subject_id,
+    )
+}
+
+fn label_set(
+    pinned: &BTreeMap<String, String>,
+    test: bool,
+    subject_kind: SubjectKind,
+    node_id: &str,
+    subject_id: &str,
+) -> BTreeMap<String, String> {
+    let alertname = match (test, subject_kind) {
         (true, _) => "TocsinTestAlert",
         (false, SubjectKind::Check) => "TocsinCheckFailing",
         (false, SubjectKind::Heartbeat) => "TocsinHeartbeatFailing",
     };
-    let mut labels: Map<String, Value> = alert
-        .labels
-        .iter()
-        .map(|(name, value)| (name.clone(), value.clone().into()))
-        .collect();
+    let mut labels = pinned.clone();
     labels.insert("alertname".into(), alertname.into());
-    labels.insert("node".into(), alert.node_id.clone().into());
-    labels.insert("subject_kind".into(), alert.subject_kind.as_str().into());
-    labels.insert("subject_id".into(), alert.subject_id.clone().into());
+    labels.insert("node".into(), node_id.into());
+    labels.insert("subject_kind".into(), subject_kind.as_str().into());
+    labels.insert("subject_id".into(), subject_id.into());
     labels
 }
 

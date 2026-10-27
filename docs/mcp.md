@@ -123,6 +123,7 @@ it cannot publish at all.
 | `get_status` | `GET /api/v1/status.json` | any token | The page now: overall status, components and their health, open incidents. |
 | `list_outages` | `GET /api/v1/outages` | any token; `status:read` adds checks on no component | Outages of checks and heartbeats, newest start first. |
 | `get_check_history` | `GET /api/v1/checks/{id}/results` | `status:read` | One check's or heartbeat's raw results, newest first, with errors and assertion detail. |
+| `list_alert_history` | `GET /api/v1/alerts/history` | `status:read` | Alerts sent to notifiers, newest start first: their labels, and whether each fire, repeat and resolve was delivered, is retrying, failed or was silenced. `state` keeps to `firing` or `resolved`. |
 | `explain_check` | `GET /api/v1/checks/{id}/results?limit=1` | `status:read` | `{check_id, latest}`: the latest result in the past 365 days, or `null`. |
 | `get_timeline` | `GET /api/v1/timeline` | any token; `status:read` adds non-public projects and checks on no component | Outages, incidents and deploys, oldest first. |
 | `list_incidents` | `GET /api/v1/incidents` | any token; `status:read` adds drafts and internals | Incidents and maintenance, newest first. `external_key` finds the incidents with that key, newest first and paged the same way (at most one open), and needs `status:read`. |
@@ -156,7 +157,7 @@ below 1 is 1.
 
 | Tool | Default | Largest |
 |---|---|---|
-| `list_outages`, `get_check_history`, `get_timeline` | 100 | 500 |
+| `list_outages`, `list_alert_history`, `get_check_history`, `get_timeline` | 100 | 500 |
 | `list_incidents`, `list_silences` | 20 | 100 |
 | `list_releases` | 50 | 200 |
 

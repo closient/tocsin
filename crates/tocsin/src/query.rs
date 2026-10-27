@@ -15,6 +15,7 @@ use std::fmt::Write as _;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use tocsin_core::alert::AlertState;
 use tocsin_core::config::{Duration, Id};
 use tocsin_core::incident::Timestamp;
 use tocsin_core::status::OutageEnding;
@@ -75,6 +76,34 @@ pub fn outages(server: &ServerArgs, page: &HistoryArgs) -> Result<Report, Failur
         json,
     })
 }
+
+/// `tocsin alerts`.
+pub fn alerts(
+    server: &ServerArgs,
+    state: Option<AlertState>,
+    page: &HistoryArgs,
+) -> Result<Report, Failure> {
+    let mut pairs = page.pairs();
+    if let Some(state) = state {
+        pairs.push(("state", state.to_string()));
+    }
+    let path = with_query("api/v1/alerts/history", &pairs);
+    let json = Client::new(server)?.read(&path).map_err(|mut failure| {
+        if matches!(failure.status, Some(401 | 403)) {
+            failure.hint = Some(ALERTS_HINT.to_owned());
+        }
+        failure
+    })?;
+    Ok(Report {
+        exit: Exit::Ok,
+        text: describe_alerts(&view(&json)?),
+        json,
+    })
+}
+
+/// The alert history names notifiers, routes and delivery errors.
+const ALERTS_HINT: &str = "the alert history needs a token with the `status:read` scope: \
+set TOCSIN_TOKEN to one, such as a `[[token]]` with scopes = [\"status:read\"]";
 
 /// `tocsin timeline`.
 pub fn timeline(
@@ -219,6 +248,36 @@ struct OutageView {
     node_id: String,
 }
 
+/// `GET /api/v1/alerts/history`, as the table reads it.
+#[derive(Deserialize)]
+struct AlertsView {
+    since: String,
+    alerts: Vec<AlertView>,
+    next_before: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct AlertView {
+    started_at: String,
+    ended_at: Option<String>,
+    health: String,
+    subject_id: String,
+    notifier_id: String,
+    route_id: String,
+    ended_by: Option<String>,
+    notified: bool,
+    deliveries: Vec<DeliveryView>,
+}
+
+#[derive(Deserialize)]
+struct DeliveryView {
+    kind: String,
+    status: String,
+    attempts: u32,
+    last_error: Option<String>,
+    silence_id: Option<i64>,
+}
+
 /// `GET /api/v1/timeline`, as the table reads it.
 #[derive(Deserialize)]
 struct TimelineView {
@@ -320,6 +379,57 @@ fn describe_outages(list: &OutagesView) -> String {
             outage.check_id,
             outage.node_id
         );
+    }
+    if let Some(next) = list.next_before {
+        let _ = writeln!(text, "more: --before {next}");
+    }
+    text.trim_end().to_owned()
+}
+
+/// One line per alert, and under it one per delivery.
+fn describe_alerts(list: &AlertsView) -> String {
+    if list.alerts.is_empty() {
+        return format!("no alerts since {}", list.since);
+    }
+    let mut text = String::new();
+    for alert in &list.alerts {
+        let ended = alert.ended_at.as_deref().unwrap_or("firing");
+        let mut line = format!(
+            "{}  {:<24}  {:<8}  {:<20}  {} via {}",
+            alert.started_at,
+            ended,
+            alert.health,
+            alert.subject_id,
+            alert.notifier_id,
+            alert.route_id
+        );
+        match &alert.ended_by {
+            Some(ended_by) => {
+                let _ = write!(line, "  ended by {ended_by}");
+            }
+            // Its deliveries may be gone; this still says whether it got
+            // through.
+            None if !alert.notified => line.push_str("  not notified yet"),
+            None => {}
+        }
+        let _ = writeln!(text, "{line}");
+        for delivery in &alert.deliveries {
+            let mut line = format!("    {:<7}  {:<9}", delivery.kind, delivery.status);
+            if let Some(silence) = delivery.silence_id {
+                let _ = write!(line, "  silence {silence}");
+            }
+            match delivery.attempts {
+                0 => {}
+                1 => line.push_str("  1 attempt"),
+                attempts => {
+                    let _ = write!(line, "  {attempts} attempts");
+                }
+            }
+            if let Some(error) = &delivery.last_error {
+                let _ = write!(line, "  {error}");
+            }
+            let _ = writeln!(text, "{}", line.trim_end());
+        }
     }
     if let Some(next) = list.next_before {
         let _ = writeln!(text, "more: --before {next}");
@@ -455,5 +565,55 @@ mod tests {
             ),
             "api/v1/timeline?component=a+b%26c&limit=5"
         );
+    }
+    #[test]
+    fn alerts_list_each_delivery_under_its_alert_with_attempts_and_error() {
+        let list = describe_alerts(
+            &view(&serde_json::json!({
+                "since": "2026-10-23T00:00:00.000Z",
+                "alerts": [
+                    {
+                        "started_at": "2026-10-23T14:00:00.000Z", "ended_at": null,
+                        "health": "down", "subject_id": "api", "notifier_id": "pager",
+                        "route_id": "oncall", "ended_by": null, "notified": false,
+                        "deliveries": [{
+                            "kind": "fire", "status": "pending", "attempts": 3,
+                            "last_error": "connection refused", "silence_id": null,
+                        }],
+                    },
+                    {
+                        "started_at": "2026-10-23T13:00:00.000Z",
+                        "ended_at": "2026-10-23T13:05:00.000Z",
+                        "health": "degraded", "subject_id": "db", "notifier_id": "slack",
+                        "route_id": "team", "ended_by": "config", "notified": true,
+                        "deliveries": [
+                            {"kind": "fire", "status": "failed", "attempts": 12,
+                             "last_error": "410", "silence_id": null},
+                            {"kind": "resolve", "status": "silenced", "attempts": 0,
+                             "last_error": null, "silence_id": 4},
+                        ],
+                    },
+                ],
+                "next_before": 7,
+            }))
+            .unwrap(),
+        );
+        let lines: Vec<&str> = list.lines().collect();
+        assert!(
+            lines[0].contains("firing") && lines[0].ends_with("pager via oncall  not notified yet"),
+            "{list}"
+        );
+        assert_eq!(
+            lines[1],
+            "    fire     pending    3 attempts  connection refused"
+        );
+        assert!(
+            lines[2].contains("2026-10-23T13:05:00.000Z")
+                && lines[2].ends_with("slack via team  ended by config"),
+            "{list}"
+        );
+        assert_eq!(lines[3], "    fire     failed     12 attempts  410");
+        assert_eq!(lines[4], "    resolve  silenced   silence 4");
+        assert_eq!(lines[5], "more: --before 7");
     }
 }

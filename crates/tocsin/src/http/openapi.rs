@@ -29,7 +29,7 @@ use super::{
     ),
     tags(
         (name = status::TAG, description = "What is up right now: components and checks"),
-        (name = history::TAG, description = "Outages and raw check results"),
+        (name = history::TAG, description = "Outages, raw check results and the alert history"),
         (name = incidents::TAG, description = "Incidents and scheduled maintenance"),
         (name = releases::TAG, description = "The release log and deploy stamps"),
         (name = timeline::TAG, description = "Outages, incidents and deploys in one stream"),

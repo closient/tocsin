@@ -416,7 +416,9 @@ is behind.
 An `alert` is one notifier's view of one alert identity, from the change that
 fires it to the recovery that ends it, across every outage in between. A
 partial unique index (`alert_open`) allows at most one open alert
-(`ended_at IS NULL`) per node, subject and notifier.
+(`ended_at IS NULL`) per node, subject and notifier. `alert_by_start`, on
+`(started_at, id)`, serves the [alert history](api.md) newest first
+(added by 0017).
 
 | Column | Type | Notes |
 |---|---|---|

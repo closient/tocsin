@@ -111,6 +111,11 @@ fn run(cli: Cli) -> Result<Report, Failure> {
             page,
         }) => query::history(&server, &check, &page),
         Some(Command::Outages { server, page }) => query::outages(&server, &page),
+        Some(Command::Alerts {
+            server,
+            state,
+            page,
+        }) => query::alerts(&server, state, &page),
         Some(Command::Timeline {
             server,
             component,

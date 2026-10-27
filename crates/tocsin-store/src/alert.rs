@@ -12,11 +12,15 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, named_params, params};
 use tocsin_core::Health;
-use tocsin_core::status::OutageEnding;
+use tocsin_core::alert::{AlertDelivery, AlertState};
+use tocsin_core::incident::Timestamp;
+use tocsin_core::status::{CheckKind, OutageEnding};
 
 use crate::error::{Error, Result};
+use crate::history::{HistoryPage, lost_cursor};
+use crate::incident::{snapshot, text};
 use crate::rollup::parse_column;
 use crate::writer::{apply_outage_change, insert_result};
 use crate::{NewCheckResult, NewOutage, OutageChange};
@@ -40,6 +44,15 @@ impl SubjectKind {
         match self {
             SubjectKind::Check => "check",
             SubjectKind::Heartbeat => "heartbeat",
+        }
+    }
+}
+
+impl From<SubjectKind> for CheckKind {
+    fn from(kind: SubjectKind) -> Self {
+        match kind {
+            SubjectKind::Check => CheckKind::Check,
+            SubjectKind::Heartbeat => CheckKind::Heartbeat,
         }
     }
 }
@@ -1016,6 +1029,120 @@ pub(crate) fn failed(conn: &Connection, limit: u32) -> Result<Vec<FailedDelivery
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// An alert and every delivery of it still kept, oldest first: one entry
+/// of [`Store::alert_history`](crate::Store::alert_history).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlertEntry {
+    /// The alert.
+    pub alert: StoredAlert,
+    /// Its deliveries, oldest first.
+    pub deliveries: Vec<AlertDelivery>,
+}
+
+/// The alerts firing at any moment since `page.since`, newest start first,
+/// ties by id, each with its deliveries; only firing or resolved ones when
+/// `state` says so. A firing alert is always kept; a resolved one only
+/// until delivery retention has dropped every delivery of it, so the window
+/// reaches back no further than that. All three reads see one snapshot.
+///
+/// # Errors
+///
+/// [`Error::Invalid`] when `page.before` names no alert this read holds.
+pub(crate) fn alert_history(
+    conn: &Connection,
+    page: HistoryPage,
+    state: Option<AlertState>,
+) -> Result<Vec<AlertEntry>> {
+    snapshot(conn, |conn| alert_history_page(conn, page, state))
+}
+
+fn alert_history_page(
+    conn: &Connection,
+    page: HistoryPage,
+    state: Option<AlertState>,
+) -> Result<Vec<AlertEntry>> {
+    let since = page.since.as_millis();
+    let state = state.map(AlertState::as_str);
+    let (at, before) = match page.before {
+        None => (i64::MAX, i64::MAX),
+        Some(before) => {
+            // The cursor only places the page, so it need not match
+            // `state`: paging firing alerts goes on past one that resolved
+            // since the last page.
+            let at = conn
+                .prepare_cached(
+                    "SELECT a.started_at FROM alert a WHERE a.id = :before
+                       AND (a.ended_at IS NULL OR a.ended_at >= :since)",
+                )?
+                .query_row(
+                    named_params! { ":before": before, ":since": since },
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or_else(|| lost_cursor(before, "alert"))?;
+            (at, before)
+        }
+    };
+    let alerts: Vec<StoredAlert> = conn
+        // A page resumes after the alert at `(:at, :before)` in
+        // newest-first order, as outages do. An alert is in the window
+        // while it fires, or if it ended at or after `:since`.
+        .prepare_cached(&format!(
+            "SELECT {ALERT_COLUMNS} FROM alert a
+             WHERE (a.ended_at IS NULL OR a.ended_at >= :since)
+               AND (:state IS NULL OR (:state = 'firing') = (a.ended_at IS NULL))
+               AND a.started_at <= :at AND (a.started_at < :at OR a.id < :before)
+             ORDER BY a.started_at DESC, a.id DESC LIMIT :limit"
+        ))?
+        .query_map(
+            named_params! {
+                ":since": since,
+                ":state": state,
+                ":at": at,
+                ":before": before,
+                ":limit": page.limit,
+            },
+            |row| stored_alert(row, 0),
+        )?
+        .collect::<rusqlite::Result<_>>()?;
+    let ids = serde_json::to_string(&alerts.iter().map(|alert| alert.id).collect::<Vec<_>>())
+        .map_err(Error::Encode)?;
+    let mut deliveries: BTreeMap<i64, Vec<AlertDelivery>> = BTreeMap::new();
+    let mut statement = conn.prepare_cached(
+        "SELECT d.alert_id, d.id, d.kind, d.health, d.created_at, d.status, d.attempts,
+             d.last_error, d.finished_at, d.silence_id
+         FROM alert_delivery d WHERE d.alert_id IN (SELECT value FROM json_each(?1))
+         ORDER BY d.alert_id, d.id",
+    )?;
+    let rows = statement.query_map(params![ids], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            AlertDelivery {
+                id: row.get(1)?,
+                kind: text(row, 2)?,
+                health: parse_column(3, &row.get::<_, String>(3)?)?,
+                created_at: Timestamp::from_millis(row.get(4)?),
+                status: text(row, 5)?,
+                attempts: row.get(6)?,
+                last_error: row.get(7)?,
+                finished_at: row.get::<_, Option<i64>>(8)?.map(Timestamp::from_millis),
+                silence_id: row.get(9)?,
+            },
+        ))
+    })?;
+    for row in rows {
+        let (alert_id, delivery) = row?;
+        deliveries.entry(alert_id).or_default().push(delivery);
+    }
+    Ok(alerts
+        .into_iter()
+        .map(|alert| AlertEntry {
+            deliveries: deliveries.remove(&alert.id).unwrap_or_default(),
+            alert,
+        })
+        .collect())
 }
 
 /// Every alert, oldest first: for tests and diagnostics.

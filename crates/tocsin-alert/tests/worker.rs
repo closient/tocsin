@@ -19,6 +19,7 @@ use common::{
     Answer, Attempt, Fake, Fixture, T0, config, down, failing, monitored, monitored_by, next_from,
     paused, pushover, turns, up,
 };
+use tocsin_alert::notifiers::alertmanager;
 use tocsin_alert::{
     AlertEvent, AlertMetrics, Alerter, AlertingHistory, Backoff, Jitter, Notifier, Notifiers,
     Router, WorkerSettings,
@@ -304,6 +305,57 @@ fn an_alert_keeps_the_labels_it_opened_with_through_a_reload_until_it_resolves()
                 vec![("ticket".to_owned(), "OPS-2".to_owned())],
             )
         );
+        running.alerter.stop().await;
+    });
+}
+
+/// The alert history's labels are the ones Alertmanager was sent, on the
+/// fire and on the resolve, built from the stored alert alone.
+#[test]
+fn the_alert_history_s_labels_are_the_labels_alertmanager_was_sent() {
+    paused(async {
+        let fixture = Fixture::new();
+        let (sender, mut receiver) = channel();
+        let slack: Arc<dyn Notifier> = Fake::accepting("slack", &sender);
+        let running = start(
+            &fixture,
+            &labelled(r#"{ page_class = "page" }"#, r#"{ ticket = "OPS-1" }"#),
+            &[("slack", Arc::clone(&slack))],
+            &AlertMetrics::default(),
+        );
+        let stored = |alerts: Vec<tocsin_store::StoredAlert>| {
+            let [alert] = <[_; 1]>::try_from(alerts).unwrap();
+            alertmanager::stored_labels(&alert)
+                .into_iter()
+                .map(|(name, value)| (name, value.into()))
+                .collect::<serde_json::Map<_, _>>()
+        };
+
+        let id = running.change(down(T0)).await.unwrap();
+        let fire = next_from(&mut receiver, "slack").await;
+        assert_eq!(fire.event(), AlertEvent::Fire);
+        let sent = alertmanager::labels(&fire.alert);
+        assert_eq!(sent["page_class"], "page", "{sent:?}");
+        assert_eq!(stored(fixture.store.alerts().await.unwrap()), sent);
+
+        running.change(up(id, T0 + 1_000)).await;
+        let resolve = next_from(&mut receiver, "slack").await;
+        assert_eq!(resolve.event(), AlertEvent::Resolve);
+        assert_eq!(alertmanager::labels(&resolve.alert), sent);
+        let history = fixture
+            .store
+            .alert_history(
+                tocsin_store::HistoryPage {
+                    since: Timestamp::from_millis(T0),
+                    before: None,
+                    limit: 10,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let [entry] = <[_; 1]>::try_from(history).unwrap();
+        assert_eq!(stored(vec![entry.alert]), sent);
         running.alerter.stop().await;
     });
 }

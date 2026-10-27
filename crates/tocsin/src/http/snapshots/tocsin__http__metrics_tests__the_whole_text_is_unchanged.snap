@@ -8,6 +8,9 @@ tocsin_notification_failures_total{notifier="pager"} 1
 # HELP tocsin_notifications_abandoned_total Alert messages given up on after their last attempt failed, by notifier.
 # TYPE tocsin_notifications_abandoned_total counter
 tocsin_notifications_abandoned_total{notifier="pager"} 1
+# HELP tocsin_alerts_abandoned_total Alerts that ended without their resolve being delivered.
+# TYPE tocsin_alerts_abandoned_total counter
+tocsin_alerts_abandoned_total 0
 # HELP tocsin_config_reload_success 1 if the last configuration reload succeeded, 0 if it failed and the last good configuration is still running.
 # TYPE tocsin_config_reload_success gauge
 tocsin_config_reload_success 1

@@ -36,6 +36,7 @@ fn test_alert(configuration: &Config, started: i64) -> Alert {
         health: Health::Down,
         started_at_ms: started,
         ended_at_ms: None,
+        ended_by: None,
         sent_at_ms: started,
         delivery_id: None,
         test: true,
@@ -106,6 +107,7 @@ pub fn test(notifier_id: &str, folder: &Path) -> Result<Report, Failure> {
         // out may still have arrived, and must not be left firing.
         let ended = tocsin_store::now_ms();
         alert.event = AlertEvent::Resolve;
+        alert.ended_by = Some(tocsin_store::EndedBy::Recovery);
         alert.ended_at_ms = Some(ended);
         alert.sent_at_ms = ended;
         let resolve = built.send(&alert).await;

@@ -91,8 +91,7 @@ resolves go out on time. A send that panics is caught: it is logged as an
 error naming the notifier, the alert and the delivery, counted as a failed
 attempt, and retried like any other failure.
 
-**Metrics.** Two counters, both labelled by notifier, are served at
-[`/metrics`](metrics.md):
+**Metrics.** Three counters are served at [`/metrics`](metrics.md):
 
 - `tocsin_notifications_abandoned_total{notifier}` counts messages tocsin
   gave up on: a fire, repeat or resolve that was refused outright, or still
@@ -103,6 +102,12 @@ attempt, and retried like any other failure.
   attempt, retried or not. A notifier that is down shows a steady rate here
   long before its first message is abandoned; use it to see trouble coming,
   not to page.
+- `tocsin_alerts_abandoned_total` counts alerts that ended without their
+  resolve being delivered: whoever heard the fire never heard it end. It
+  overlaps the first counter for resolves, but has no notifier label, so it
+  still counts after the notifier is gone, which is its usual cause (see
+  Reloading below). Each one is also logged at `error` naming the alert and
+  the notifier. Alert on any increase.
 
 A send still in flight when tocsin stops is neither: its row stays pending
 and is sent after the restart.
@@ -115,13 +120,26 @@ worker knows lives in the store, so a delivery pending at shutdown is sent
 after the next start.
 
 **Reloading.** A reload swaps the routes and notifiers at once; an alert
-already firing keeps the notifiers it fired on. When a reload (or a start)
-drops a check or heartbeat that has an outage open, the outage is
-withdrawn: its alerts end without a resolve, since nobody saw it recover,
-and one still ringing gets a cancel. When it drops a notifier, the alerts
-open on it end and nothing more is sent through it; deliveries already
-queued for it are abandoned and counted. See
-[config.md](config.md#reloading).
+already firing keeps the notifiers it fired on. Every alert that fired gets
+a message saying it ended, however it ended:
+
+- When a reload (or a start) drops a check or heartbeat that has an outage
+  open, the outage is withdrawn and each of its alerts resolves, with the
+  identity, labels and annotations it fired with, plus the annotation
+  `ended_by = "config"`. Its title starts `[ENDED]` rather than
+  `[RESOLVED]` and its text says the configuration stopped watching it and
+  that it was not seen to recover. One still ringing also gets a cancel.
+- When a reload drops a notifier, its open alerts end the same way, and the
+  worker keeps the removed notifier, with the configuration it had, until
+  those resolves (and anything else already queued for it) are delivered
+  or have failed for good; nothing new is sent through it. Its metrics
+  series go at once.
+- When a notifier is dropped while tocsin is stopped, nothing is left to
+  send through: at startup its open alerts end, each resolve fails as `no
+  longer configured`, is logged at `error` as an alert abandoned, and is
+  counted in `tocsin_alerts_abandoned_total`.
+
+See [config.md](config.md#reloading).
 
 **Secrets.** Webhook URLs, tokens and SMTP passwords never appear in logs or
 in a recorded error: errors name the notifier, and a URL is shown without
@@ -244,7 +262,8 @@ scope. The MCP tools `create_silence`,
 clear and is meant for a relay on the same host. Every message about one
 alert carries the same `References` and an `X-Tocsin-Identity` header, so mail
 clients thread the fire, its repeats and its resolve together; subjects start
-`[DOWN]`, `[DEGRADED]`, `[STILL DOWN]` or `[RESOLVED]`. Neither `from` nor
+`[DOWN]`, `[DEGRADED]`, `[STILL DOWN]`, `[RESOLVED]`, or `[ENDED]` for a
+resolve sent because the configuration stopped watching the alert. Neither `from` nor
 `reply_to` may be a no-reply address (`noreply`, `no-reply`, `donotreply`
 and the like, in any case): an operator must be able to answer an alert.
 
@@ -269,7 +288,8 @@ whole label set, so tocsin's own labels are the identity and nothing else:
 `TocsinTestAlert` for `tocsin notify test`), `node`, `subject_kind` and
 `subject_id`. Everything of tocsin's that can change while an alert fires is
 an annotation: `summary`, `description`, `health`, `name`, `component` and
-`component_name` when there is one, and `tocsin_test` on a test alert. A
+`component_name` when there is one, `tocsin_test` on a test alert, and
+`ended_by = "config"` on the resolve of an alert the configuration ended. A
 check that moves to another component, or from degraded to down, is
 therefore still one alert in Alertmanager.
 
@@ -280,9 +300,9 @@ identity, so both are pinned on the alert when it opens: every fire, repeat
 and resolve of it carries that set, even after a reload changes the
 check's labels. A change takes effect from the check's next alert, after
 this one resolves. A resolve already queued when a reload removes the
-check still carries the pinned labels; a check removed while it fires is
-withdrawn without a resolve, and Alertmanager expires its alert at
-`endsAt`.
+check still carries the pinned labels, and so does the resolve of a check
+removed while it fires: Alertmanager sees the same alert end, with
+`endsAt` at the reload.
 
 ## Slack
 
@@ -406,7 +426,10 @@ Each alert is a POST of this JSON:
 `resolved`. `ended_at_ms` and `duration_ms` are null until the resolve.
 `labels` and `annotations` are the check's or heartbeat's configured ones,
 as they were when the alert opened (the same on every message of one
-alert, across reloads), and are empty objects when it has none.
+alert, across reloads), and are empty objects when it has none. The resolve
+of an alert that ended because the configuration stopped watching it (its
+check, heartbeat or notifier was removed) adds `"ended_by": "config"` to
+`annotations`, and its `title` starts `[ENDED]`.
 `delivery_id` is the same on every retry of one delivery, so a receiver can
 drop duplicates. `version` changes only when a field changes meaning or goes
 away.

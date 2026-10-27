@@ -74,7 +74,7 @@ pub fn payload(alert: &Alert) -> serde_json::Value {
         },
         "component_id": alert.component_id,
         "labels": alert.labels,
-        "annotations": alert.annotations,
+        "annotations": alert.annotations(),
         "health": alert.health.as_str(),
         "started_at_ms": alert.started_at_ms,
         "ended_at_ms": alert.ended_at_ms,

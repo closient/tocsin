@@ -68,6 +68,7 @@ on a removed check resolves rather than firing on forever.
 | `tocsin_component_status` | gauge | `component`, `node`, `status` | 1 for the status each component shows, 0 for the other four. |
 | `tocsin_notification_failures_total` | counter | `notifier` | Failed attempts to deliver an alert message, retried or not. |
 | `tocsin_notifications_abandoned_total` | counter | `notifier` | Alert messages given up on after their last attempt failed. |
+| `tocsin_alerts_abandoned_total` | counter | | Alerts that ended without their resolve being delivered: the resolve failed for good, most often because its notifier was removed while tocsin was stopped. Not labelled by notifier, since a removed notifier's series are no longer exported; tocsin logs each one at `error` with the alert and notifier. |
 | `tocsin_config_reload_success` | gauge | | 1 if the last reload succeeded, 0 if it failed and the last good configuration is still running. |
 | `tocsin_config_last_error_timestamp` | gauge | | When a reload last failed, unix seconds; 0 if none has. |
 | `tocsin_db_size_bytes` | gauge | | The SQLite database's size on disk, its write-ahead log included. |
@@ -143,6 +144,11 @@ groups:
         expr: increase(tocsin_notifications_abandoned_total[15m]) > 0
         labels:
           severity: page
+
+      - alert: TocsinAlertsAbandoned
+        expr: increase(tocsin_alerts_abandoned_total[15m]) > 0
+        labels:
+          severity: ticket
 
       - alert: TocsinSlackConnectionDown
         expr: tocsin_slack_connection_up == 0

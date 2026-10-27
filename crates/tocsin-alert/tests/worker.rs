@@ -28,7 +28,7 @@ use tocsin_core::config::Config;
 use tocsin_core::incident::{Actor, Timestamp};
 use tocsin_core::silence::{HeldKind, Matchers, NewSilence, SilenceState};
 use tocsin_engine::ports::{Clock, History, TokioClock};
-use tocsin_store::{DeliveryKind, NewCheckResult, OutageChange, Store, SubjectKind};
+use tocsin_store::{DeliveryKind, EndedBy, NewCheckResult, OutageChange, Store, SubjectKind};
 use tokio::sync::mpsc;
 
 const HOUR_MS: i64 = 3_600_000;
@@ -91,6 +91,18 @@ impl Running {
         .await
         .unwrap()
         .unwrap()
+    }
+
+    /// Withdraws outage `id` at `at`, as the engine does once a reload
+    /// stops watching its check, with the clock standing still as in
+    /// [`Running::change`].
+    async fn withdraw(&self, id: i64, at: i64) {
+        let history = Arc::clone(&self.history);
+        let runtime = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || runtime.block_on(history.withdraw(id, at)))
+            .await
+            .unwrap()
+            .unwrap();
     }
 }
 
@@ -177,6 +189,15 @@ fn labelled(labels: &str, annotations: &str) -> Config {
         "component = \"web\"\n\n[[",
         &format!("component = \"web\"\nlabels = {labels}\nannotations = {annotations}\n\n[["),
     ))
+}
+
+/// `toml`, a [`monitored`] configuration, without its check.
+fn without_the_check(toml: &str) -> String {
+    let start = toml.find("[[check]]").unwrap();
+    let end = start + toml[start..].find("\n\n").unwrap() + 2;
+    let mut toml = toml.to_owned();
+    toml.replace_range(start..end, "");
+    toml
 }
 
 /// `(name, value)` pairs.
@@ -305,9 +326,9 @@ fn an_alert_that_re_fires_after_a_reload_keeps_the_labels_it_opened_with() {
     });
 }
 
-/// The engine withdraws a check a reload removes, without a resolve (see
-/// `Ending::Withdrawn` in the store); this covers the resolve that was
-/// already queued when the reload landed, still going out after it.
+/// The resolve of an outage that recovered just before a reload removed
+/// its check, still queued when the reload landed, goes out after it with
+/// the labels it fired with.
 #[test]
 fn a_resolve_queued_before_a_reload_removes_its_check_keeps_its_labels() {
     paused(async {
@@ -338,13 +359,10 @@ fn a_resolve_queued_before_a_reload_removes_its_check_keeps_its_labels() {
         );
 
         // The reload removes the check: the router knows nothing of it.
-        let toml = monitored(&["slack"], "");
-        let end = "component = \"web\"\n\n";
-        let check = &toml[toml.find("[[check]]").unwrap()..toml.find(end).unwrap() + end.len()];
         reload(
             &fixture,
             &running,
-            &config(&toml.replace(check, "")),
+            &config(&without_the_check(&monitored(&["slack"], ""))),
             &[("slack", Arc::clone(&slack))],
         )
         .await;
@@ -534,6 +552,9 @@ fn a_delivery_that_keeps_failing_is_recorded_and_counted() {
             })
             .collect();
         assert_eq!(counted, [("flaky", 4, 1), ("strict", 2, 2), ("gone", 2, 2)]);
+        // Two alerts ended unheard: strict refused its resolve, and gone
+        // could not be sent one.
+        assert_eq!(metrics.alerts_abandoned(), 2);
     });
 }
 
@@ -666,8 +687,8 @@ fn a_delivery_pending_at_shutdown_is_sent_after_the_restart() {
 }
 
 /// Swaps the alerter's notifiers and the history's routes for `config`'s,
-/// and ends the alerts of notifiers it no longer declares, as a reload
-/// does.
+/// and ends the alerts of notifiers it no longer declares, waking the
+/// worker to send their resolves, as a reload does.
 async fn reload(
     fixture: &Fixture,
     running: &Running,
@@ -682,11 +703,15 @@ async fn reload(
     let ids = notifiers.keys().cloned().collect();
     running.alerter.reconfigure(notifiers, Arc::clone(&router));
     running.history.set_router(router);
-    fixture
+    let ended = fixture
         .store
         .end_alerts_without_notifier(ids, tocsin_store::now_ms())
         .await
-        .unwrap()
+        .unwrap();
+    if ended > 0 {
+        running.alerter.waker().notify_one();
+    }
+    ended
 }
 
 #[test]
@@ -696,14 +721,15 @@ fn a_reload_sends_new_outages_on_the_new_routes_and_open_alerts_on_their_own() {
         let (sender, mut receiver) = channel();
         let old = Fake::accepting("old", &sender);
         let kept: Arc<dyn Notifier> = Fake::accepting("kept", &sender);
+        let metrics = AlertMetrics::default();
         let running = start(
             &fixture,
             &config(&monitored(&["old", "kept"], "")),
             &[("old", old.clone()), ("kept", Arc::clone(&kept))],
-            &AlertMetrics::default(),
+            &metrics,
         );
         let id = running.change(down(T0)).await.unwrap();
-        next_from(&mut receiver, "old").await;
+        let fire = next_from(&mut receiver, "old").await;
         next_from(&mut receiver, "kept").await;
 
         let new: Arc<dyn Notifier> = Fake::accepting("new", &sender);
@@ -715,10 +741,19 @@ fn a_reload_sends_new_outages_on_the_new_routes_and_open_alerts_on_their_own() {
         )
         .await;
         assert_eq!(ended, 1, "only the removed notifier's alert ends");
+        // The removed notifier is kept for one last send: the resolve of
+        // the alert it fired, saying the configuration ended it.
+        let ended = next_from(&mut receiver, "old").await;
+        assert_eq!(
+            (ended.event(), ended.cancel, ended.answer),
+            (AlertEvent::Resolve, false, Answer::Accept)
+        );
+        assert_eq!(ended.alert.identity(), fire.alert.identity());
+        assert_eq!(ended.alert.ended_by, Some(EndedBy::Config));
 
         // The open outage recovers: its alert on `kept` resolves, the
-        // removed notifier's ended alert is not resolved, and `new`, which
-        // never fired for it, hears nothing.
+        // removed notifier, whose alert already ended, hears nothing more,
+        // and `new`, which never fired for it, hears nothing.
         running.change(up(id, T0 + 1_000)).await;
         let resolve = next_from(&mut receiver, "kept").await;
         assert_eq!(resolve.event(), AlertEvent::Resolve);
@@ -741,9 +776,10 @@ fn a_reload_sends_new_outages_on_the_new_routes_and_open_alerts_on_their_own() {
 
         running.alerter.stop().await;
         let old_seen: Vec<AlertEvent> = old.seen().iter().map(Attempt::event).collect();
-        assert_eq!(old_seen, [AlertEvent::Fire]);
-        // A resolve queued for the removed notifier would be pending, or
-        // failed as no longer configured.
+        assert_eq!(old_seen, [AlertEvent::Fire, AlertEvent::Resolve]);
+        assert_eq!(metrics.alerts_abandoned(), 0);
+        // Nothing for the removed notifier is left pending, or failed as no
+        // longer configured.
         let outbox = fixture.store.outbox().await.unwrap();
         assert!(
             outbox
@@ -753,6 +789,132 @@ fn a_reload_sends_new_outages_on_the_new_routes_and_open_alerts_on_their_own() {
             "{outbox:?}"
         );
         assert_eq!(failed_deliveries(&fixture).await, []);
+    });
+}
+
+/// A reload that stops watching a firing check: the engine withdraws its
+/// outage, and every notifier that heard the fire hears it end, with the
+/// fire's identity, labels and annotations from the stored alert (the
+/// router no longer knows the check), marked as ended by the configuration.
+#[test]
+fn a_check_a_reload_removes_resolves_everywhere_it_fired_as_ended_by_the_configuration() {
+    paused(async {
+        let fixture = Fixture::new();
+        let (sender, mut receiver) = channel();
+        let slack: Arc<dyn Notifier> = Fake::accepting("slack", &sender);
+        let hook: Arc<dyn Notifier> = Fake::accepting("hook", &sender);
+        let notifiers = [("slack", Arc::clone(&slack)), ("hook", Arc::clone(&hook))];
+        let toml = monitored(&["slack", "hook"], "").replace(
+            "component = \"web\"\n\n[[",
+            "component = \"web\"\nlabels = { page_class = \"page\" }\n\
+             annotations = { runbook = \"https://runbooks.example/api\" }\n\n[[",
+        );
+        let metrics = AlertMetrics::default();
+        let running = start(&fixture, &config(&toml), &notifiers, &metrics);
+        let id = running.change(down(T0)).await.unwrap();
+        let fires = [
+            next_from(&mut receiver, "slack").await,
+            next_from(&mut receiver, "hook").await,
+        ];
+
+        let ended = reload(
+            &fixture,
+            &running,
+            &config(&without_the_check(&toml)),
+            &notifiers,
+        )
+        .await;
+        assert_eq!(ended, 0, "both notifiers are still configured");
+        running.withdraw(id, T0 + 90_000).await;
+
+        for fire in fires {
+            let resolve = next_from(&mut receiver, &fire.notifier).await;
+            assert_eq!(fire.event(), AlertEvent::Fire);
+            assert_eq!(
+                (resolve.event(), resolve.cancel, resolve.answer),
+                (AlertEvent::Resolve, false, Answer::Accept),
+                "{}",
+                fire.notifier
+            );
+            assert_eq!(resolve.alert.identity(), fire.alert.identity());
+            assert_eq!(resolve.alert.started_at_ms, fire.alert.started_at_ms);
+            assert_eq!(resolve.alert.duration_ms(), Some(90_000));
+            assert_eq!(resolve.alert.component_id, fire.alert.component_id);
+            assert_eq!(carried(&resolve), carried(&fire));
+            assert_eq!(resolve.alert.labels.len(), 1);
+            assert_eq!(resolve.alert.ended_by, Some(EndedBy::Config));
+            let mut annotations = fire.alert.annotations();
+            assert_eq!(annotations.len(), 1);
+            annotations.insert("ended_by".into(), "config".into());
+            assert_eq!(resolve.alert.annotations(), annotations);
+        }
+        running.alerter.stop().await;
+        assert_eq!(failed_deliveries(&fixture).await, []);
+        assert_eq!(metrics.alerts_abandoned(), 0);
+        assert_eq!(fixture.store.outbox().await.unwrap().pending.len(), 0);
+    });
+}
+
+/// A notifier removed while tocsin was stopped is gone for good: its open
+/// alert ends at startup, and its resolve, which nothing can send, fails,
+/// counted as an alert abandoned rather than dropped without a trace.
+#[test]
+fn a_notifier_removed_across_a_restart_abandons_its_alert_and_counts_it() {
+    paused(async {
+        let fixture = Fixture::new();
+        let (sender, mut receiver) = channel();
+        let old = Fake::accepting("old", &sender);
+        let kept: Arc<dyn Notifier> = Fake::accepting("kept", &sender);
+        let running = start(
+            &fixture,
+            &config(&monitored(&["old", "kept"], "")),
+            &[("old", old.clone()), ("kept", Arc::clone(&kept))],
+            &AlertMetrics::default(),
+        );
+        let id = running.change(down(T0)).await.unwrap();
+        next_from(&mut receiver, "old").await;
+        next_from(&mut receiver, "kept").await;
+        let Running { alerter, history } = running;
+        alerter.stop().await;
+        drop(history);
+        let fixture = fixture.restart().await;
+
+        // Started without `old`, as `serve` does once the configuration
+        // drops it.
+        let metrics = AlertMetrics::default();
+        let running = start(
+            &fixture,
+            &config(&monitored(&["kept"], "")),
+            &[("kept", Arc::clone(&kept))],
+            &metrics,
+        );
+        let ended = fixture
+            .store
+            .end_alerts_without_notifier(vec!["kept".into()], tocsin_store::now_ms())
+            .await
+            .unwrap();
+        assert_eq!(ended, 1);
+        running.alerter.waker().notify_one();
+        // The outage recovers; once `kept` hears it, the worker has been
+        // through `old`'s resolve too, which was queued first.
+        running.change(up(id, T0 + 1_000)).await;
+        let resolve = next_from(&mut receiver, "kept").await;
+        assert_eq!(resolve.event(), AlertEvent::Resolve);
+        running.alerter.stop().await;
+
+        let old_seen: Vec<AlertEvent> = old.seen().iter().map(Attempt::event).collect();
+        assert_eq!(old_seen, [AlertEvent::Fire]);
+        assert_eq!(
+            failed_deliveries(&fixture).await,
+            [(
+                "old".into(),
+                "resolve",
+                1,
+                Some("notifier `old` is no longer configured".into())
+            )]
+        );
+        assert_eq!(metrics.abandonments("old"), 1);
+        assert_eq!(metrics.alerts_abandoned(), 1);
     });
 }
 

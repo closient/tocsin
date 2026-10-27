@@ -1646,7 +1646,7 @@ annotations = { summary = "mine" }
             "checks.toml:6:28: check `api`: `needs-human` is not a valid label name (check[0].labels.needs-human)\n  hint: use letters, digits and underscores, not starting with a digit or `__`, as Alertmanager requires",
             "checks.toml:6:49: check `api`: label `subject_id` is set by tocsin (check[0].labels.subject_id)\n  hint: tocsin sets `alertname`, `node`, `subject_kind`, `subject_id` on every alert; choose another name",
             "checks.toml:6:65: check `api`: label `team` is empty (check[0].labels.team)\n  hint: Alertmanager drops an empty label: give it a value or remove it",
-            "checks.toml:7:27: check `api`: annotation `summary` is set by tocsin (check[0].annotations.summary)\n  hint: tocsin sets `summary`, `description`, `health`, `name`, `component`, `component_name`, `tocsin_test` on every alert; choose another name",
+            "checks.toml:7:27: check `api`: annotation `summary` is set by tocsin (check[0].annotations.summary)\n  hint: tocsin sets `summary`, `description`, `health`, `name`, `component`, `component_name`, `tocsin_test`, `ended_by` on every alert; choose another name",
         ]
     );
 }

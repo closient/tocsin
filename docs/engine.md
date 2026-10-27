@@ -240,7 +240,8 @@ commits before it closes.
   `Engine::reconcile`, which adds, removes and restarts checks and
   heartbeats by id, carries a changed one's state across, rebuilds the
   components, and withdraws the open outage of each one removed (ended
-  with no recovery, so nothing resolves). Every read happens before
+  with no recovery; each alert it fired resolves as ended by the
+  configuration). Every read happens before
   anything stops, so an error leaves the old plan running.
   `Engine::start` withdraws the same orphans, for checks removed while
   the engine was stopped. `crates/tocsin/src/reload.rs` is the caller.

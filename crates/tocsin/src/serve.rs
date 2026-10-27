@@ -359,8 +359,10 @@ impl Monitor {
                 Failure::new(Exit::Runtime, format!("cannot set up alerting: {error}"))
             })?;
         // Alerts left open on a notifier removed while tocsin was stopped
-        // would otherwise stay open for good: nothing can resolve them.
-        end_alerts_without_notifier(store, &notifiers).await?;
+        // would otherwise stay open for good. Their resolves are queued,
+        // but nothing is left to send them through: the worker records
+        // each as failed and counts it in `tocsin_alerts_abandoned_total`.
+        end_alerts_without_notifier(store, &notifiers, Removed::WhileStopped).await?;
         let router = Arc::new(Router::new(config));
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let alerter = Alerter::start(
@@ -428,8 +430,11 @@ impl Monitor {
     ///
     /// Alerting changes first, so an outage the new checks open is routed
     /// by the new routes to notifiers the worker has. Alerts already open
-    /// keep the notifiers they fired on; those on a notifier no longer
-    /// configured are ended, since nothing can resolve them.
+    /// keep the notifiers they fired on. Those of a removed check or
+    /// heartbeat end as the engine withdraws its outage, and those on a
+    /// removed notifier end here, last; either way each queues a resolve
+    /// that says the configuration ended it, and the worker sends a removed
+    /// notifier's resolves through it before letting it go.
     ///
     /// # Errors
     ///
@@ -468,9 +473,13 @@ impl Monitor {
         }
         self.notifiers = notifiers;
         self.router = router;
-        end_alerts_without_notifier(&self.store, &self.notifiers)
+        let ended = end_alerts_without_notifier(&self.store, &self.notifiers, Removed::ByReload)
             .await
-            .map_err(ReloadError::Unfinished)
+            .map_err(ReloadError::Unfinished)?;
+        if ended > 0 {
+            self.alerter.waker().notify_one();
+        }
+        Ok(())
     }
 
     /// Wakes the alert delivery worker. A reload keeps the same worker,
@@ -526,8 +535,23 @@ impl Monitor {
     }
 }
 
-/// Ends the open alerts that fired on a notifier not in `notifiers`.
-async fn end_alerts_without_notifier(store: &Store, notifiers: &Notifiers) -> Result<(), Failure> {
+/// When the notifiers [`end_alerts_without_notifier`] ends the alerts of
+/// were removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Removed {
+    /// Before this start: nothing is left to send their resolves.
+    WhileStopped,
+    /// By a reload: the worker still holds them for their resolves.
+    ByReload,
+}
+
+/// Ends the open alerts that fired on a notifier not in `notifiers`,
+/// queueing their resolves. Returns how many it ended.
+async fn end_alerts_without_notifier(
+    store: &Store,
+    notifiers: &Notifiers,
+    removed: Removed,
+) -> Result<usize, Failure> {
     let configured = notifiers.keys().cloned().collect();
     let ended = store
         .end_alerts_without_notifier(configured, tocsin_store::now_ms())
@@ -538,13 +562,20 @@ async fn end_alerts_without_notifier(store: &Store, notifiers: &Notifiers) -> Re
                 format!("cannot end the alerts of removed notifiers: {error}"),
             )
         })?;
-    if ended > 0 {
-        tracing::warn!(
+    match removed {
+        _ if ended == 0 => {}
+        Removed::WhileStopped => tracing::error!(
             alerts = ended,
-            "ended open alerts whose notifiers are no longer configured; they will not be resolved"
-        );
+            "ended open alerts whose notifiers were removed while tocsin was stopped; \
+             nothing is left to send their resolves, so each is abandoned"
+        ),
+        Removed::ByReload => tracing::warn!(
+            alerts = ended,
+            "ended open alerts whose notifiers the reload removed; each sends its resolve \
+             through its old notifier before that notifier goes"
+        ),
     }
-    Ok(())
+    Ok(ended)
 }
 
 /// The root certificates HTTP and TLS checks verify against. Without a
@@ -1492,8 +1523,10 @@ mod tests {
     }
 
     /// An alert sent to a notifier the configuration no longer has would
-    /// never be resolved or repeated: it ends, at startup and at reload,
-    /// without a message, and the others keep firing.
+    /// never be resolved or repeated: it ends, at startup and at reload, as
+    /// ended by the configuration with its resolve queued, and the others
+    /// keep firing. (`tests/worker.rs` in `tocsin-alert` covers what the
+    /// worker makes of those resolves.)
     #[tokio::test]
     async fn the_alerts_of_a_removed_notifier_end_at_startup_and_at_reload() {
         let (_dir, store) = open();
@@ -1562,6 +1595,14 @@ mod tests {
 
         monitor.reload(&parse(&check)).await.unwrap();
         assert!(open_alerts().await.is_empty(), "ended at reload");
+        for alert in store.alerts().await.unwrap() {
+            assert_eq!(
+                alert.ended_by,
+                Some(tocsin_store::EndedBy::Config),
+                "{}",
+                alert.notifier_id
+            );
+        }
         let outages = store.open_outages("test").await.unwrap();
         assert_eq!(outages.len(), 1, "the outage itself stays open");
         monitor.stop().await;

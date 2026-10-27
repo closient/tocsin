@@ -7,7 +7,10 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use tocsin_core::Health;
-use tocsin_store::SubjectKind;
+use tocsin_store::{EndedBy, SubjectKind};
+
+/// The annotation on the resolve of an alert the configuration ended.
+pub const ENDED_BY_ANNOTATION: &str = "ended_by";
 
 /// Which message this is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -64,6 +67,9 @@ pub struct Alert {
     pub started_at_ms: i64,
     /// When it ended, on a resolve (unix milliseconds).
     pub ended_at_ms: Option<i64>,
+    /// Why it ended, on a resolve: `Some(EndedBy::Config)` when the
+    /// configuration stopped watching it, so nobody saw it recover.
+    pub ended_by: Option<EndedBy>,
     /// When this message was handed to the notifier (unix milliseconds).
     pub sent_at_ms: i64,
     /// The outbox row this message came from; `None` for a test message.
@@ -97,10 +103,33 @@ impl Alert {
         self.event == AlertEvent::Resolve
     }
 
+    /// Whether this is the resolve of an alert the configuration ended: its
+    /// check, heartbeat or notifier was removed, and nobody saw it recover.
+    #[must_use]
+    pub fn ended_by_config(&self) -> bool {
+        self.is_resolve() && self.ended_by == Some(EndedBy::Config)
+    }
+
+    /// The annotations a receiver that takes them is sent: the configured
+    /// ones, pinned when the alert opened, and on the resolve of an alert
+    /// the configuration ended, `ended_by = "config"`.
+    #[must_use]
+    pub fn annotations(&self) -> BTreeMap<String, String> {
+        let mut annotations = self.annotations.clone();
+        if self.ended_by_config() {
+            annotations.insert(
+                ENDED_BY_ANNOTATION.to_owned(),
+                EndedBy::Config.as_str().to_owned(),
+            );
+        }
+        annotations
+    }
+
     /// A one-line title: `[DOWN] API (check api on node-a)`.
     #[must_use]
     pub fn title(&self) -> String {
         let state = match (self.event, self.health) {
+            (AlertEvent::Resolve, _) if self.ended_by_config() => "ENDED",
             (AlertEvent::Resolve, _) => "RESOLVED",
             (AlertEvent::Repeat, Health::Down) => "STILL DOWN",
             (AlertEvent::Repeat, _) => "STILL DEGRADED",
@@ -124,6 +153,16 @@ impl Alert {
         let name = one_line(&self.subject_name);
         let since = timestamp(self.started_at_ms);
         match (self.event, self.ended_at_ms) {
+            (AlertEvent::Resolve, Some(ended)) if self.ended_by_config() => {
+                let lasted = human_duration(self.duration_ms().unwrap_or_default());
+                let _ = write!(
+                    body,
+                    "{name} is no longer alerted on here: the configuration stopped watching \
+                     it at {} after {lasted} ({} since {since}). It was not seen to recover.",
+                    timestamp(ended),
+                    self.health
+                );
+            }
             (AlertEvent::Resolve, Some(ended)) => {
                 let lasted = human_duration(self.duration_ms().unwrap_or_default());
                 let _ = write!(
@@ -228,6 +267,7 @@ mod tests {
             health: Health::Down,
             started_at_ms: 1_800_000_000_000,
             ended_at_ms: (event == AlertEvent::Resolve).then_some(1_800_000_090_000),
+            ended_by: (event == AlertEvent::Resolve).then_some(EndedBy::Recovery),
             sent_at_ms: 1_800_000_090_000,
             delivery_id: Some(7),
             test: false,
@@ -257,6 +297,34 @@ mod tests {
         let body = alert(AlertEvent::Resolve).body();
         assert!(body.contains("after 1m 30s"), "{body}");
         assert!(body.contains("Alert: node-a/check/api"), "{body}");
+    }
+
+    #[test]
+    fn a_resolve_the_configuration_ended_claims_no_recovery() {
+        let ended = Alert {
+            ended_by: Some(EndedBy::Config),
+            ..alert(AlertEvent::Resolve)
+        };
+        assert!(ended.title().starts_with("[ENDED] "), "{}", ended.title());
+        let body = ended.body();
+        assert!(!body.contains("recovered"), "{body}");
+        assert!(body.contains("It was not seen to recover."), "{body}");
+        assert!(body.contains("after 1m 30s"), "{body}");
+        assert_eq!(
+            ended
+                .annotations()
+                .get(ENDED_BY_ANNOTATION)
+                .map(String::as_str),
+            Some("config")
+        );
+        // A recovery, and the fire it answers, carry only what is configured.
+        assert!(alert(AlertEvent::Resolve).annotations().is_empty());
+        let fire = Alert {
+            ended_by: Some(EndedBy::Config),
+            ..alert(AlertEvent::Fire)
+        };
+        assert!(fire.annotations().is_empty());
+        assert!(fire.title().starts_with("[DOWN] "));
     }
 
     #[test]

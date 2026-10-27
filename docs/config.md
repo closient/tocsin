@@ -65,8 +65,8 @@ A reload reads and validates the whole folder exactly as startup does, and eithe
 
 Removing something that is alerting ends it rather than leaving it open:
 
-- **A removed check or heartbeat** with an open outage has the outage withdrawn: ended at the reload, with no resolve sent, since nobody saw it recover, and recorded as `ending: "withdrawn"` in the read API ([api.md](api.md)). An alert still ringing (a Pushover emergency) is cancelled.
-- **A removed notifier** has its open alerts ended, with nothing sent, since there is nothing left to send through.
+- **A removed check or heartbeat** with an open outage has the outage withdrawn: ended at the reload and recorded as `ending: "withdrawn"` in the read API ([api.md](api.md)). Every notifier that heard it fire gets its resolve, with the same identity, labels and annotations plus `ended_by = "config"`, titled `[ENDED]` and saying it was not seen to recover. An alert still ringing (a Pushover emergency) is cancelled.
+- **A removed notifier** has its open alerts ended the same way, and their resolves are sent through it, with the configuration it had before the reload, before tocsin lets it go. A notifier removed while tocsin was stopped cannot be sent through: its alerts' resolves fail, each logged at `error` and counted in `tocsin_alerts_abandoned_total` ([alerting.md](alerting.md)).
 - **A changed route** applies to outages opened from then on; an alert already firing keeps the notifiers it fired on.
 
 The same happens at startup, for whatever the configuration dropped while tocsin was stopped.
@@ -442,7 +442,7 @@ labels = { page_class = "page", team = "web" }
 annotations = { ticket = "OPS-12" }
 ```
 
-Names the contract does not cover are allowed and unchecked. Whether or not `[alerting]` is declared, a label or annotation name must be letters, digits and underscores, not starting with a digit or `__`, as Alertmanager requires; its value may not be empty; and it may not be a name tocsin sets itself: the labels `alertname`, `node`, `subject_kind` and `subject_id`, and the annotations `summary`, `description`, `health`, `name`, `component`, `component_name` and `tocsin_test`. [`alerting.md`](alerting.md) shows where each notifier puts them. An alert keeps the labels and annotations it opened with until it resolves, so a reload that changes them takes effect from the next alert.
+Names the contract does not cover are allowed and unchecked. Whether or not `[alerting]` is declared, a label or annotation name must be letters, digits and underscores, not starting with a digit or `__`, as Alertmanager requires; its value may not be empty; and it may not be a name tocsin sets itself: the labels `alertname`, `node`, `subject_kind` and `subject_id`, and the annotations `summary`, `description`, `health`, `name`, `component`, `component_name`, `tocsin_test` and `ended_by`. [`alerting.md`](alerting.md) shows where each notifier puts them. An alert keeps the labels and annotations it opened with until it resolves, so a reload that changes them takes effect from the next alert.
 
 ## `[subscribers]`
 

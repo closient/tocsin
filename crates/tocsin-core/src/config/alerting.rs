@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 /// identity. A check or heartbeat may not set them.
 pub const IDENTITY_LABELS: &[&str] = &["alertname", "node", "subject_kind", "subject_id"];
 
-/// The annotations tocsin sets on alerts it posts to Alertmanager. A check
-/// or heartbeat may not set them.
+/// The annotations tocsin sets on alerts it posts to Alertmanager (and, for
+/// `ended_by`, to a webhook). A check or heartbeat may not set them.
 pub const OWN_ANNOTATIONS: &[&str] = &[
     "summary",
     "description",
@@ -22,6 +22,7 @@ pub const OWN_ANNOTATIONS: &[&str] = &[
     "component",
     "component_name",
     "tocsin_test",
+    "ended_by",
 ];
 
 /// `[alerting]`: the contract every check's and heartbeat's `labels` and

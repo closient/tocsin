@@ -43,7 +43,7 @@ pub use check::{
 pub use colour::{AA_TEXT, COLOUR_PATTERN, Colour, DARK, LIGHT, Scheme};
 pub use diagnostic::Diagnostic;
 pub use load::{Environment, Source, closest, host_and_port, load};
-pub use node::{Node, NodeIdSource};
+pub use node::{Federation, Node, NodeIdSource};
 pub use notifier::{
     AlertmanagerSettings, DiscordSettings, EmailSettings, Notifier, NotifierSettings, NotifierType,
     NtfySettings, PushoverSettings, SlackSettings, TelegramSettings, WebhookSettings,
@@ -74,6 +74,10 @@ pub struct ConfigFile {
     /// required, and one of these ids.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub node: Vec<Node>,
+    /// Settings every node of a federation shares. At most one file may
+    /// hold `[federation]`; it is required once any `[[node]]` is listed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub federation: Option<Federation>,
     /// What the status page shows, each with a health state.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub component: Vec<Component>,
@@ -140,6 +144,8 @@ pub struct Config {
     /// Every `[[node]]`, in file order.
     #[serde(rename = "node")]
     pub nodes: Vec<Node>,
+    /// `[federation]`, if any `[[node]]` is listed.
+    pub federation: Option<Federation>,
     /// Every `[[component]]`, in file order.
     #[serde(rename = "component")]
     pub components: Vec<Component>,
@@ -193,6 +199,11 @@ pub struct Server {
     /// hostname.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
+    /// This node's private key, which signs its pushes to other nodes, as
+    /// `tocsin node keygen` prints it. Its public key must be listed under
+    /// the node's own `[[node]]`, or the server will not start. Secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_key: Option<Secret>,
     /// The folder holding the SQLite database. `tocsin serve --data`
     /// overrides it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -225,6 +236,7 @@ impl Default for Server {
             listen: default_listen(),
             public_url: None,
             node_id: None,
+            node_key: None,
             data_dir: None,
             retention_days: default_retention_days(),
             max_concurrent_checks: default_max_concurrent_checks(),

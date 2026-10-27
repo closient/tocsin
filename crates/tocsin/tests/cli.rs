@@ -1268,3 +1268,87 @@ fn silence_new_without_an_expiry_is_invalid_input() {
     ]);
     assert_eq!(output.status.code(), Some(2));
 }
+
+#[test]
+fn node_keygen_prints_a_fresh_pair_once() {
+    let first = json_stdout(&tocsin(&["--json", "node", "keygen"]));
+    let second = json_stdout(&tocsin(&["--json", "node", "keygen"]));
+    for pair in [&first, &second] {
+        assert!(pair["public_key"].as_str().unwrap().starts_with("ed25519:"));
+        assert!(
+            pair["private_key"]
+                .as_str()
+                .unwrap()
+                .starts_with("ed25519:")
+        );
+    }
+    assert_ne!(first["private_key"], second["private_key"]);
+    let text = tocsin(&["node", "keygen"]);
+    assert_eq!(text.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&text.stdout).contains("public_key  = ed25519:"));
+}
+
+#[test]
+fn a_node_key_for_another_node_stops_the_server_naming_its_node() {
+    let pair = |output: Output| {
+        let pair = json_stdout(&output);
+        (
+            pair["public_key"].as_str().unwrap().to_owned(),
+            pair["private_key"].as_str().unwrap().to_owned(),
+        )
+    };
+    let (central_public, central_private) = pair(tocsin(&["--json", "node", "keygen"]));
+    let (dmz_public, dmz_private) = pair(tocsin(&["--json", "node", "keygen"]));
+    let config = folder_with(&format!(
+        "{LISTEN_ANY_PORT}node_id = \"dmz-1\"\nnode_key = \"${{ENV:TOCSIN_TEST_NODE_KEY}}\"\n\n\
+         [[node]]\nid = \"central\"\nurl = \"https://central.example.com\"\npublic_keys = [\"{central_public}\"]\n\n\
+         [[node]]\nid = \"dmz-1\"\npublic_keys = [\"{dmz_public}\"]\npush_to = [\"central\"]\n\n\
+         [federation]\ndefault_nodes = [\"central\"]\n"
+    ));
+    let check = |private: &str| {
+        Command::new(env!("CARGO_BIN_EXE_tocsin"))
+            .args([
+                "config",
+                "check",
+                "--config",
+                config.path().to_str().unwrap(),
+            ])
+            .env("TOCSIN_TEST_NODE_KEY", private)
+            .output()
+            .unwrap()
+    };
+    let own = check(&dmz_private);
+    assert_eq!(own.status.code(), Some(0), "{own:?}");
+
+    // central's key, copied to dmz-1's host by mistake.
+    let wrong = check(&central_private);
+    assert_eq!(wrong.status.code(), Some(2), "{wrong:?}");
+    let stderr = String::from_utf8_lossy(&wrong.stderr);
+    assert!(
+        stderr.contains("is not listed under node `dmz-1`"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(&central_public), "{stderr}");
+    assert!(!stderr.contains(&central_private), "{stderr}");
+
+    // `serve` refuses it the same way, before it binds or opens anything.
+    let data = tempfile::tempdir().unwrap();
+    let serve = Command::new(env!("CARGO_BIN_EXE_tocsin"))
+        .args([
+            "serve",
+            "--config",
+            config.path().to_str().unwrap(),
+            "--data",
+            data.path().to_str().unwrap(),
+        ])
+        .env("TOCSIN_TEST_NODE_KEY", &central_private)
+        .output()
+        .unwrap();
+    assert_eq!(serve.status.code(), Some(2), "{serve:?}");
+    let stderr = String::from_utf8_lossy(&serve.stderr);
+    assert!(
+        stderr.contains("is not listed under node `dmz-1`"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(&central_private), "{stderr}");
+}

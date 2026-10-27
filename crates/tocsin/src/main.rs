@@ -22,6 +22,7 @@ mod lock;
 mod mcp;
 mod metrics;
 mod net;
+mod node;
 mod notify;
 mod otlp;
 mod output;
@@ -42,7 +43,9 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use crate::cli::{Cli, Command, ConfigCommand, NotifyCommand, ProbeCommand, SlackCommand};
+use crate::cli::{
+    Cli, Command, ConfigCommand, NodeCommand, NotifyCommand, ProbeCommand, SlackCommand,
+};
 use crate::exit::Exit;
 use crate::output::{Failure, Report};
 
@@ -108,6 +111,9 @@ fn run(cli: Cli) -> Result<Report, Failure> {
         },
         Some(Command::Slack { command }) => match command {
             SlackCommand::Setup { config, node } => slack::setup(&config, node.as_deref()),
+        },
+        Some(Command::Node { command }) => match command {
+            NodeCommand::Keygen => node::keygen(),
         },
         Some(Command::Heartbeat { command }) => heartbeat::run(command),
         Some(Command::Openapi) => Ok(Report {

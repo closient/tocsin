@@ -7,6 +7,7 @@ use tocsin_core::config::{
     AuthMode, CheckType, Config, DARK, Diagnostic, Environment, Id, NodeIdSource, NotifierType,
     ProbeClass, Secret, Source, TokenScope, TopologyNode, load,
 };
+use tocsin_core::federation::NodeKey;
 
 const HOSTNAME: &str = "probe-01";
 
@@ -26,6 +27,9 @@ fn variable(name: &str) -> Option<String> {
         "WEBHOOK_SECRET" => Some("SIGNING-SECRET".to_owned()),
         "SLACK_CLIENT_ID" => Some("1234.5678".to_owned()),
         "SLACK_CLIENT_SECRET" => Some("CLIENT-SECRET-VALUE".to_owned()),
+        "NODE_KEY_A" => Some(NodeKey::from_seed([1; 32]).expose()),
+        "NODE_KEY_B" => Some(NodeKey::from_seed([2; 32]).expose()),
+        "NODE_KEY_BROKEN" => Some("ed25519:NODE-KEY-SECRET".to_owned()),
         _ => None,
     }
 }
@@ -1874,7 +1878,7 @@ fn run_as(node: Option<&str>, files: &[(&str, &str)]) -> Result<Config, Vec<Diag
     load(&sources, &environment)
 }
 
-const NODES: &str = "[[node]]\nid = \"probe-a\"\n\n[[node]]\nid = \"probe-b\"\n";
+const NODES: &str = "[[node]]\nid = \"probe-a\"\n\n[[node]]\nid = \"probe-b\"\n\n[federation]\ndefault_nodes = [\"probe-a\", \"probe-b\"]\n";
 
 #[test]
 fn a_single_server_is_named_by_its_hostname_unless_told_otherwise() {
@@ -1992,6 +1996,7 @@ fn a_node_is_listed_once() {
         &[
             ("a.toml", "[[node]]\nid = \"probe-a\"\n"),
             ("b.toml", "[[node]]\nid = \"probe-a\"\n"),
+            ("c.toml", "[federation]\ndefault_nodes = [\"probe-a\"]\n"),
         ],
     )
     .expect_err("configuration should be invalid");
@@ -2005,4 +2010,132 @@ fn a_node_is_listed_once() {
         "{}",
         diagnostic.message
     );
+}
+
+/// The public key of the node key in `NODE_KEY_A` or `NODE_KEY_B`.
+fn public(seed: u8) -> String {
+    NodeKey::from_seed([seed; 32]).public_key().to_string()
+}
+
+/// Two nodes, `central` taking pushes from `dmz-1`, each with its own key.
+fn federation(node_key: &str) -> String {
+    format!(
+        "[server]\nnode_id = \"dmz-1\"\nnode_key = \"${{ENV:{node_key}}}\"\n\n\
+         [[node]]\nid = \"central\"\nurl = \"https://central.example.com\"\npublic_keys = [\"{a}\"]\n\n\
+         [[node]]\nid = \"dmz-1\"\npublic_keys = [\"{b}\"]\npush_to = [\"central\"]\n\n\
+         [federation]\ndefault_nodes = [\"central\"]\nalert_order = [\"central\", \"dmz-1\"]\n",
+        a = public(1),
+        b = public(2),
+    )
+}
+
+#[test]
+fn a_federation_loads_with_each_node_signing_with_its_own_key() {
+    let text = federation("NODE_KEY_B");
+    let config = run(&[("server.toml", &text)]).expect("valid");
+    let federation = config.federation.as_ref().expect("[federation]");
+    assert_eq!(federation.default_nodes, [Id::parse("central").unwrap()]);
+    assert_eq!(federation.push_interval.get().as_secs(), 15);
+    assert_eq!(federation.grace.get().as_secs(), 60);
+    let dmz = &config.nodes[1];
+    assert_eq!(dmz.push_to, [Id::parse("central").unwrap()]);
+    assert!(!dmz.retired);
+    let key = NodeKey::parse(config.server.node_key.as_ref().unwrap().expose()).unwrap();
+    assert!(dmz.public_keys.contains(&key.public_key()));
+
+    // The key is shown by where it came from, never by its value.
+    let shown = serde_json::to_string(&config).unwrap();
+    assert!(
+        shown.contains("<redacted from ${ENV:NODE_KEY_B}>"),
+        "{shown}"
+    );
+    assert!(!shown.contains(&NodeKey::from_seed([2; 32]).expose()));
+}
+
+#[test]
+fn a_node_key_copied_to_the_wrong_host_names_the_node_it_runs_as() {
+    let text = federation("NODE_KEY_A");
+    let diagnostic = only_error(&[("server.toml", &text)]);
+    assert_eq!(diagnostic.location().as_deref(), Some("server.toml:3:12"));
+    assert_eq!(
+        diagnostic.message,
+        format!(
+            "the key in `NODE_KEY_A` is not listed under node `dmz-1`: its public key is {}",
+            public(1)
+        )
+    );
+
+    let text = federation("NODE_KEY_BROKEN");
+    let diagnostic = only_error(&[("server.toml", &text)]);
+    assert!(
+        diagnostic
+            .message
+            .starts_with("the value of `NODE_KEY_BROKEN` is not a node key"),
+        "{}",
+        diagnostic.message
+    );
+    assert!(!diagnostic.to_string().contains("NODE-KEY-SECRET"));
+}
+
+#[test]
+fn a_node_that_pushes_needs_a_node_key() {
+    let text = federation("NODE_KEY_B").replace("node_key = \"${ENV:NODE_KEY_B}\"\n", "");
+    let diagnostic = only_error(&[("server.toml", &text)]);
+    assert!(
+        diagnostic
+            .message
+            .starts_with("node `dmz-1` pushes to other nodes, so `[server] node_key` is required"),
+        "{}",
+        diagnostic.message
+    );
+}
+
+#[test]
+fn federation_and_nodes_come_together() {
+    assert_eq!(
+        errors(&[(
+            "a.toml",
+            "[server]\nnode_id = \"probe-a\"\n[[node]]\nid = \"probe-a\"\n"
+        )]),
+        ["a.toml:3:1: `[[node]]` is listed, so `[federation]` is required"]
+    );
+    assert_eq!(
+        errors(&[("a.toml", "[federation]\ndefault_nodes = []\n")]),
+        ["a.toml:1:1: `[federation]` needs at least one `[[node]]`"]
+    );
+    assert_eq!(
+        errors(&[("a.toml", "[server]\nnode_key = \"${ENV:NODE_KEY_A}\"\n")]),
+        ["a.toml:2:12: `node_key` signs pushes to other nodes, and no `[[node]]` is listed"]
+    );
+}
+
+#[test]
+fn federation_references_are_checked() {
+    let text = format!(
+        "[server]\nnode_id = \"a\"\n\n\
+         [[node]]\nid = \"a\"\npush_to = [\"a\", \"b\", \"c\", \"c\"]\npublic_keys = [\"{one}\", \"{one}\"]\n\n\
+         [[node]]\nid = \"b\"\npublic_keys = [\"{two}\"]\n\n\
+         [[node]]\nid = \"c\"\nurl = \"https://c.example.com\"\nretired = true\npublic_keys = [\"{two}\"]\n\n\
+         [federation]\ndefault_nodes = [\"a\", \"a\", \"c\"]\nalert_order = [\"d\"]\npush_interval = \"0s\"\n",
+        one = public(1),
+        two = public(2),
+    );
+    let found = errors(&[("f.toml", &text)]);
+    let expected = [
+        "f.toml:6:11: node `a` pushes to other nodes, so `[server] node_key` is required to sign its pushes".to_owned(),
+        "f.toml:6:12: a node does not push to itself".to_owned(),
+        "f.toml:6:17: node `b` has no `url` to take pushes at".to_owned(),
+        "f.toml:6:22: node `c` is retired".to_owned(),
+        "f.toml:6:27: `c` is listed twice".to_owned(),
+        format!("f.toml:7:{}: public key `{}` is listed twice", 16 + public(1).len() + 4, public(1)),
+        format!(
+            "f.toml:17:16: public key `{}` is also listed under node `b` at f.toml:11:16",
+            public(2)
+        ),
+        "f.toml:20:23: `a` is listed twice".to_owned(),
+        "f.toml:20:28: node `c` is retired".to_owned(),
+        "f.toml:21:16: unknown node `d`".to_owned(),
+        "f.toml:22:17: `push_interval` must be longer than 0s".to_owned(),
+    ];
+    assert_eq!(found, expected);
 }

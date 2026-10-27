@@ -717,6 +717,48 @@
         }
       ]
     },
+    "Federation": {
+      "additionalProperties": false,
+      "description": "`[federation]`: settings every node of a federation shares. Required\nonce any `[[node]]` is listed.",
+      "properties": {
+        "alert_order": {
+          "description": "The nodes that alert for outages other nodes report, in order: a\nnode alerts only while every node ahead of it is down.",
+          "items": {
+            "$ref": "#/definitions/Id"
+          },
+          "type": "array"
+        },
+        "default_nodes": {
+          "description": "The nodes a check with no `nodes` of its own runs on.",
+          "items": {
+            "$ref": "#/definitions/Id"
+          },
+          "type": "array"
+        },
+        "grace": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Duration"
+            }
+          ],
+          "default": "1m",
+          "description": "How long past `push_interval` a node may go unheard before the\nnodes it pushes to count it down."
+        },
+        "push_interval": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Duration"
+            }
+          ],
+          "default": "15s",
+          "description": "How often each node pushes to the nodes in its `push_to`, with\nnothing new if need be, so the push doubles as a heartbeat."
+        }
+      },
+      "required": [
+        "default_nodes"
+      ],
+      "type": "object"
+    },
     "Group": {
       "additionalProperties": false,
       "description": "`[[group]]`: a heading collecting components on the status page.",
@@ -1085,7 +1127,7 @@
     },
     "Node": {
       "additionalProperties": false,
-      "description": "`[[node]]`: one tocsin server of a federation.\n\nToday a node is only a name: listing nodes makes `node_id` required and\nlimits it to the listed ids. Without any `[[node]]`, a single server\nruns as before, named by `node_id` or its hostname.",
+      "description": "`[[node]]`: one tocsin server of a federation.\n\nListing nodes makes `node_id` required and limits it to the listed ids.\nWithout any `[[node]]`, a single server runs as before, named by\n`node_id` or its hostname.",
       "properties": {
         "id": {
           "allOf": [
@@ -1094,6 +1136,32 @@
             }
           ],
           "description": "The node's id, which a server running as it gives as `--node`,\n`TOCSIN_NODE_ID` or `[server] node_id`."
+        },
+        "public_keys": {
+          "description": "The public keys of the node's `[server] node_key`, as `tocsin node\nkeygen` prints them. A push from the node is accepted if any of\nthem verifies it, so two are listed during a rotation.",
+          "items": {
+            "$ref": "#/definitions/PublicKey"
+          },
+          "type": "array"
+        },
+        "push_to": {
+          "description": "The nodes this node pushes its results and outages to. Each needs\na `url`.",
+          "items": {
+            "$ref": "#/definitions/Id"
+          },
+          "type": "array"
+        },
+        "retired": {
+          "default": false,
+          "description": "Whether the node has been decommissioned. Its entry stays, so its\nid is never reused for another machine whose history would merge\ninto its own; no server may run as it.",
+          "type": "boolean"
+        },
+        "url": {
+          "description": "Where the node takes pushes from other nodes. Omit it for a node\nthat only pushes.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -1535,6 +1603,11 @@
       ],
       "type": "object"
     },
+    "PublicKey": {
+      "description": "An Ed25519 public key: \"ed25519:\" and 32 bytes of base64, as `tocsin node keygen` prints it.",
+      "pattern": "^ed25519:[A-Za-z0-9+/]{43}=$",
+      "type": "string"
+    },
     "PushoverSettings": {
       "additionalProperties": false,
       "description": "`[notifier.pushover]`.",
@@ -1792,6 +1865,17 @@
             "string",
             "null"
           ]
+        },
+        "node_key": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "This node's private key, which signs its pushes to other nodes, as\n`tocsin node keygen` prints it. Its public key must be listed under\nthe node's own `[[node]]`, or the server will not start. Secret."
         },
         "public_url": {
           "description": "The URL people reach the status page at, used in links and emails.",
@@ -2257,6 +2341,17 @@
         "$ref": "#/definitions/Component"
       },
       "type": "array"
+    },
+    "federation": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Federation"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Settings every node of a federation shares. At most one file may\nhold `[federation]`; it is required once any `[[node]]` is listed."
     },
     "group": {
       "description": "Headings that collect components on the status page.",

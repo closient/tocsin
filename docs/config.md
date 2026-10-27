@@ -118,6 +118,7 @@ Fields marked **may be secret** take either a value written in the file or an en
 | `data_dir` | path | none | Folder for the SQLite database. A relative path is relative to the config folder. `tocsin serve --data` overrides it; one of the two is required. |
 | `retention_days` | integer | `90` | Whole UTC days of raw check results kept before today; daily rollups are kept forever. At least 1. See [storage.md](storage.md#retention). |
 | `max_concurrent_checks` | integer | `64` | Most probes running at once across all checks; the rest wait for a slot. At least 1. See [engine.md](engine.md#scheduling). |
+| `node_key` | **secret** | none | This node's private key, which signs what it pushes to other [nodes](#node), as `tocsin node keygen` prints it. Required when this node's `push_to` names any node. Its public key must be in this node's `public_keys`, or the server will not start: a key copied to the wrong host fails there, naming the node it runs as and the key's public half, never the key. |
 | `max_silence` | duration | `"24h"` | The furthest ahead a [silence](alerting.md#silences) may expire when it is made. Not zero. Nothing extends a silence, so a longer one is a new one. |
 
 ### `[server.email]`
@@ -468,19 +469,43 @@ The list is usually generated from the map into a file of its own in the configu
 
 The servers that make up one tocsin, for when it runs on more than one host. Without any, a single server is named by `[server] node_id`, defaulting to its hostname, as before. Once one is listed, every server must be told which it is, by `--node <id>` (on `serve`, `probe run`, `notify test`, `slack setup`, `config check` and `config show`), `TOCSIN_NODE_ID`, or `[server] node_id`, in that order; a node id it would take from the hostname, one that is not a well-formed id, or one not listed fails `tocsin config check`, with a suggestion when one is close. A [reload](#reloading) is checked as the same node the server started as.
 
-| Key | Type | |
-|-----|------|-|
-| `id` | id | The node's id: lowercase letters, digits and `-`, unique among nodes across every file. |
+| Key | Type | Default | |
+|-----|------|---------|-|
+| `id` | id | required | The node's id: lowercase letters, digits and `-`, unique among nodes across every file. A retired id is never reused. |
+| `url` | URL | none | Where other nodes reach this one to push to it. `http://` or `https://`. Omit it for a node that only pushes; required on any node another node's `push_to` names. |
+| `public_keys` | strings | `[]` | The public halves of this node's keys, `ed25519:` and 44 characters of base64, as `tocsin node keygen` prints them. Safe to commit. A push is accepted when any of them verifies it, so list the old and the new key while rotating, then drop the old. No key may be listed under two nodes. |
+| `push_to` | node ids | `[]` | The nodes this one pushes its results to. Not itself, not a retired node, and each with a `url`. A node that pushes needs [`[server] node_key`](#server). |
+| `retired` | boolean | `false` | The node no longer runs. Its id and history stay; no server may run as it, and nothing may push to it or name it in `[federation]`. |
 
 ```toml
 [[node]]
 id = "operations-01"
+url = "https://tocsin-operations-01.example.com"
+public_keys = ["ed25519:INynTZPXvdmWItw9MOz3jik6ZZhKg7HSIJE7pzLgnss="]
 
 [[node]]
 id = "replication-03"
+public_keys = ["ed25519:tapdopNJLANrwWdogCAa+pqNDh0fdoUjFSnBcLZXgrk="]
+push_to = ["operations-01"]
+
+[federation]
+default_nodes = ["operations-01"]
 ```
 
+Each node makes its own key pair with `tocsin node keygen`: the public key goes under its `[[node]]`, and the private key into the secret store its host reads `[server] node_key` from, such as `TOCSIN_NODE_KEY`. A push is signed over the sending node's id, the store it comes from and its body, so one node's key cannot speak for another. This release loads and checks these fields; nodes do not push yet.
+
 Naming nodes explicitly keeps the id from changing under a server when its host is renamed. A single server named by its hostname warns at startup when its database holds outages still open under another node id, naming each node and what is out on it: those were opened before a rename, and nothing will end them until `node_id` is set back to the old name.
+
+## `[federation]`
+
+How the [nodes](#node) share the work. Required once any `[[node]]` is listed, and an error without one. At most one file may hold `[federation]`.
+
+| Key | Type | Default | |
+|-----|------|---------|-|
+| `default_nodes` | node ids | required | The nodes a check runs on unless it names its own. At least one; none retired, none listed twice. |
+| `push_interval` | duration | `"15s"` | How often each node pushes to the nodes in its `push_to`, with nothing new if need be, so the push doubles as a heartbeat. Not zero. |
+| `grace` | duration | `"60s"` | How long past `push_interval` a node may go unheard before the nodes it pushes to count it down. |
+| `alert_order` | node ids | `[]` | The nodes that alert for outages other nodes report, in order: a node alerts only while every node ahead of it is down. None retired, none listed twice. |
 
 ## `[subscribers]`
 

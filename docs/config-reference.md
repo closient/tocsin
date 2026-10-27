@@ -240,6 +240,19 @@ A `[[check.link]]` or `[[heartbeat.link]]`: a named link to somewhere an operato
 | `public` | boolean |  | `true` | Whether the status page and the unauthenticated API show the component. A non-public component, its checks and heartbeats, their outages and its timeline are seen only with a `status:read` token and on the internal board, under its group like any other. No incident or maintenance may name one. |
 | `rule` | [`ComponentRule`](#type-componentrule) |  | `"worst"` | How the health of the component's checks combines into its own. |
 
+<a id="table-federation"></a>
+
+### `[federation]`
+
+`[federation]`: settings every node of a federation shares. Required once any `[[node]]` is listed.
+
+| Key | Type | Required | Default | Description |
+|-----|------|----------|---------|-------------|
+| `alert_order` | array of [`Id`](#type-id) |  |  | The nodes that alert for outages other nodes report, in order: a node alerts only while every node ahead of it is down. |
+| `default_nodes` | array of [`Id`](#type-id) | yes |  | The nodes a check with no `nodes` of its own runs on. |
+| `grace` | [`Duration`](#type-duration) |  | `"1m"` | How long past `push_interval` a node may go unheard before the nodes it pushes to count it down. |
+| `push_interval` | [`Duration`](#type-duration) |  | `"15s"` | How often each node pushes to the nodes in its `push_to`, with nothing new if need be, so the push doubles as a heartbeat. |
+
 <a id="table-group"></a>
 
 ### `[[group]]`
@@ -277,11 +290,15 @@ A `[[check.link]]` or `[[heartbeat.link]]`: a named link to somewhere an operato
 
 `[[node]]`: one tocsin server of a federation.
 
-Today a node is only a name: listing nodes makes `node_id` required and limits it to the listed ids. Without any `[[node]]`, a single server runs as before, named by `node_id` or its hostname.
+Listing nodes makes `node_id` required and limits it to the listed ids. Without any `[[node]]`, a single server runs as before, named by `node_id` or its hostname.
 
 | Key | Type | Required | Default | Description |
 |-----|------|----------|---------|-------------|
 | `id` | [`Id`](#type-id) | yes |  | The node's id, which a server running as it gives as `--node`, `TOCSIN_NODE_ID` or `[server] node_id`. |
+| `public_keys` | array of [`PublicKey`](#type-publickey) |  |  | The public keys of the node's `[server] node_key`, as `tocsin node keygen` prints them. A push from the node is accepted if any of them verifies it, so two are listed during a rotation. |
+| `push_to` | array of [`Id`](#type-id) |  |  | The nodes this node pushes its results and outages to. Each needs a `url`. |
+| `retired` | boolean |  | `false` | Whether the node has been decommissioned. Its entry stays, so its id is never reused for another machine whose history would merge into its own; no server may run as it. |
+| `url` | string |  |  | Where the node takes pushes from other nodes. Omit it for a node that only pushes. |
 
 <a id="table-notifier"></a>
 
@@ -471,6 +488,7 @@ A destination for operator alerts. Every alert it sends is followed by a resolve
 | `max_concurrent_checks` | integer, ≥ 1 |  | `64` | The most checks that may run at once across the node. Checks due while the limit is reached wait for a free slot. |
 | `max_silence` | [`Duration`](#type-duration) |  | `"1d"` | The longest a silence may last: a silence's expiry, given as `expires_at` or `expires_in`, must be at most this far ahead when it is made. Nothing extends a silence, so a longer one is a new one, made by someone. |
 | `node_id` | string |  |  | This node's name in every result it records. Defaults to the hostname. |
+| `node_key` | [`Secret`](#type-secret) |  |  | This node's private key, which signs its pushes to other nodes, as `tocsin node keygen` prints it. Its public key must be listed under the node's own `[[node]]`, or the server will not start. Secret. |
 | `public_url` | string |  |  | The URL people reach the status page at, used in links and emails. |
 | `retention_days` | integer |  | `90` | Days of check results kept. |
 
@@ -747,6 +765,14 @@ What kind of probe a check or heartbeat is, carried on its alerts as the `class`
 | `"test"` | Exercises tocsin or a receiver; its alerts are not outages. |
 | `"drill"` | A rehearsal of an outage, such as a paging drill. |
 | `"canary"` | Watches a canary, which is expected to fail now and then. |
+
+<a id="type-publickey"></a>
+
+### `PublicKey`
+
+An Ed25519 public key: "ed25519:" and 32 bytes of base64, as `tocsin node keygen` prints it.
+
+A string matching `^ed25519:[A-Za-z0-9+/]{43}=$`.
 
 <a id="type-recordtype"></a>
 

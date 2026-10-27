@@ -7,6 +7,7 @@
 
 pub mod alert;
 pub mod config;
+pub mod federation;
 pub mod health;
 pub mod incident;
 pub mod link;

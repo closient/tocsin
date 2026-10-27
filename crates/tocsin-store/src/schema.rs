@@ -32,6 +32,7 @@ static MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("../migrations/0016_alert_ended_by.sql")),
     M::up(include_str!("../migrations/0017_alert_history_index.sql")),
     M::up(include_str!("../migrations/0018_node_store.sql")),
+    M::up(include_str!("../migrations/0019_federation.sql")),
 ];
 
 /// How long a connection waits for another process's lock before failing.
@@ -342,5 +343,60 @@ mod tests {
             [],
         );
         assert!(everything.is_err(), "a silence matched every alert");
+    }
+
+    /// Outages from before migration 19 are numbered in id order, each end
+    /// straight after its open, and this store's counter picks up after them.
+    #[test]
+    fn outages_before_migration_19_get_seqs_in_id_order() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let migrations = super::migrations();
+        migrations.to_version(&mut conn, 18).unwrap();
+        conn.execute_batch(
+            "INSERT INTO outage (node_id, check_id, health, started_at, ended_at, ending)
+                 VALUES ('node-a', 'web', 'down', 1000, 2000, 'recovered');
+             INSERT INTO outage (node_id, check_id, health, started_at)
+                 VALUES ('node-a', 'web', 'degraded', 3000);",
+        )
+        .unwrap();
+        migrations.to_latest(&mut conn).unwrap();
+        let seqs: Vec<(i64, Option<i64>)> = conn
+            .prepare("SELECT opened_seq, ended_seq FROM outage ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(seqs, [(1, Some(2)), (3, None)]);
+        let next: i64 = conn
+            .query_row(
+                "SELECT next_seq FROM node_store WHERE local = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(next, 4);
+        let unnumbered = conn.execute(
+            "INSERT INTO outage (node_id, check_id, health, started_at)
+                 VALUES ('node-a', 'api', 'down', 4000)",
+            [],
+        );
+        assert!(unnumbered.is_err(), "an outage opened without a seq");
+        let unsequenced = conn.execute(
+            "UPDATE outage SET ended_at = 5000, ending = 'recovered' WHERE id = 2",
+            [],
+        );
+        assert!(unsequenced.is_err(), "an outage ended without a seq");
+        let renumbered = conn.execute(
+            "UPDATE outage SET ended_at = 5000, ending = 'recovered', ended_seq = 4,
+                 opened_seq = 2 WHERE id = 2",
+            [],
+        );
+        assert!(renumbered.is_err(), "an outage's opened_seq changed");
+        conn.execute(
+            "UPDATE outage SET ended_at = 5000, ending = 'recovered', ended_seq = 4 WHERE id = 2",
+            [],
+        )
+        .unwrap();
     }
 }

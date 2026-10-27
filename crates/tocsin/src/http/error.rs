@@ -151,8 +151,8 @@ impl From<tocsin_store::Error> for ApiError {
     fn from(error: tocsin_store::Error) -> Self {
         match error {
             tocsin_store::Error::Invalid(fields) => ApiError::invalid(fields),
-            published @ tocsin_store::Error::Published(_) => {
-                ApiError::conflict(published.to_string())
+            conflict @ (tocsin_store::Error::Published(_) | tocsin_store::Error::Conflict(_)) => {
+                ApiError::conflict(conflict.to_string())
             }
             other => ApiError::internal(&other),
         }

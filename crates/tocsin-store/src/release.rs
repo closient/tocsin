@@ -18,11 +18,11 @@ use tocsin_core::release::{
     TimelineEvent,
 };
 
-use crate::FUTURE_TOLERANCE;
 use crate::error::{Error, Result};
 use crate::history::{Checks, SHOWN, ending, subject_kind};
 use crate::incident::{Drafts, actor, snapshot, text};
 use crate::rollup::parse_column;
+use crate::{FUTURE_TOLERANCE, future_horizon_ms};
 
 const RELEASE_COLUMNS: &str = "id, project_id, version, environment, title, notes, url, \
      released_at, deployed_at, created_at, created_by_kind, created_by, updated_at, \
@@ -128,9 +128,8 @@ pub enum Written {
 /// past `now`: a typo such as 3026 for 2026 would otherwise sit at the
 /// top of every list and timeline for a thousand years.
 fn check_not_future(path: &str, time: Option<Timestamp>, now: Timestamp) -> Result<()> {
-    let tolerance_ms = i64::try_from(FUTURE_TOLERANCE.as_millis()).unwrap_or(i64::MAX);
     match time {
-        Some(time) if time.as_millis() > now.as_millis().saturating_add(tolerance_ms) => {
+        Some(time) if time.as_millis() > future_horizon_ms(now.as_millis()) => {
             Err(Error::Invalid(vec![FieldError::new(
                 path,
                 format!(

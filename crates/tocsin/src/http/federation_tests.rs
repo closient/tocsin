@@ -90,7 +90,7 @@ scopes = ["status:read"]
 }
 
 struct Api {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     state: AppState,
     router: Router,
 }
@@ -127,7 +127,7 @@ fn api() -> Api {
         slack: None,
     };
     Api {
-        _dir: dir,
+        dir,
         router: router(state.clone()),
         state,
     }
@@ -190,11 +190,13 @@ fn end(seq: i64, origin_id: i64, ended_at: Timestamp) -> BatchOutageChange {
     }
 }
 
-/// How a push is sent: by whom, from which store, signed with which key.
+/// How a push is sent: by whom, from which store, signed with which key,
+/// and over which store when not the one named.
 struct Push<'a> {
     node: Option<&'a str>,
     store: Option<&'a str>,
     key: Option<NodeKey>,
+    signed_store: Option<&'a str>,
 }
 
 impl Default for Push<'_> {
@@ -203,6 +205,7 @@ impl Default for Push<'_> {
             node: Some("spoke"),
             store: Some(STORE),
             key: Some(spoke_key()),
+            signed_store: None,
         }
     }
 }
@@ -241,7 +244,7 @@ impl Api {
         if let Some(key) = push.key {
             let signature = key.sign(
                 push.node.unwrap_or_default(),
-                push.store.unwrap_or_default(),
+                push.signed_store.or(push.store).unwrap_or_default(),
                 &body,
             );
             request = request.header(wire::SIGNATURE_HEADER, signature);
@@ -352,7 +355,7 @@ async fn every_push_that_does_not_prove_its_node_gets_the_same_401() {
         // Signed over another store than the one named.
         Push {
             store: Some("fedcba9876543210fedcba9876543210"),
-            key: None,
+            signed_store: Some(STORE),
             ..Push::default()
         },
     ];
@@ -452,6 +455,32 @@ async fn a_store_resending_an_outage_differently_conflicts() {
     let (status, body) = api.push(&differing).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["error"], "conflict", "{body}");
+}
+
+#[tokio::test]
+async fn a_conflicted_node_is_refused_until_one_machine_is_retired() {
+    let api = api();
+    let (status, body) = api.push(&batch()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // Nothing marks a store conflicted yet (TOC-82), so the test does.
+    let database = rusqlite::Connection::open(api.dir.path().join(tocsin_store::DB_FILE)).unwrap();
+    database
+        .execute(
+            "UPDATE node_store SET state = 'conflicted' WHERE local = 0",
+            [],
+        )
+        .unwrap();
+
+    let mut sent = batch();
+    sent.results = vec![result(1, "spoke")];
+    let (status, body) = api.push(&sent).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "conflict", "{body}");
+    assert!(body["message"].as_str().unwrap().contains(STORE), "{body}");
+    let results: i64 = database
+        .query_row("SELECT count(*) FROM check_result", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(results, 0);
 }
 
 #[tokio::test]

@@ -46,7 +46,7 @@ use tocsin_core::status::{CheckResult, OutageRecord};
 
 pub use crate::alert::{
     AlertRouting, AlertTarget, DeliveryKind, DeliveryOutcome, DeliveryPrune, DeliveryRetention,
-    FailedDelivery, OutageAlerts, Outbox, PendingDelivery, StoredAlert, SubjectKind,
+    EndedBy, FailedDelivery, OutageAlerts, Outbox, PendingDelivery, StoredAlert, SubjectKind,
 };
 use crate::checkpoint::Checkpointer;
 pub use crate::day::Day;
@@ -462,10 +462,12 @@ impl Store {
 
     /// Withdraws outage `id`, whose check or heartbeat is no longer
     /// configured: ends it at `now_ms` (or its start, if later) and, in the
-    /// same transaction, ends every alert firing for its identity without a
-    /// resolve, since nobody saw it recover. An alert that rang gets a
-    /// cancel, so it stops ringing. Withdrawing an outage that is not open
-    /// does nothing. Resolves with the deliveries queued.
+    /// same transaction, ends every alert firing for its identity as
+    /// [`EndedBy::Config`] and queues its resolve, which says the
+    /// configuration ended it rather than claim a recovery nobody saw. An
+    /// alert that rang also gets a cancel, so it stops ringing. Withdrawing
+    /// an outage that is not open does nothing. Resolves with the
+    /// deliveries queued.
     ///
     /// # Errors
     ///
@@ -477,10 +479,12 @@ impl Store {
     }
 
     /// Ends every open alert whose notifier is not among `notifiers` at
-    /// `now_ms`, queueing nothing, since no notifier is left to send
-    /// through. Deliveries already queued for those alerts are abandoned
-    /// by the worker as they come due, so they still count in its metrics.
-    /// Resolves with how many alerts it ended.
+    /// `now_ms` as [`EndedBy::Config`], queueing its resolve (and its
+    /// cancel, if it rings). After a reload the worker still holds the
+    /// removed notifier and sends them through it; after a restart nothing
+    /// can, and the worker records each resolve as failed and counts it in
+    /// `tocsin_alerts_abandoned_total`. Resolves with how many alerts it
+    /// ended.
     ///
     /// # Errors
     ///
@@ -492,6 +496,21 @@ impl Store {
     ) -> Result<usize> {
         self.writer
             .run(move |conn| alert::end_alerts_without_notifier(conn, &notifiers, now_ms))
+            .await
+    }
+
+    /// Every notifier among `notifiers` that still has an open alert or a
+    /// pending delivery: the worker keeps a removed notifier until none is
+    /// left, so it can send the resolves the removal queued.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn notifiers_with_unfinished_alerts(
+        &self,
+        notifiers: Vec<String>,
+    ) -> Result<Vec<String>> {
+        self.read(move |conn| alert::notifiers_with_unfinished_alerts(conn, &notifiers))
             .await
     }
 

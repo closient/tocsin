@@ -22,7 +22,8 @@ use tocsin_alert::notifiers::webhook::{self, SIGNATURE_HEADER, TIMESTAMP_HEADER,
 use tocsin_alert::{Alert, AlertEvent, Notifier, SlackHooks};
 use tocsin_core::{Health, config};
 use tocsin_store::{
-    NewSlackConnection, Preferences, SlackHook, SlackPurpose, Store, SubjectKind, WebhookUrl,
+    EndedBy, NewSlackConnection, Preferences, SlackHook, SlackPurpose, Store, SubjectKind,
+    WebhookUrl,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -48,6 +49,7 @@ fn alert(event: AlertEvent) -> Alert {
         health: Health::Down,
         started_at_ms: STARTED,
         ended_at_ms: resolve.then_some(ENDED),
+        ended_by: resolve.then_some(EndedBy::Recovery),
         sent_at_ms: if resolve { ENDED } else { STARTED },
         delivery_id: Some(if resolve { 2 } else { 1 }),
         test: false,
@@ -473,11 +475,13 @@ fn alertmanager_routes_on_configured_labels_and_keeps_its_own() {
 
 #[test]
 fn the_names_configuration_may_not_use_are_every_name_alertmanager_sets() {
-    // A test alert with a component sets every label and annotation
-    // tocsin has; the configuration is refused exactly these.
+    // A test alert with a component, resolved by a reload that removed its
+    // check, sets every label and annotation tocsin has; the configuration
+    // is refused exactly these.
     let alert = Alert {
         test: true,
-        ..alert(AlertEvent::Fire)
+        ended_by: Some(EndedBy::Config),
+        ..alert(AlertEvent::Resolve)
     };
     let posted = alertmanager::payload(&alert);
     let mut labels: Vec<&str> = posted[0]["labels"]
@@ -510,6 +514,31 @@ fn a_webhook_carries_configured_labels_and_annotations() {
     let bare = webhook::payload(&alert(AlertEvent::Fire));
     assert_eq!(bare["labels"], serde_json::json!({}));
     assert_eq!(bare["annotations"], serde_json::json!({}));
+}
+
+#[test]
+fn a_resolve_the_configuration_ended_says_so_and_keeps_what_the_fire_had() {
+    let fire = labelled(AlertEvent::Fire);
+    let ended = Alert {
+        ended_by: Some(EndedBy::Config),
+        ..labelled(AlertEvent::Resolve)
+    };
+    let (fired, resolved) = (webhook::payload(&fire), webhook::payload(&ended));
+    assert_eq!(resolved["status"], "resolved");
+    assert_eq!(resolved["identity"], fired["identity"]);
+    assert_eq!(resolved["labels"], fired["labels"]);
+    assert_eq!(resolved["annotations"]["ticket"], "OPS-1");
+    assert_eq!(resolved["annotations"]["ended_by"], "config");
+    assert!(fired["annotations"].get("ended_by").is_none());
+    assert!(resolved["title"].as_str().unwrap().starts_with("[ENDED] "));
+
+    let (fired, resolved) = (alertmanager::payload(&fire), alertmanager::payload(&ended));
+    assert_eq!(resolved[0]["labels"], fired[0]["labels"]);
+    assert_eq!(resolved[0]["annotations"]["ended_by"], "config");
+    assert_eq!(resolved[0]["endsAt"], "2027-01-15T08:01:30.000Z");
+    // A recovery is resolved as before.
+    let recovered = webhook::payload(&labelled(AlertEvent::Resolve));
+    assert!(recovered["annotations"].get("ended_by").is_none());
 }
 
 #[tokio::test]

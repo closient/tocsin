@@ -35,8 +35,16 @@
 //!
 //! [`Alerter::reconfigure`] swaps the notifiers and routes without a
 //! restart. A send already in flight finishes on the notifier it started
-//! on; a pending delivery to a notifier that is no longer configured fails
-//! for good.
+//! on. A notifier the reload removed is kept, retiring, for the last
+//! messages of its alerts: once an alert of it has ended (the reload ends
+//! them all, queueing each one's resolve), its pending deliveries go out
+//! through it as before, and it is let go when nothing of it is left. A
+//! pending delivery to a notifier the worker never had, one removed while
+//! tocsin was stopped, fails for good.
+//!
+//! An alert whose resolve fails for good ended with no resolve delivered:
+//! the worker logs it as an error and counts it in
+//! `tocsin_alerts_abandoned_total`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -47,8 +55,8 @@ use tocsin_core::silence::Target;
 use tocsin_core::status::CheckKind;
 use tocsin_engine::ports::Clock;
 use tocsin_store::{
-    ActiveSilence, DeliveryKind, DeliveryOutcome, DeliveryRetention, PendingDelivery, Store,
-    StoredAlert, SubjectKind,
+    ActiveSilence, DeliveryKind, DeliveryOutcome, DeliveryRetention, EndedBy, PendingDelivery,
+    Store, StoredAlert, SubjectKind,
 };
 use tokio::sync::{Notify, watch};
 use tokio::task::{self, JoinHandle, JoinSet};
@@ -201,6 +209,7 @@ impl Lane {
 struct InFlight {
     delivery_id: i64,
     alert_id: i64,
+    kind: DeliveryKind,
     lane: Lane,
     notifier_id: String,
     /// The alert's identity, for logs.
@@ -211,6 +220,10 @@ struct InFlight {
 struct Worker {
     store: Arc<Store>,
     notifiers: Notifiers,
+    /// Notifiers a reconfigure removed, kept to send the last messages of
+    /// their alerts once those have ended; each is let go when the store
+    /// shows it has no open alert and no pending delivery left.
+    retiring: Notifiers,
     router: Arc<Router>,
     clock: Arc<dyn Clock>,
     metrics: AlertMetrics,
@@ -247,6 +260,7 @@ impl Alerter {
         let worker = Worker {
             store,
             notifiers,
+            retiring: Notifiers::new(),
             router,
             clock,
             metrics,
@@ -270,8 +284,11 @@ impl Alerter {
 
     /// Sends with `notifiers` and `router` from now on. Sends in flight
     /// finish on the notifier they started on; pending deliveries go to
-    /// the new notifier of the same id, or fail for good when there is
-    /// none.
+    /// the new notifier of the same id. A notifier `notifiers` no longer
+    /// has retires: it sends nothing more for an alert that is still open,
+    /// but once one has ended (the caller ends them with
+    /// [`Store::end_alerts_without_notifier`], which queues their
+    /// resolves), it sends what that alert has pending, then goes.
     pub fn reconfigure(&self, notifiers: Notifiers, router: Arc<Router>) {
         self.setup.send_replace(Setup { notifiers, router });
     }
@@ -363,21 +380,53 @@ impl Worker {
         self.shut_down().await;
     }
 
-    /// Takes the latest notifiers and routes, and forgets what it knew of
-    /// notifiers that are gone. A gone notifier's sends in flight still
+    /// Takes the latest notifiers and routes. A notifier that is gone
+    /// retires, and one configured again stops retiring; the worker forgets
+    /// what it knew of the rest. A gone notifier's sends in flight still
     /// count against it until they finish.
     fn reconfigure(&mut self) {
         let Setup { notifiers, router } = self.setup.borrow_and_update().clone();
-        self.notifiers = notifiers;
+        let previous = std::mem::replace(&mut self.notifiers, notifiers);
         self.router = router;
         let notifiers = &self.notifiers;
-        self.paused_until.retain(|id, _| notifiers.contains_key(id));
-        self.sending
-            .retain(|id, sending| *sending > 0 || notifiers.contains_key(id));
+        for (id, notifier) in previous {
+            if !notifiers.contains_key(&id) {
+                self.retiring.insert(id, notifier);
+            }
+        }
+        self.retiring.retain(|id, _| !notifiers.contains_key(id));
+        let retiring = &self.retiring;
+        let known = |id: &String| notifiers.contains_key(id) || retiring.contains_key(id);
+        self.paused_until.retain(|id, _| known(id));
+        self.sending.retain(|id, sending| *sending > 0 || known(id));
         tracing::debug!(
             notifiers = self.notifiers.len(),
+            retiring = self.retiring.len(),
             "alert delivery reconfigured"
         );
+    }
+
+    /// Lets go of every retiring notifier with no open alert and no
+    /// pending delivery left. A send in flight holds its own handle.
+    async fn retire(&mut self) -> tocsin_store::Result<()> {
+        if self.retiring.is_empty() {
+            return Ok(());
+        }
+        let unfinished = self
+            .store
+            .notifiers_with_unfinished_alerts(self.retiring.keys().cloned().collect())
+            .await?;
+        self.retiring.retain(|id, _| {
+            let keep = unfinished.contains(id);
+            if !keep {
+                tracing::info!(notifier = %id, "a removed notifier sent its last messages");
+            }
+            keep
+        });
+        let (notifiers, retiring) = (&self.notifiers, &self.retiring);
+        self.paused_until
+            .retain(|id, _| notifiers.contains_key(id) || retiring.contains_key(id));
+        Ok(())
     }
 
     /// Queues due repeats and starts every due delivery whose alert lane
@@ -385,6 +434,7 @@ impl Worker {
     /// paused; returns when to look again. Repeats are queued, a write,
     /// only when one is due.
     async fn dispatch(&mut self, now: i64) -> tocsin_store::Result<i64> {
+        self.retire().await?;
         let mut silences = None;
         self.refire(now, &mut silences).await?;
         let mut outbox = self.store.outbox().await?;
@@ -404,6 +454,15 @@ impl Worker {
             if self
                 .busy
                 .contains(&(delivery.alert.id, Lane::of(delivery.kind)))
+            {
+                continue;
+            }
+            // A removed notifier sends only the last messages of an alert
+            // that has ended. Until the reload ends it, which queues its
+            // resolve and wakes the loop, its deliveries wait.
+            if !self.notifiers.contains_key(notifier_id)
+                && self.retiring.contains_key(notifier_id)
+                && delivery.alert.ended_at_ms.is_none()
             {
                 continue;
             }
@@ -562,12 +621,17 @@ impl Worker {
     fn spawn(&mut self, delivery: &PendingDelivery, now: i64) {
         let alert = self.message(delivery, now);
         let lane = Lane::of(delivery.kind);
-        let notifier = self.notifiers.get(&delivery.alert.notifier_id).cloned();
+        let notifier = self
+            .notifiers
+            .get(&delivery.alert.notifier_id)
+            .or_else(|| self.retiring.get(&delivery.alert.notifier_id))
+            .cloned();
         let notifier_id = delivery.alert.notifier_id.clone();
         let send_timeout = self.settings.send_timeout;
         let meta = InFlight {
             delivery_id: delivery.id,
             alert_id: delivery.alert.id,
+            kind: delivery.kind,
             lane,
             notifier_id: notifier_id.clone(),
             identity: alert.identity(),
@@ -625,6 +689,9 @@ impl Worker {
             ended_at_ms: (delivery.kind == DeliveryKind::Resolve)
                 .then_some(stored.ended_at_ms)
                 .flatten(),
+            // An alert that ended before tocsin recorded why recovered.
+            ended_by: (delivery.kind == DeliveryKind::Resolve)
+                .then(|| stored.ended_by.unwrap_or(EndedBy::Recovery)),
             sent_at_ms: now,
             delivery_id: Some(delivery.id),
             test: false,
@@ -698,6 +765,17 @@ impl Worker {
                 error = %error.message,
                 "alert delivery failed for good"
             );
+            if sent.kind == DeliveryKind::Resolve {
+                // Whoever saw it fire will not hear that it ended.
+                self.metrics.alert_abandoned();
+                tracing::error!(
+                    notifier = %sent.notifier_id,
+                    alert = %sent.identity,
+                    delivery = sent.delivery_id,
+                    error = %error.message,
+                    "alert abandoned: it ended, but its resolve could not be delivered"
+                );
+            }
             return DeliveryOutcome::Failed {
                 error: error.message,
             };

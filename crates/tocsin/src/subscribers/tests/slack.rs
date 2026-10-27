@@ -452,6 +452,7 @@ fn alert(event: AlertEvent) -> Alert {
         health: Health::Down,
         started_at_ms: now - 60_000,
         ended_at_ms: (event == AlertEvent::Resolve).then_some(now),
+        ended_by: (event == AlertEvent::Resolve).then_some(tocsin_store::EndedBy::Recovery),
         sent_at_ms: now,
         delivery_id: None,
         test: false,

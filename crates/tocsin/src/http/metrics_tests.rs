@@ -80,7 +80,7 @@ const READER: &str = "reader-secret-0123456789";
 const NODE: &str = "node-a";
 
 /// Every family `/metrics` serves.
-const FAMILIES: [&str; 12] = [
+const FAMILIES: [&str; 13] = [
     "tocsin_build_info",
     "tocsin_check_up",
     "tocsin_check_duration_seconds",
@@ -91,6 +91,7 @@ const FAMILIES: [&str; 12] = [
     "tocsin_config_last_error_timestamp",
     "tocsin_notification_failures_total",
     "tocsin_notifications_abandoned_total",
+    "tocsin_alerts_abandoned_total",
     "tocsin_db_size_bytes",
     "tocsin_otlp_export_failures_total",
 ];

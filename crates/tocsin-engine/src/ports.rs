@@ -80,9 +80,9 @@ pub trait History: Send + Sync + 'static {
         check_ids: Vec<String>,
     ) -> BoxFuture<'a, Result<Vec<LatestResult>>>;
     /// Ends outage `outage`, whose check or heartbeat is no longer
-    /// configured, at `at_ms`, and ends any alert it fired without a
-    /// resolve: nobody saw it recover. Ending one that is not open does
-    /// nothing.
+    /// configured, at `at_ms`, and ends any alert it fired with a resolve
+    /// that says the configuration ended it: nobody saw it recover. Ending
+    /// one that is not open does nothing.
     fn withdraw(&self, outage: i64, at_ms: i64) -> BoxFuture<'_, Result<()>>;
 }
 

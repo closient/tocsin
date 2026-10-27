@@ -316,8 +316,8 @@ cursor moves past it and its rollup covers it. A result from more than
   is never reused for a different machine whose history would merge into
   the old one).
 - The receiver refuses its pushes with 403, withdraws its open outages
-  (`ending = withdrawn`, alerts end without a resolve, as for a check
-  removed from config: [alerting.md](../alerting.md)), stops its liveness
+  (`ending = withdrawn`, alerts resolve as ended by the configuration, as
+  for a check removed from config: [alerting.md](../alerting.md)), stops its liveness
   watch, and keeps its history. Today a hub would never withdraw them,
   because `withdraw_orphans` only reads its own node's outages.
 - The bar sums nodes per day, so a retired node drops out from the first

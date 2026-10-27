@@ -89,9 +89,9 @@ pub fn labels(alert: &Alert) -> Map<String, Value> {
 #[must_use]
 pub fn annotations(alert: &Alert) -> Map<String, Value> {
     let mut annotations: Map<String, Value> = alert
-        .annotations
-        .iter()
-        .map(|(name, value)| (name.clone(), value.clone().into()))
+        .annotations()
+        .into_iter()
+        .map(|(name, value)| (name, value.into()))
         .collect();
     annotations.insert("summary".into(), alert.title().into());
     annotations.insert("description".into(), alert.body().into());

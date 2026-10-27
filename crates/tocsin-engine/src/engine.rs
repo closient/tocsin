@@ -387,8 +387,9 @@ impl Engine {
     ///   count towards the next change over. A check that becomes a
     ///   heartbeat, or the reverse, is removed and added.
     /// - One `plan` removes is stopped, and its open outage, if any, is
-    ///   withdrawn: ended now, its alerts ended without a resolve. Its
-    ///   results and past outages stay in history.
+    ///   withdrawn: ended now, its alerts ended with a resolve that says
+    ///   the configuration ended them. Its results and past outages stay
+    ///   in history.
     /// - Unchanged ones keep running untouched.
     ///
     /// Components are rebuilt from `plan`, and a status that moves because
@@ -747,8 +748,9 @@ fn publish<'a>(
 }
 
 /// Withdraws every outage this node has open for a check or heartbeat not
-/// in `running`, so it neither stays open forever nor ends with a resolve
-/// claiming a recovery nobody saw. A failure is logged, and the outage is
+/// in `running`, so it does not stay open forever; its alerts end with a
+/// resolve that says the configuration ended them, not one claiming a
+/// recovery nobody saw. A failure is logged, and the outage is
 /// tried again at the next reconcile or start.
 async fn withdraw_orphans(shared: &Shared, running: &HashSet<(SubjectKind, String)>) {
     let history = shared.parts.history.as_ref();
@@ -774,7 +776,7 @@ async fn withdraw_orphans(shared: &Shared, running: &HashSet<(SubjectKind, Strin
                 check = %outage.check_id,
                 outage = outage.id,
                 "withdrew the open outage of a check or heartbeat that is no longer configured; \
-                 its alerts end without a resolve"
+                 its alerts resolve as ended by the configuration"
             ),
             Err(error) => error!(
                 kind = %outage.subject_kind,

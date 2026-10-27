@@ -39,6 +39,16 @@ groups:
         annotations:
           summary: "tocsin gave up delivering alerts through {{ $labels.notifier }}"
 
+      # Each is an alert that ended but whose resolve no receiver got, so
+      # whoever saw it fire still sees it firing. Most often its notifier was
+      # removed while tocsin was stopped; tocsin's log names the alert.
+      - alert: TocsinAlertsAbandoned
+        expr: increase(tocsin_alerts_abandoned_total[15m]) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "tocsin ended alerts without delivering their resolves; see its log"
+
       # A notifier names a Slack channel nobody connected, or one Slack
       # revoked: every alert sent to it fails until it is connected again
       # on /admin/slack.

@@ -15,6 +15,8 @@ tests:
         values: "1 0"
       - series: 'tocsin_notifications_abandoned_total{notifier="pager"}'
         values: "0 0 1"
+      - series: "tocsin_alerts_abandoned_total"
+        values: "0 0 1"
       - series: 'tocsin_slack_connection_up{notifier="ops-slack",connection="ops-alerts"}'
         values: "1 0"
       - series: 'tocsin_slack_connection_up{notifier="team-slack",connection="team"}'
@@ -73,6 +75,16 @@ tests:
               notifier: pager
             exp_annotations:
               summary: "tocsin gave up delivering alerts through pager"
+      - eval_time: 1m
+        alertname: TocsinAlertsAbandoned
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: TocsinAlertsAbandoned
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+            exp_annotations:
+              summary: "tocsin ended alerts without delivering their resolves; see its log"
       - eval_time: 0m
         alertname: TocsinSlackConnectionDown
         exp_alerts: []

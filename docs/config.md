@@ -114,7 +114,7 @@ Fields marked **may be secret** take either a value written in the file or an en
 |-----|------|---------|-|
 | `listen` | `"ip:port"` | `"127.0.0.1:8080"` | Address the web server listens on: an IP address, not a hostname, such as `"0.0.0.0:8080"` or `"[::]:8080"`. |
 | `public_url` | URL | none | Where people reach the status page; used in links and emails. `http://` or `https://`. Required when `[server.auth]` is on. |
-| `node_id` | string | the hostname | This node's name in every result it records. No whitespace. |
+| `node_id` | string | the hostname | This node's name in every result it records. No whitespace. `--node <id>` or `TOCSIN_NODE_ID` wins over it. Once any [`[[node]]`](#node) is listed, it must be given, here or by those, as one of them. |
 | `data_dir` | path | none | Folder for the SQLite database. A relative path is relative to the config folder. `tocsin serve --data` overrides it; one of the two is required. |
 | `retention_days` | integer | `90` | Whole UTC days of raw check results kept before today; daily rollups are kept forever. At least 1. See [storage.md](storage.md#retention). |
 | `max_concurrent_checks` | integer | `64` | Most probes running at once across all checks; the rest wait for a slot. At least 1. See [engine.md](engine.md#scheduling). |
@@ -463,6 +463,24 @@ nodes = ["operations-01", "operations-01/job:backup", "production-01"]
 ```
 
 The list is usually generated from the map into a file of its own in the configuration folder, so a node added to the map is allowed from the next reload. `topology_node` is one of tocsin's own labels, so `[alerting]` cannot require it or limit its values; `[topology]` is how its values are checked.
+
+## `[[node]]`
+
+The servers that make up one tocsin, for when it runs on more than one host. Without any, a single server is named by `[server] node_id`, defaulting to its hostname, as before. Once one is listed, every server must be told which it is, by `--node <id>` (on `serve`, `probe run`, `notify test`, `slack setup`, `config check` and `config show`), `TOCSIN_NODE_ID`, or `[server] node_id`, in that order; a node id it would take from the hostname, one that is not a well-formed id, or one not listed fails `tocsin config check`, with a suggestion when one is close. A [reload](#reloading) is checked as the same node the server started as.
+
+| Key | Type | |
+|-----|------|-|
+| `id` | id | The node's id: lowercase letters, digits and `-`, unique among nodes across every file. |
+
+```toml
+[[node]]
+id = "operations-01"
+
+[[node]]
+id = "replication-03"
+```
+
+Naming nodes explicitly keeps the id from changing under a server when its host is renamed. A single server named by its hostname warns at startup when its database holds outages still open under another node id, naming each node and what is out on it: those were opened before a rename, and nothing will end them until `node_id` is set back to the old name.
 
 ## `[subscribers]`
 

@@ -32,6 +32,7 @@ fn variable(name: &str) -> Option<String> {
 pub fn check(text: &str) -> CompiledCheck {
     let environment = Environment {
         hostname: "probe-test".to_owned(),
+        node_id: None,
         variable: &variable,
     };
     let source = Source {

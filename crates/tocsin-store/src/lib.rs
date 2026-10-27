@@ -18,6 +18,7 @@ pub mod day;
 mod error;
 mod history;
 mod incident;
+mod node;
 mod outage;
 mod readers;
 mod release;
@@ -1270,6 +1271,29 @@ impl Store {
     pub async fn open_outages(&self, node_id: &str) -> Result<Vec<Outage>> {
         let node_id = node_id.to_owned();
         self.read(move |conn| outage::open(conn, &node_id)).await
+    }
+
+    /// Every outage open under a node other than `node_id`, ordered by
+    /// node, then check. A server running as `node_id` never seeds or ends
+    /// them.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn open_outages_elsewhere(&self, node_id: &str) -> Result<Vec<Outage>> {
+        let node_id = node_id.to_owned();
+        self.read(move |conn| outage::open_elsewhere(conn, &node_id))
+            .await
+    }
+
+    /// This database's store id: 32 lowercase hex digits, made when it was
+    /// first opened and kept for as long as the file is.
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn store_id(&self) -> Result<String> {
+        self.read(node::local_store_id).await
     }
 
     /// Signs `signup.email` up, or refreshes the confirmation of an address

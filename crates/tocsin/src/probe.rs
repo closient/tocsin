@@ -23,11 +23,11 @@ use crate::output::{Failure, Report};
 const TEXT_FACT_LIMIT: usize = 200;
 
 /// `tocsin probe run`.
-pub fn run(check_id: &str, folder: &Path) -> Result<Report, Failure> {
+pub fn run(check_id: &str, folder: &Path, node: Option<&str>) -> Result<Report, Failure> {
     let Loaded {
         config: configuration,
         ..
-    } = config::load(folder)?;
+    } = config::load(folder, node)?;
     let Some(check) = configuration
         .checks
         .iter()

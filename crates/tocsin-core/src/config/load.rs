@@ -28,8 +28,9 @@ use super::notifier::NotifierType;
 use super::telemetry::OWN_RESOURCE_ATTRIBUTES;
 use super::values::{Id, Secret, Text, email_address, is_unanswerable};
 use super::{
-    Auth, AuthMode, Check, Component, Config, Group, Heartbeat, Link, MAX_APP_NAME, Notifier, Page,
-    Project, Route, Server, Slack, Subscribers, Telemetry, Token, Topology, TopologyNode,
+    Auth, AuthMode, Check, Component, Config, Group, Heartbeat, Link, MAX_APP_NAME, Node,
+    NodeIdSource, Notifier, Page, Project, Route, Server, Slack, Subscribers, Telemetry, Token,
+    Topology, TopologyNode,
 };
 use crate::link::{http_url, site_path};
 
@@ -46,8 +47,11 @@ pub struct Source {
 /// What loading needs from the machine it runs on, passed in so this crate
 /// does no I/O.
 pub struct Environment<'a> {
-    /// The default `node_id`.
+    /// The `node_id` when nothing else gives one.
     pub hostname: String,
+    /// The `node_id` given by `--node` or `TOCSIN_NODE_ID`, which wins over
+    /// `[server] node_id`.
+    pub node_id: Option<String>,
     /// Looks up an environment variable, for `${ENV:NAME}` secrets.
     pub variable: &'a dyn Fn(&str) -> Option<String>,
 }
@@ -55,6 +59,7 @@ pub struct Environment<'a> {
 /// The top-level keys a file may hold, in the order they are processed.
 pub(crate) const TOP_LEVEL_KEYS: &[&str] = &[
     "server",
+    "node",
     "page",
     "group",
     "component",
@@ -84,6 +89,7 @@ pub fn load(sources: &[Source], environment: &Environment<'_>) -> Result<Config,
     let mut items = loader.collect();
     loader.check_references(&items);
     loader.validate(&mut items);
+    loader.validate_node_id(&items, environment);
     loader.resolve_secrets(&mut items, environment);
     loader.into_result(items, environment)
 }
@@ -169,6 +175,7 @@ struct Item<T> {
 #[derive(Default)]
 struct Items {
     server: Option<Item<Server>>,
+    nodes: Vec<Item<Node>>,
     page: Option<Item<Page>>,
     groups: Vec<Item<Group>>,
     components: Vec<Item<Component>>,
@@ -347,6 +354,7 @@ impl<'a> Loader<'a> {
                     "server" => {
                         items.server = self.singleton(&origin, "server", items.server.take());
                     }
+                    "node" => items.nodes.extend(self.array(&origin, "node")),
                     "page" => items.page = self.singleton(&origin, "page", items.page.take()),
                     "group" => items.groups.extend(self.array(&origin, "group")),
                     "component" => items.components.extend(self.array(&origin, "component")),
@@ -750,6 +758,110 @@ impl<'a> Loader<'a> {
                     .to_owned(),
             ),
         );
+    }
+
+    /// The `node_id` this server runs as. A single server may be named
+    /// anything without whitespace, and defaults to its hostname; once any
+    /// `[[node]]` is listed, it must be named explicitly, as one of them.
+    fn validate_node_id(&mut self, items: &Items, environment: &Environment<'_>) {
+        let (node_id, source) = node_id(items, environment);
+        // Where a problem with the id is reported: the `node_id` key, or
+        // nowhere in a file when it came from the command line.
+        let located = match source {
+            NodeIdSource::Config => items
+                .server
+                .as_ref()
+                .map(|server| server.origin.key("node_id")),
+            NodeIdSource::Argument | NodeIdSource::Hostname => None,
+        };
+        let given_as = match source {
+            NodeIdSource::Argument => "the node id given by `--node` or `TOCSIN_NODE_ID`",
+            NodeIdSource::Config | NodeIdSource::Hostname => "`node_id`",
+        };
+        if node_id.is_empty() || node_id.contains(char::is_whitespace) {
+            // `validate_server` has already reported a `node_id` written so,
+            // and a hostname is reported below only once nodes are listed.
+            match source {
+                NodeIdSource::Argument => {
+                    self.report_node_id(
+                        located.as_ref(),
+                        format!("{given_as} must be non-empty with no whitespace"),
+                        None,
+                    );
+                    return;
+                }
+                NodeIdSource::Config => return,
+                NodeIdSource::Hostname => {}
+            }
+        }
+        let Some(first) = items.nodes.first() else {
+            return;
+        };
+        let listed: Vec<&str> = items
+            .nodes
+            .iter()
+            .map(|node| node.value.id.as_str())
+            .collect();
+        if source == NodeIdSource::Hostname {
+            self.report(
+                &first.origin,
+                format!(
+                    "`[[node]]` is listed, so this server's node id must be given; \
+                     it would otherwise be the hostname `{node_id}`"
+                ),
+                Some(format!(
+                    "set `node_id` in `[server]`, or pass `--node <id>` or TOCSIN_NODE_ID \
+                     (a running server takes those only at restart), to one of {}",
+                    list(&listed)
+                )),
+            );
+            return;
+        }
+        if let Err(problem) = Id::parse(node_id) {
+            self.report_node_id(
+                located.as_ref(),
+                format!("{given_as} `{node_id}` is not a node id: {problem}"),
+                Some(format!("the listed nodes are {}", list(&listed))),
+            );
+            return;
+        }
+        if listed.contains(&node_id) {
+            return;
+        }
+        let hint = closest(node_id, listed.iter().copied()).map_or_else(
+            || {
+                format!(
+                    "it must be one of {}; add a `[[node]]` if it is new",
+                    list(&listed)
+                )
+            },
+            |near| format!("did you mean `{near}`?"),
+        );
+        self.report_node_id(
+            located.as_ref(),
+            format!("{given_as} `{node_id}` is not a listed `[[node]]`"),
+            Some(hint),
+        );
+    }
+
+    /// Reports a problem with the `node_id` at `origin`, or with no file
+    /// position when it came from the command line.
+    fn report_node_id(&mut self, origin: Option<&Origin>, message: String, hint: Option<String>) {
+        if let Some(origin) = origin {
+            self.report(origin, message, hint);
+        } else {
+            self.diagnostics.push((
+                None,
+                Diagnostic {
+                    file: None,
+                    line: None,
+                    column: None,
+                    path: Some("node_id".to_owned()),
+                    message,
+                    hint,
+                },
+            ));
+        }
     }
 
     fn validate_server(&mut self, server: &Item<Server>) {
@@ -2089,12 +2201,14 @@ impl<'a> Loader<'a> {
                 .map(|(_, diagnostic)| diagnostic)
                 .collect());
         }
+        let (node_id, node_id_source) = node_id(&items, environment);
+        let node_id = node_id.to_owned();
         let mut server = items.server.map(|item| item.value).unwrap_or_default();
-        server
-            .node_id
-            .get_or_insert_with(|| environment.hostname.clone());
+        server.node_id = Some(node_id);
         Ok(Config {
             server,
+            node_id_source,
+            nodes: values(items.nodes),
             components: values(items.components),
             groups: values(items.groups),
             checks: values(items.checks),
@@ -2186,6 +2300,22 @@ fn allowed(rule: &AlertingRule) -> String {
 
 fn values<T>(items: Vec<Item<T>>) -> Vec<T> {
     items.into_iter().map(|item| item.value).collect()
+}
+
+/// The `node_id` this server runs as, and where it came from: `--node` or
+/// `TOCSIN_NODE_ID`, then `[server] node_id`, then the hostname.
+fn node_id<'a>(items: &'a Items, environment: &'a Environment<'_>) -> (&'a str, NodeIdSource) {
+    if let Some(node_id) = &environment.node_id {
+        return (node_id, NodeIdSource::Argument);
+    }
+    match items
+        .server
+        .as_ref()
+        .and_then(|server| server.value.node_id.as_deref())
+    {
+        Some(node_id) => (node_id, NodeIdSource::Config),
+        None => (&environment.hostname, NodeIdSource::Hostname),
+    }
 }
 
 /// The steps from `value` down to the key or value whose span is `span`.
@@ -2502,6 +2632,10 @@ mod tests {
             ("telemetry", "[telemetry.otlp]\n"),
             ("alerting", "[alerting.labels.team]\n"),
             ("topology", "[topology]\n"),
+            (
+                "node",
+                "[server]\nnode_id = \"sample\"\n[[node]]\nid = \"sample\"\n",
+            ),
         ];
         let kinds: BTreeSet<&str> = TOP_LEVEL_KEYS.iter().copied().collect();
         let covered: BTreeSet<&str> = samples.iter().map(|(kind, _)| *kind).collect();
@@ -2525,6 +2659,7 @@ mod tests {
         };
         let environment = Environment {
             hostname: "host".to_owned(),
+            node_id: None,
             variable: &variable,
         };
         let render = |texts: &[&str]| {

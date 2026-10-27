@@ -86,6 +86,7 @@ fn load(text: &str, variable: &dyn Fn(&str) -> Option<String>) -> Config {
         }],
         &Environment {
             hostname: "test".into(),
+            node_id: None,
             variable,
         },
     )

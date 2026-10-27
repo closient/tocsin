@@ -1106,3 +1106,31 @@ async fn panicking_reads_are_errors_and_do_not_shrink_the_pool() {
     .expect("a read hung after earlier reads panicked");
     assert_eq!(after.unwrap(), 1);
 }
+
+#[tokio::test]
+async fn a_store_keeps_its_id_and_a_new_store_gets_another() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(tocsin_store::DB_FILE);
+    let store = Store::open(&path).unwrap();
+    let id = store.store_id().await.unwrap();
+    assert_eq!(id.len(), 32, "{id}");
+    assert!(
+        id.bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "{id}"
+    );
+    store.close().await.unwrap();
+
+    let reopened = Store::open(&path).unwrap();
+    assert_eq!(reopened.store_id().await.unwrap(), id, "kept across opens");
+    reopened.close().await.unwrap();
+
+    let other = tempfile::tempdir().unwrap();
+    let fresh = Store::open(&other.path().join(tocsin_store::DB_FILE)).unwrap();
+    assert_ne!(
+        fresh.store_id().await.unwrap(),
+        id,
+        "a new store is a new id"
+    );
+    fresh.close().await.unwrap();
+}

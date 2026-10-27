@@ -4,8 +4,8 @@
 //! column.
 
 use tocsin_core::config::{
-    AuthMode, CheckType, Config, DARK, Diagnostic, Environment, Id, NotifierType, ProbeClass,
-    Secret, Source, TokenScope, TopologyNode, load,
+    AuthMode, CheckType, Config, DARK, Diagnostic, Environment, Id, NodeIdSource, NotifierType,
+    ProbeClass, Secret, Source, TokenScope, TopologyNode, load,
 };
 
 const HOSTNAME: &str = "probe-01";
@@ -44,6 +44,7 @@ fn run(files: &[(&str, &str)]) -> Result<Config, Vec<Diagnostic>> {
 fn run_sources(sources: &[Source]) -> Result<Config, Vec<Diagnostic>> {
     let environment = Environment {
         hostname: HOSTNAME.to_owned(),
+        node_id: None,
         variable: &variable,
     };
     load(sources, &environment)
@@ -1854,5 +1855,154 @@ values = ["page", ""]
             .message
             .starts_with("`[alerting]` is already defined at one.toml"),
         "{twice}"
+    );
+}
+
+fn run_as(node: Option<&str>, files: &[(&str, &str)]) -> Result<Config, Vec<Diagnostic>> {
+    let sources: Vec<Source> = files
+        .iter()
+        .map(|(name, text)| Source {
+            name: (*name).to_owned(),
+            text: Ok((*text).to_owned()),
+        })
+        .collect();
+    let environment = Environment {
+        hostname: HOSTNAME.to_owned(),
+        node_id: node.map(str::to_owned),
+        variable: &variable,
+    };
+    load(&sources, &environment)
+}
+
+const NODES: &str = "[[node]]\nid = \"probe-a\"\n\n[[node]]\nid = \"probe-b\"\n";
+
+#[test]
+fn a_single_server_is_named_by_its_hostname_unless_told_otherwise() {
+    let config = run(&[]).expect("valid");
+    assert_eq!(config.server.node_id.as_deref(), Some(HOSTNAME));
+    assert_eq!(config.node_id_source, NodeIdSource::Hostname);
+    assert_eq!(config.nodes.len(), 0);
+
+    let config = run(&[("server.toml", "[server]\nnode_id = \"old-host\"\n")]).expect("valid");
+    assert_eq!(config.server.node_id.as_deref(), Some("old-host"));
+    assert_eq!(config.node_id_source, NodeIdSource::Config);
+
+    let config = run_as(
+        Some("from-flag"),
+        &[("server.toml", "[server]\nnode_id = \"old-host\"\n")],
+    )
+    .expect("valid");
+    assert_eq!(config.server.node_id.as_deref(), Some("from-flag"));
+    assert_eq!(config.node_id_source, NodeIdSource::Argument);
+}
+
+#[test]
+fn listed_nodes_load_and_the_server_runs_as_one_of_them() {
+    let config = run_as(Some("probe-b"), &[("nodes.toml", NODES)]).expect("valid");
+    assert_eq!(config.server.node_id.as_deref(), Some("probe-b"));
+    let ids: Vec<&str> = config.nodes.iter().map(|node| node.id.as_str()).collect();
+    assert_eq!(ids, ["probe-a", "probe-b"]);
+
+    let config = run(&[
+        ("nodes.toml", NODES),
+        ("server.toml", "[server]\nnode_id = \"probe-a\"\n"),
+    ])
+    .expect("valid");
+    assert_eq!(config.server.node_id.as_deref(), Some("probe-a"));
+}
+
+#[test]
+fn listed_nodes_need_the_node_id_given_not_defaulted() {
+    let diagnostic = only_error(&[("nodes.toml", NODES)]);
+    assert_eq!(diagnostic.location().as_deref(), Some("nodes.toml:1:1"));
+    assert_eq!(
+        diagnostic.message,
+        "`[[node]]` is listed, so this server's node id must be given; \
+         it would otherwise be the hostname `probe-01`"
+    );
+    assert_eq!(
+        diagnostic.hint.as_deref(),
+        Some(
+            "set `node_id` in `[server]`, or pass `--node <id>` or TOCSIN_NODE_ID \
+             (a running server takes those only at restart), to one of `probe-a`, `probe-b`"
+        )
+    );
+}
+
+#[test]
+fn an_unlisted_node_id_is_located_with_a_suggestion() {
+    let diagnostic = only_error(&[
+        ("nodes.toml", NODES),
+        ("server.toml", "[server]\nnode_id = \"probe-c\"\n"),
+    ]);
+    assert_eq!(diagnostic.location().as_deref(), Some("server.toml:2:11"));
+    assert_eq!(
+        diagnostic.message,
+        "`node_id` `probe-c` is not a listed `[[node]]`"
+    );
+    assert!(diagnostic.hint.expect("hint").contains("did you mean"));
+
+    let diagnostics = run_as(Some("elsewhere"), &[("nodes.toml", NODES)])
+        .expect_err("configuration should be invalid");
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+    assert_eq!(diagnostics[0].file, None);
+    assert_eq!(diagnostics[0].path.as_deref(), Some("node_id"));
+    assert_eq!(
+        diagnostics[0].message,
+        "the node id given by `--node` or `TOCSIN_NODE_ID` `elsewhere` is not a listed `[[node]]`"
+    );
+}
+
+#[test]
+fn a_node_id_must_be_an_id_once_nodes_are_listed() {
+    let diagnostic = only_error(&[
+        ("nodes.toml", NODES),
+        ("server.toml", "[server]\nnode_id = \"Probe.A\"\n"),
+    ]);
+    assert_eq!(diagnostic.location().as_deref(), Some("server.toml:2:11"));
+    assert!(
+        diagnostic
+            .message
+            .starts_with("`node_id` `Probe.A` is not a node id: "),
+        "{}",
+        diagnostic.message
+    );
+
+    let diagnostic = only_error(&[
+        ("nodes.toml", NODES),
+        ("server.toml", "[server]\nnode_id = \"probe a\"\n"),
+    ]);
+    assert_eq!(
+        diagnostic.message,
+        "`node_id` must be non-empty with no whitespace"
+    );
+
+    let diagnostics = run_as(Some(" "), &[]).expect_err("configuration should be invalid");
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+    assert_eq!(
+        diagnostics[0].message,
+        "the node id given by `--node` or `TOCSIN_NODE_ID` must be non-empty with no whitespace"
+    );
+}
+
+#[test]
+fn a_node_is_listed_once() {
+    let mut diagnostics = run_as(
+        Some("probe-a"),
+        &[
+            ("a.toml", "[[node]]\nid = \"probe-a\"\n"),
+            ("b.toml", "[[node]]\nid = \"probe-a\"\n"),
+        ],
+    )
+    .expect_err("configuration should be invalid");
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+    let diagnostic = diagnostics.remove(0);
+    assert_eq!(diagnostic.location().as_deref(), Some("b.toml:2:6"));
+    assert!(
+        diagnostic
+            .message
+            .starts_with("duplicate node id `probe-a`"),
+        "{}",
+        diagnostic.message
     );
 }

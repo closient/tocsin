@@ -437,8 +437,8 @@ pub fn create_link(manifest: &Value) -> String {
 /// `tocsin slack setup`: the link creating the operator's own Slack app,
 /// its manifest, and the steps after. Secrets the configuration names need
 /// not be set yet: the manifest uses none of them.
-pub fn setup(folder: &Path) -> Result<Report, Failure> {
-    let config = crate::config::load_with(folder, &|name| {
+pub fn setup(folder: &Path, node: Option<&str>) -> Result<Report, Failure> {
+    let config = crate::config::load_with(folder, node, &|name| {
         Some(std::env::var(name).unwrap_or_else(|_| "unset".to_owned()))
     })?
     .config;

@@ -123,6 +123,9 @@ impl LiveRouter {
 pub struct Reloading {
     /// The configuration folder, as serve was given it.
     pub folder: PathBuf,
+    /// The node serve was started as by `--node` or `TOCSIN_NODE_ID`, so
+    /// every reload is checked as the same node.
+    pub node: Option<String>,
     /// The data folder. Writes in it are not configuration changes, unless
     /// they are to a `*.toml` file the folder's scan would read.
     pub data: PathBuf,
@@ -222,16 +225,18 @@ impl Running {
     async fn reload(&mut self, cause: &'static str) {
         let attempt = http::now();
         let folder = self.reloading.folder.clone();
+        let node = self.reloading.node.clone();
         let variables = Arc::clone(&self.reloading.variables);
-        let loaded =
-            tokio::task::spawn_blocking(move || crate::config::load_with(&folder, &*variables))
-                .await
-                .unwrap_or_else(|error| {
-                    Err(Failure::new(
-                        Exit::Runtime,
-                        format!("reading the configuration failed: {error}"),
-                    ))
-                });
+        let loaded = tokio::task::spawn_blocking(move || {
+            crate::config::load_with(&folder, node.as_deref(), &*variables)
+        })
+        .await
+        .unwrap_or_else(|error| {
+            Err(Failure::new(
+                Exit::Runtime,
+                format!("reading the configuration failed: {error}"),
+            ))
+        });
         let loaded = match loaded {
             Ok(loaded) => loaded,
             Err(failure) => return self.rejected(cause, attempt, &failure),
@@ -604,7 +609,7 @@ scopes = ["release"]
                 "EDGE_SIGNING_SECRET" => Some("0123456789abcdef0123456789abcdef".to_owned()),
                 _ => None,
             });
-            let config = crate::config::load_with(&folder, &*variables)
+            let config = crate::config::load_with(&folder, None, &*variables)
                 .unwrap()
                 .config;
             let node = config.server.node_id.clone().unwrap();
@@ -637,6 +642,7 @@ scopes = ["release"]
             let reloader = Reloader::start(
                 Reloading {
                     folder: folder.clone(),
+                    node: None,
                     data: data_dir.path().to_owned(),
                     variables,
                     state,

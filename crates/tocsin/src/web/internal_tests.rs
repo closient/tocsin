@@ -101,6 +101,7 @@ pub(super) fn config(auth: &str) -> Config {
         }],
         &Environment {
             hostname: "test".into(),
+            node_id: None,
             variable: &variable,
         },
     )

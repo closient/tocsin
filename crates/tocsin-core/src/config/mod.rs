@@ -13,6 +13,7 @@ mod check;
 mod colour;
 mod diagnostic;
 mod load;
+mod node;
 mod notifier;
 mod slack;
 mod subscribers;
@@ -42,6 +43,7 @@ pub use check::{
 pub use colour::{AA_TEXT, COLOUR_PATTERN, Colour, DARK, LIGHT, Scheme};
 pub use diagnostic::Diagnostic;
 pub use load::{Environment, Source, closest, host_and_port, load};
+pub use node::{Node, NodeIdSource};
 pub use notifier::{
     AlertmanagerSettings, DiscordSettings, EmailSettings, Notifier, NotifierSettings, NotifierType,
     NtfySettings, PushoverSettings, SlackSettings, TelegramSettings, WebhookSettings,
@@ -68,6 +70,10 @@ pub struct ConfigFile {
     /// Server settings. At most one file may hold `[server]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<Server>,
+    /// The tocsin servers of a federation. Listing any makes `node_id`
+    /// required, and one of these ids.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub node: Vec<Node>,
     /// What the status page shows, each with a health state.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub component: Vec<Component>,
@@ -127,6 +133,13 @@ pub struct ConfigFile {
 pub struct Config {
     /// `[server]`, with defaults filled in.
     pub server: Server,
+    /// Where `server.node_id` came from: a startup check depends on it, so
+    /// it is not shown as configuration.
+    #[serde(skip)]
+    pub node_id_source: NodeIdSource,
+    /// Every `[[node]]`, in file order.
+    #[serde(rename = "node")]
+    pub nodes: Vec<Node>,
     /// Every `[[component]]`, in file order.
     #[serde(rename = "component")]
     pub components: Vec<Component>,

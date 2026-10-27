@@ -61,6 +61,7 @@ fn config_with(auth: &str, more: &str) -> Config {
         }],
         &Environment {
             hostname: "test".into(),
+            node_id: None,
             variable: &|_| None,
         },
     )

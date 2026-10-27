@@ -78,6 +78,7 @@ fn api() -> Api {
         }],
         &Environment {
             hostname: "test".into(),
+            node_id: None,
             variable: &variable,
         },
     )

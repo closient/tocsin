@@ -75,6 +75,7 @@ pub fn config(toml: &str) -> Config {
     }];
     let environment = Environment {
         hostname: "node-a".to_owned(),
+        node_id: None,
         variable: &|name| Some(format!("secret-{name}")),
     };
     load(&sources, &environment).unwrap_or_else(|errors| panic!("bad config: {errors:?}"))

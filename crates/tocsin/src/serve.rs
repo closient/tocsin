@@ -2,6 +2,7 @@
 
 //! `tocsin serve`: run until told to stop.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -20,11 +21,11 @@ use serde_json::json;
 use tocsin_alert::{
     Alerter, AlertingHistory, HTTP_TIMEOUT, Notifiers, Router, SlackHooks, WorkerSettings,
 };
-use tocsin_core::config::Config;
+use tocsin_core::config::{Config, NodeIdSource};
 use tocsin_engine::ports::{Clock, History, ProbeRunner, SystemClock};
 use tocsin_engine::{Engine, HeartbeatHandle, Parts, Plan, StatusHandle};
 use tocsin_probe::ProbeContext;
-use tocsin_store::{DB_FILE, Retention, Store};
+use tocsin_store::{DB_FILE, Outage, Retention, Store};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::{oneshot, watch};
@@ -44,8 +45,8 @@ use crate::subscribers::Subscriptions;
 use crate::subscribers::worker::Postman;
 use crate::web::identity::AdminAuth;
 
-pub fn run(config: &Path, data: Option<&Path>) -> Result<Report, Failure> {
-    let loaded = crate::config::load(config)?;
+pub fn run(config: &Path, node: Option<&str>, data: Option<&Path>) -> Result<Report, Failure> {
+    let loaded = crate::config::load(config, node)?;
     // `--data` wins; a relative `server.data_dir` is relative to the config
     // folder, so the files mean the same thing wherever tocsin is started.
     let data: PathBuf = match (data, &loaded.config.server.data_dir) {
@@ -89,8 +90,14 @@ pub fn run(config: &Path, data: Option<&Path>) -> Result<Report, Failure> {
         .map_err(|error| Failure::new(Exit::Runtime, format!("cannot start runtime: {error}")))?;
     let config_folder = config;
     let config = Arc::new(loaded.config);
-    let signal_name =
-        runtime.block_on(serve(config_folder, data, &config, files, retention_days))?;
+    let signal_name = runtime.block_on(serve(
+        config_folder,
+        node,
+        data,
+        &config,
+        files,
+        retention_days,
+    ))?;
 
     Ok(Report {
         json: json!({ "status": "stopped", "signal": signal_name }),
@@ -112,6 +119,60 @@ fn open_store(data: &Path) -> Result<Arc<Store>, Failure> {
 }
 
 /// The subscriber feature, if `[subscribers]` turns it on.
+/// The listener on `listen`, and the address it actually bound.
+async fn bind(listen: SocketAddr) -> Result<(TcpListener, SocketAddr), Failure> {
+    let failure = |error: io::Error| {
+        Failure::new(Exit::Runtime, format!("cannot listen on {listen}: {error}"))
+    };
+    let listener = TcpListener::bind(listen).await.map_err(failure)?;
+    let address = listener.local_addr().map_err(failure)?;
+    Ok((listener, address))
+}
+
+/// Logs [`orphaned_outages`] for a single server named by its hostname:
+/// renaming the host leaves the outages it opened under the old name, and
+/// nothing will ever end them.
+async fn warn_of_orphaned_outages(config: &Config, store: &Store) {
+    if !config.nodes.is_empty() || config.node_id_source != NodeIdSource::Hostname {
+        return;
+    }
+    let node_id = config.server.node_id.as_deref().unwrap_or_default();
+    match store.open_outages_elsewhere(node_id).await {
+        Ok(outages) => {
+            if let Some(warning) = orphaned_outages(node_id, &outages) {
+                tracing::warn!("{warning}");
+            }
+        }
+        Err(error) => tracing::warn!(%error, "cannot read the outages open under other node ids"),
+    }
+}
+
+/// What to say about `outages`, open under node ids other than `node_id`,
+/// naming each node and what is out on it; nothing when there are none.
+fn orphaned_outages(node_id: &str, outages: &[Outage]) -> Option<String> {
+    if outages.is_empty() {
+        return None;
+    }
+    let mut by_node: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for outage in outages {
+        by_node.entry(&outage.node_id).or_default().push(format!(
+            "{} `{}`",
+            outage.subject_kind.as_str(),
+            outage.check_id
+        ));
+    }
+    let nodes = by_node
+        .iter()
+        .map(|(node, subjects)| format!("`{node}` ({})", subjects.join(", ")))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(format!(
+        "outages are open under other node ids, and this server, running as `{node_id}` \
+         from its hostname, will never end them: {nodes}. If the host was renamed, set \
+         `node_id` in `[server]` to its old name"
+    ))
+}
+
 fn subscriptions(config: &Config) -> Result<Option<Arc<Subscriptions>>, Failure> {
     Subscriptions::from_config(config)
         .map(|subscriptions| subscriptions.map(Arc::new))
@@ -169,6 +230,7 @@ fn telemetry(config: &Config) -> Result<Option<otlp::Prepared>, Failure> {
 /// Resolves with the signal's name, or fails if the server ends first.
 async fn serve(
     config_folder: &Path,
+    node: Option<&str>,
     data: &Path,
     config: &Arc<Config>,
     files: usize,
@@ -189,14 +251,10 @@ async fn serve(
     let subscriptions = subscriptions(config)?;
     let slack = slack(config)?;
     let telemetry = telemetry(config)?;
+    // Bound before the store opens, so a port in use leaves no store to close.
+    let (listener, address) = bind(config.server.listen).await?;
     let store = open_store(data)?;
-    let listen = config.server.listen;
-    let listener = TcpListener::bind(listen).await.map_err(|error| {
-        Failure::new(Exit::Runtime, format!("cannot listen on {listen}: {error}"))
-    })?;
-    let address = listener.local_addr().map_err(|error| {
-        Failure::new(Exit::Runtime, format!("cannot listen on {listen}: {error}"))
-    })?;
+    warn_of_orphaned_outages(config, &store).await;
     let events = EventBus::new();
     let metrics = Arc::new(Metrics::new());
     metrics.configured(config);
@@ -242,6 +300,7 @@ async fn serve(
     let reloader = Reloader::start(
         Reloading {
             folder: config_folder.to_owned(),
+            node: node.map(str::to_owned),
             data: data.to_owned(),
             variables: Arc::new(|name| std::env::var(name).ok()),
             state,
@@ -980,8 +1039,8 @@ mod tests {
     use tocsin_engine::Ping;
     use tocsin_engine::ports::{BoxFuture, History};
     use tocsin_store::{
-        DB_FILE, LastUp, LatestResult, NewCheckResult, Outage, OutageChange, Retention, Store,
-        SubjectKind,
+        DB_FILE, LastUp, LatestResult, NewCheckResult, NewOutage, Outage, OutageChange, Retention,
+        Store, SubjectKind,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -989,13 +1048,102 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        Connections, Grace, Metrics, Monitor, ReloadError, close, spawn_server, start_checks,
-        supervise,
+        Connections, Grace, Metrics, Monitor, ReloadError, close, orphaned_outages, spawn_server,
+        start_checks, supervise, warn_of_orphaned_outages,
     };
     use crate::exit::Exit;
     use crate::http::events::{Event, EventBus};
     use crate::http::{self, AppState};
     use crate::testing::Captured;
+
+    fn orphan(node_id: &str, subject_kind: SubjectKind, check_id: &str) -> Outage {
+        Outage {
+            id: 1,
+            node_id: node_id.to_owned(),
+            subject_kind,
+            check_id: check_id.to_owned(),
+            component_id: None,
+            health: Health::Down,
+            started_at_ms: 0,
+            ended_at_ms: None,
+            alerted: true,
+        }
+    }
+
+    #[test]
+    fn orphaned_outages_name_each_node_and_what_is_out_on_it() {
+        assert_eq!(orphaned_outages("new-host", &[]), None);
+        let warning = orphaned_outages(
+            "new-host",
+            &[
+                orphan("old-host", SubjectKind::Check, "api"),
+                orphan("old-host", SubjectKind::Heartbeat, "backup"),
+                orphan("older-host", SubjectKind::Check, "db"),
+            ],
+        )
+        .expect("a warning");
+        assert!(warning.contains("running as `new-host`"), "{warning}");
+        assert!(
+            warning.contains(
+                "`old-host` (check `api`, heartbeat `backup`); `older-host` (check `db`)"
+            ),
+            "{warning}"
+        );
+        assert!(warning.contains("`node_id` in `[server]`"), "{warning}");
+    }
+
+    fn named(hostname: &str, toml: &str) -> tocsin_core::config::Config {
+        tocsin_core::config::load(
+            &[Source {
+                name: "tocsin.toml".into(),
+                text: Ok(toml.into()),
+            }],
+            &Environment {
+                hostname: hostname.into(),
+                node_id: None,
+                variable: &|_| None,
+            },
+        )
+        .unwrap()
+    }
+
+    /// A host renamed from `old-host` to `new-host` is told about the
+    /// outage it left open under the old name, unless its id was set.
+    #[tokio::test]
+    async fn a_renamed_host_is_warned_of_the_outages_left_under_its_old_name() {
+        let (_dir, store) = open();
+        store
+            .open_outage(NewOutage {
+                node_id: "old-host".into(),
+                subject_kind: SubjectKind::Check,
+                check_id: "api".into(),
+                component_id: None,
+                health: Health::Down,
+                started_at_ms: 1_000,
+                alerted: true,
+            })
+            .await
+            .unwrap();
+
+        let log = Captured::default();
+        {
+            let _log = log.capture();
+            warn_of_orphaned_outages(&named("new-host", ""), &store).await;
+        }
+        let text = log.text();
+        assert!(text.contains("WARN"), "{text}");
+        assert!(text.contains("running as `new-host`"), "{text}");
+        assert!(text.contains("`old-host` (check `api`)"), "{text}");
+
+        let set = Captured::default();
+        {
+            let _log = set.capture();
+            let config = named("new-host", "[server]\nnode_id = \"new-host\"\n");
+            warn_of_orphaned_outages(&config, &store).await;
+        }
+        assert_eq!(set.text(), "", "an id that was set is not second-guessed");
+        assert!(close(store).await);
+    }
 
     fn open() -> (tempfile::TempDir, Arc<Store>) {
         let dir = tempfile::tempdir().unwrap();
@@ -1092,6 +1240,7 @@ mod tests {
             }],
             &Environment {
                 hostname: "test".into(),
+                node_id: None,
                 variable: &|_| None,
             },
         )
@@ -1373,6 +1522,7 @@ mod tests {
             }],
             &Environment {
                 hostname: "test".into(),
+                node_id: None,
                 variable: &|name| (name == "ONCALL_TOKEN").then(|| SECRET.to_owned()),
             },
         )
@@ -1451,6 +1601,7 @@ mod tests {
             }],
             &Environment {
                 hostname: "test".into(),
+                node_id: None,
                 variable: &|_| None,
             },
         )
@@ -1516,6 +1667,7 @@ mod tests {
             }],
             &Environment {
                 hostname: "test".into(),
+                node_id: None,
                 variable: &|_| None,
             },
         )

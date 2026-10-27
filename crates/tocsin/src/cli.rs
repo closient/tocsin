@@ -37,6 +37,11 @@ pub enum Command {
         #[arg(long, value_name = "DIR", default_value = DEFAULT_CONFIG)]
         config: PathBuf,
 
+        /// The node this server runs as, over `[server] node_id`. Once the
+        /// configuration lists any `[[node]]`, one of the two must name one.
+        #[arg(long, env = "TOCSIN_NODE_ID", value_name = "ID")]
+        node: Option<String>,
+
         /// Folder for the SQLite database; created if missing. Defaults to
         /// `server.data_dir` from the configuration.
         #[arg(long, value_name = "DIR")]
@@ -661,6 +666,11 @@ pub enum ProbeCommand {
         /// Folder of `*.toml` configuration files.
         #[arg(long, value_name = "DIR", default_value = DEFAULT_CONFIG)]
         config: PathBuf,
+
+        /// The node this server runs as, over `[server] node_id`. Once the
+        /// configuration lists any `[[node]]`, one of the two must name one.
+        #[arg(long, env = "TOCSIN_NODE_ID", value_name = "ID")]
+        node: Option<String>,
     },
 }
 
@@ -677,6 +687,11 @@ pub enum NotifyCommand {
         /// Folder of `*.toml` configuration files.
         #[arg(long, value_name = "DIR", default_value = DEFAULT_CONFIG)]
         config: PathBuf,
+
+        /// The node this server runs as, over `[server] node_id`. Once the
+        /// configuration lists any `[[node]]`, one of the two must name one.
+        #[arg(long, env = "TOCSIN_NODE_ID", value_name = "ID")]
+        node: Option<String>,
     },
 }
 
@@ -689,6 +704,11 @@ pub enum SlackCommand {
         /// Folder of `*.toml` configuration files.
         #[arg(long, value_name = "DIR", default_value = DEFAULT_CONFIG)]
         config: PathBuf,
+
+        /// The node this server runs as, over `[server] node_id`. Once the
+        /// configuration lists any `[[node]]`, one of the two must name one.
+        #[arg(long, env = "TOCSIN_NODE_ID", value_name = "ID")]
+        node: Option<String>,
     },
 }
 
@@ -700,6 +720,11 @@ pub enum ConfigCommand {
         /// Folder of `*.toml` configuration files.
         #[arg(long, value_name = "DIR", default_value = DEFAULT_CONFIG)]
         config: PathBuf,
+
+        /// The node this server runs as, over `[server] node_id`. Once the
+        /// configuration lists any `[[node]]`, one of the two must name one.
+        #[arg(long, env = "TOCSIN_NODE_ID", value_name = "ID")]
+        node: Option<String>,
 
         /// Folder holding the SQLite database, read but never written, to
         /// warn about Slack connections notifiers name that are missing or
@@ -713,6 +738,11 @@ pub enum ConfigCommand {
         /// Folder of `*.toml` configuration files.
         #[arg(long, value_name = "DIR", default_value = DEFAULT_CONFIG)]
         config: PathBuf,
+
+        /// The node this server runs as, over `[server] node_id`. Once the
+        /// configuration lists any `[[node]]`, one of the two must name one.
+        #[arg(long, env = "TOCSIN_NODE_ID", value_name = "ID")]
+        node: Option<String>,
     },
     /// Print the JSON Schema that every configuration file follows.
     Schema,

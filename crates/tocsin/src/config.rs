@@ -21,14 +21,16 @@ pub struct Loaded {
     pub files: Vec<String>,
 }
 
-/// Reads, merges and validates every `*.toml` file under `folder`.
-pub fn load(folder: &Path) -> Result<Loaded, Failure> {
-    load_with(folder, &|name| std::env::var(name).ok())
+/// Reads, merges and validates every `*.toml` file under `folder`, for the
+/// node `node` names (`--node` or `TOCSIN_NODE_ID`) when it names one.
+pub fn load(folder: &Path, node: Option<&str>) -> Result<Loaded, Failure> {
+    load_with(folder, node, &|name| std::env::var(name).ok())
 }
 
 /// [`load`], reading `${ENV:NAME}` secrets through `variable`.
 pub fn load_with(
     folder: &Path,
+    node: Option<&str>,
     variable: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Loaded, Failure> {
     if !folder.is_dir() {
@@ -82,6 +84,7 @@ pub fn load_with(
 
     let environment = Environment {
         hostname: gethostname::gethostname().to_string_lossy().into_owned(),
+        node_id: node.map(str::to_owned),
         variable,
     };
     let config = config::load(&sources, &environment).map_err(|errors| invalid(folder, errors))?;
@@ -151,8 +154,8 @@ fn find_toml_files(root: &Path, relative: &Path, found: &mut Vec<PathBuf>) -> st
 /// The connections are read from the database in `data`, or in `[server]
 /// data_dir`, without writing to it. So is `[telemetry.otlp]` that
 /// `OTEL_SDK_DISABLED` turns off.
-pub fn check(folder: &Path, data: Option<&Path>) -> Result<Report, Failure> {
-    let Loaded { config, files } = load(folder)?;
+pub fn check(folder: &Path, node: Option<&str>, data: Option<&Path>) -> Result<Report, Failure> {
+    let Loaded { config, files } = load(folder, node)?;
     let mut warnings = slack_warnings(&config, folder, data);
     if crate::otlp::disabled(&config, &|name| std::env::var(name).ok()) {
         warnings.push(crate::otlp::DISABLED.to_owned());
@@ -278,8 +281,8 @@ fn render(config: &Config) -> Result<Value, Failure> {
 }
 
 /// `tocsin config show`: the merged configuration, secrets redacted.
-pub fn show(folder: &Path) -> Result<Report, Failure> {
-    let Loaded { config, .. } = load(folder)?;
+pub fn show(folder: &Path, node: Option<&str>) -> Result<Report, Failure> {
+    let Loaded { config, .. } = load(folder, node)?;
     let json = render(&config)?;
     Ok(Report {
         text: pretty(&json),

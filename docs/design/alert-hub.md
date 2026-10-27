@@ -481,8 +481,9 @@ The one-action silence on that item writes label matchers equal to the
 group labels. It holds the group now and any member that joins later,
 which an episode silence cannot do, and it stops every channel because
 every channel's message goes through the same `alert` rows the worker
-holds. Its expiry is the one real tension: the part may take weeks, and
-`max_silence` is 24 hours (see [Open questions](#open-questions)).
+holds. The part may take weeks; Closient sets `max_silence` to 30 days
+(decided, see [Open questions](#open-questions)), so one silence can
+cover the wait, and it still expires.
 
 Without that `[[ingest.group]]`, the default keeps the two series as two
 items, each notifying and each silenced on its own; that is the safe
@@ -535,6 +536,11 @@ Silences keep every TOC-90 rule and gain one kind of matcher.
 - **Unchanged**: reason required; expiry required and capped by
   `max_silence`; `created_by` recorded; no edit, no extension (a longer
   silence is a new one, and the old one is expired); no `ACK!` prefix.
+- **The cap.** `max_silence` stays one config key with tocsin's default
+  of 24h. Closient sets it to 30 days (Christian, 2026-10-27), long enough
+  for a hardware fault waiting on a part, and safe only because of the
+  grouping rule: a silence is exactly as wide as a deliberately narrow
+  group.
 
 ## Routing parity
 
@@ -674,8 +680,9 @@ those of the label contract: page (needs_human true), page
    fingerprint, and logs every difference in open set, start time and
    silenced state. *Exit*: a week with no unexplained difference, and at
    least one resolve and one expiry of each page class seen in both.
-3. **Silences move.** Silences are made in tocsin only; Alertmanager's
-   remaining silences are left to expire. kthxbye's `ACK!` extension is
+3. **Silences move.** Closient's tocsin config sets `[server]
+   max_silence = "30d"`. Silences are made in tocsin only, each for at
+   most 30 days; Alertmanager's remaining silences are left to expire. kthxbye's `ACK!` extension is
    switched off, since it breaks the no-extension rule. *Rollback*: make
    silences in Alertmanager again. *Check*: no Alertmanager silence
    newer than the switch.
@@ -836,12 +843,13 @@ written as commands.
 
 ## Open questions
 
-1. **How long may a silence last?** `max_silence` is 24h by default, and
-   the TOC-90 rules forbid extending one; testing-03's part may take
-   weeks, and today's Alertmanager silence for it is a stopgap.
-   *Recommended*: keep the cap a single config key, keep expiry mandatory,
-   and set Closient's to 30 days. The alternative, a daily new silence,
-   is the toil this ticket is meant to end. The 30-day cap leans on the
+1. **How long may a silence last?** *Decided (Christian, 2026-10-27)*:
+   Closient's `max_silence` is 30 days, expiry stays mandatory, and the
+   cap stays a single config key; tocsin's default stays 24h. The
+   question was that `max_silence` is 24h by default and the TOC-90 rules
+   forbid extending a silence, while testing-03's part may take weeks; a
+   daily new silence is the toil this ticket is meant to end. The 30-day
+   cap leans on the
    grouping rule: a long group silence is safe only because groups are
    per alert by default and aggregate only where every member is the same
    fault, so it cannot hide a new one for a month.

@@ -412,7 +412,7 @@ silence. Config:
 
 ```toml
 [ingest]
-group_by = ["alertname", "host_name"]  # the default grouping
+group_by = ["..."]                     # the default: every alert its own group
 group_wait = "30s"                     # the default wait
 
 [[ingest.group]]
@@ -421,13 +421,24 @@ by = ["alertname", "host_name", "sensor_type"]
 
 [[ingest.group]]
 matchers = ['alertname="UptimeFlareMonitorDown"']
-by = ["..."]                           # every alert its own group
-group_wait = "0s"
+group_wait = "0s"                      # still one group per alert
 ```
 
 The first `[[ingest.group]]` whose matchers match an alert decides its
 `by` and `group_wait`; otherwise the `[ingest]` defaults. `["..."]` means
-the full label set, as in Alertmanager. The group's identity is the `by` labels with
+the full label set, as in Alertmanager, and is the default: every alert
+is its own group, and only an explicit `[[ingest.group]]` aggregates.
+
+**Grouping must never absorb a new fault silently.** A member that joins
+an open group does not notify (below), and a group silence holds members
+that join later (see [Silences](#silences)). So a group's matchers and
+`by` labels must be narrow enough that any alert joining it is the same
+fault, as testing-03's power-supply group is: two sensors reporting one
+failed supply. A broad grouping such as `["alertname", "host_name"]`
+would let a second disk or fan failing on a host that already has an open
+group of that alertname arrive with no message and under the first
+fault's silence; tocsin therefore does not default to one, and the docs
+for `[[ingest.group]]` state this rule beside the key. The group's identity is the `by` labels with
 their values (a label the alert lacks counts as empty). Those labels are
 the group's labels, and they are what its fire and resolve carry.
 
@@ -473,12 +484,20 @@ every channel's message goes through the same `alert` rows the worker
 holds. Its expiry is the one real tension: the part may take weeks, and
 `max_silence` is 24 hours (see [Open questions](#open-questions)).
 
+Without that `[[ingest.group]]`, the default keeps the two series as two
+items, each notifying and each silenced on its own; that is the safe
+failure. A fan failing on testing-03 has `sensor_type="Fan"`, so it opens
+its own group and notifies even while the power-supply group is open and
+silenced.
+
 Whether the redundancy sensor's `sensor_type` is "Power Supply" depends on
 the BMC; the telemetry script keeps a disabled sensor only when its type
 is "Power Supply" (`closient_hardware_telemetry.py:1402`), but does not say
 what type the redundancy sensor reports. The grouping ticket checks the
-live series; if the two differ, the group for this rule is
-`[alertname, host_name]`.
+live series. If the two differ, the group stays as narrow by its
+matchers instead (`sensor=~"Power Suppl.*"` added, `by = ["alertname",
+"host_name"]`), never by widening `by` to the whole alertname on the
+host.
 
 ## Silences
 
@@ -492,6 +511,13 @@ Silences keep every TOC-90 rule and gain one kind of matcher.
   means "no page_class" (`alertmanager.yml:99`). Stored in
   `silence_label_matcher (silence_id, name, op, value)`, insert-only under
   the same trigger discipline as `silence`.
+- **The one-action group silence holds future members by design.** It
+  writes matchers equal to the group labels, so it covers an alert that
+  joins the group after it was made; that is what stops testing-03's
+  `state` changes from ringing. It is also why only deliberately narrow
+  groups exist (see [Grouping](#grouping)): the silence is exactly as
+  wide as the group. On a default, per-alert group it equals the alert's
+  full label set and holds that alert alone.
 - **What a label silence holds.** An ingested group is held when every
   open member matches; a member that does not match keeps the group
   notifying, and the view marks each member silenced or not. Label
@@ -714,9 +740,10 @@ resolved, dropped_stale, rejected), `tocsin_ingest_expired_total{alertname}`,
 1. tocsin ingests Alertmanager v2 posts with Alertmanager's identity and
    fingerprint, stores them in label tables, expires what goes quiet with
    a resolve that says so, and serves an Alertmanager-shaped read API.
-2. Groups are config-defined label sets; a group is the one item in the
-   view, the one notification and the one silence, and does not
-   re-notify when members come and go.
+2. Every alert is its own group unless a deliberately narrow
+   `[[ingest.group]]` aggregates it, so no new fault joins a group
+   silently; a group is the one item in the view, the one notification
+   and the one silence, and does not re-notify when members come and go.
 3. Silences gain label matchers and keep every TOC-90 rule; the view sets
    one in one action.
 4. Routes gain Alertmanager-style matchers; with negative matchers
@@ -744,14 +771,20 @@ prometheus/common's for its test vectors; a restart inside `boot_grace`
 expires nothing.
 
 **2. Alert groups and their notifications.**
-`alert_group` and its labels, `[[ingest.group]]`, the `alert` table
+`alert_group` and its labels, `[ingest] group_by` defaulting to
+`["..."]` (every alert its own group), `[[ingest.group]]` with the
+narrowness rule in its documentation, the `alert` table
 rebuild for `subject_kind = 'group'`, `group_wait`, `down_when`, group
 fire, repeat and resolve through the existing worker, `on_member_change`,
 and route `matchers` with `=`, `!=`, `=~`, `!~` for groups and for
 tocsin's own alerts' pinned labels.
 Acceptance: the testing-03 pair of series is one group and one fire per
-notifier; a member's state change sends nothing; the group resolves once,
-with the group labels, when the last member resolves or expires.
+notifier under its `[[ingest.group]]`; a member's state change sends
+nothing; the group resolves once, with the group labels, when the last
+member resolves or expires; with no `[[ingest.group]]`, two alerts of the
+same alertname on the same host are two items and both fire, and a fan
+alert on testing-03 fires while the power-supply group is open and
+silenced.
 
 **3. Label matchers on silences.**
 `silence_label_matcher`, the cannot-match-everything rule, the
@@ -808,7 +841,10 @@ written as commands.
    weeks, and today's Alertmanager silence for it is a stopgap.
    *Recommended*: keep the cap a single config key, keep expiry mandatory,
    and set Closient's to 30 days. The alternative, a daily new silence,
-   is the toil this ticket is meant to end.
+   is the toil this ticket is meant to end. The 30-day cap leans on the
+   grouping rule: a long group silence is safe only because groups are
+   per alert by default and aggregate only where every member is the same
+   fault, so it cannot hide a new one for a month.
 2. **Demote or remove Alertmanager?** *Recommended*: demote, as above,
    until two tocsin nodes watch each other; a hub with no outside path
    cannot report its own death.

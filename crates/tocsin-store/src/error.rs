@@ -55,6 +55,9 @@ pub enum Error {
     /// before: one writer cannot disagree with itself, so two machines are
     /// writing as one node.
     Conflict(String),
+    /// The store a node pushed from was retired here: its history is kept
+    /// and its pushes are refused.
+    Retired(String),
 }
 
 /// The result of a store operation.
@@ -87,6 +90,7 @@ impl fmt::Display for Error {
             ),
             Error::Published(id) => write!(f, "incident {id} is already published"),
             Error::Conflict(message) => write!(f, "federation conflict: {message}"),
+            Error::Retired(message) => write!(f, "{message}"),
             Error::Invalid(errors) => {
                 f.write_str("invalid write")?;
                 for (index, error) in errors.iter().enumerate() {

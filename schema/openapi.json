@@ -470,7 +470,7 @@
             }
           },
           "403": {
-            "description": "The node is retired",
+            "description": "The node, or the store it pushed from, is retired",
             "content": {
               "application/json": {
                 "schema": {
@@ -480,7 +480,7 @@
             }
           },
           "409": {
-            "description": "The store conflicts with what this node already holds from it, as two machines pushing as one node do",
+            "description": "The node is conflicted, or the batch conflicts with what its store sent before, as two machines pushing as one node do",
             "content": {
               "application/json": {
                 "schema": {

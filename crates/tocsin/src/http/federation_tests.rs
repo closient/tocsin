@@ -95,12 +95,12 @@ struct Api {
     router: Router,
 }
 
-fn api() -> Api {
+fn load(text: String) -> tocsin_core::config::Config {
     let variable = |name: &str| (name == "READER_TOKEN").then(|| READER.to_owned());
-    let config = tocsin_core::config::load(
+    tocsin_core::config::load(
         &[Source {
             name: "tocsin.toml".into(),
-            text: Ok(config_text()),
+            text: Ok(text),
         }],
         &Environment {
             hostname: "hub".into(),
@@ -108,7 +108,11 @@ fn api() -> Api {
             variable: &variable,
         },
     )
-    .unwrap();
+    .unwrap()
+}
+
+fn api() -> Api {
+    let config = load(config_text());
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join(tocsin_store::DB_FILE)).unwrap();
     let metrics = crate::metrics::Metrics::new();
@@ -250,6 +254,17 @@ impl Api {
             request = request.header(wire::SIGNATURE_HEADER, signature);
         }
         self.send(request.body(Body::from(body)).unwrap()).await
+    }
+
+    /// Sets the state of every store pushed here, as nothing yet does
+    /// (TOC-82).
+    fn mark_stores(&self, state: &str) -> rusqlite::Connection {
+        let database =
+            rusqlite::Connection::open(self.dir.path().join(tocsin_store::DB_FILE)).unwrap();
+        database
+            .execute("UPDATE node_store SET state = ?1 WHERE local = 0", [state])
+            .unwrap();
+        database
     }
 
     async fn nodes(&self, token: Option<&str>) -> (StatusCode, Value) {
@@ -462,14 +477,7 @@ async fn a_conflicted_node_is_refused_until_one_machine_is_retired() {
     let api = api();
     let (status, body) = api.push(&batch()).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    // Nothing marks a store conflicted yet (TOC-82), so the test does.
-    let database = rusqlite::Connection::open(api.dir.path().join(tocsin_store::DB_FILE)).unwrap();
-    database
-        .execute(
-            "UPDATE node_store SET state = 'conflicted' WHERE local = 0",
-            [],
-        )
-        .unwrap();
+    let database = api.mark_stores("conflicted");
 
     let mut sent = batch();
     sent.results = vec![result(1, "spoke")];
@@ -477,10 +485,80 @@ async fn a_conflicted_node_is_refused_until_one_machine_is_retired() {
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["error"], "conflict", "{body}");
     assert!(body["message"].as_str().unwrap().contains(STORE), "{body}");
-    let results: i64 = database
+    assert_eq!(stored_results(&database), 0);
+}
+
+#[tokio::test]
+async fn a_retired_store_is_refused_though_its_node_is_not() {
+    let api = api();
+    let (status, body) = api.push(&batch()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let database = api.mark_stores("retired");
+
+    let mut sent = batch();
+    sent.results = vec![result(1, "spoke")];
+    let (status, body) = api.push(&sent).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body["message"].as_str().unwrap().contains("retired"),
+        "{body}"
+    );
+    assert_eq!(stored_results(&database), 0);
+}
+
+fn stored_results(database: &rusqlite::Connection) -> i64 {
+    database
         .query_row("SELECT count(*) FROM check_result", [], |row| row.get(0))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_push_without_its_headers_is_refused_before_its_body_is_read() {
+    let api = api();
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(BATCH)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(vec![b' '; super::BODY_LIMIT + 1]))
         .unwrap();
-    assert_eq!(results, 0);
+    let (status, body) = api.send(request).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+}
+
+#[tokio::test]
+async fn a_batch_sent_before_the_last_does_not_replace_it() {
+    let api = api();
+    let (status, body) = api.push(&batch()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let last = api.state.metrics.federation.last_push("spoke").unwrap();
+
+    let mut replayed = batch();
+    replayed.sent_at = ago(3_600);
+    replayed.config_digest = Some("digest-0".into());
+    let (status, body) = api.push(&replayed).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let now_last = api.state.metrics.federation.last_push("spoke").unwrap();
+    assert_eq!(now_last.sent_at, last.sent_at);
+    assert_eq!(now_last.config_digest.as_deref(), Some("digest-1"));
+}
+
+#[tokio::test]
+async fn retiring_a_node_drops_its_last_push() {
+    let api = api();
+    let (status, body) = api.push(&batch()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(api.state.metrics.federation.last_push("spoke").is_some());
+
+    let retired = load(
+        config_text()
+            .replace("push_to = [\"hub\"]", "push_to = [\"hub\"]\nretired = true")
+            .replace(
+                "default_nodes = [\"hub\", \"spoke\"]",
+                "default_nodes = [\"hub\"]",
+            ),
+    );
+    api.state.metrics.configured(&retired);
+    assert!(api.state.metrics.federation.last_push("spoke").is_none());
 }
 
 #[tokio::test]

@@ -100,7 +100,9 @@ Some series are absent until there is something to say:
 - The two `tocsin_node_*` families have a series for each configured
   `[[node]]` once it has pushed here since tocsin started; they are held
   in memory, so a restart clears them until the next push. A node
-  removed from the configuration loses its series at the next reload.
+  removed from the configuration, or marked `retired`, loses its series
+  at the next reload. A batch sent before the node's last one, as a
+  replay of it is, does not replace it.
 - The two Slack families appear only with `[slack]` or a notifier naming
   a Slack `connection`. All four
   `tocsin_slack_connections` series are always there then, at 0 when

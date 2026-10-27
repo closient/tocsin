@@ -681,24 +681,27 @@ impl NodePush {
 }
 
 /// Each configured node's last push here since tocsin started. Pushes from
-/// a node the configuration no longer lists are dropped, so the series are
-/// bounded by it.
+/// a node the configuration no longer lists, or marks retired, are
+/// dropped, so the series are bounded by it.
 ///
 /// Cheap to clone; clones share the pushes.
 #[derive(Debug, Clone, Default)]
 pub struct FederationMetrics {
-    /// The configured nodes' ids, in the configuration's order.
+    /// The configured nodes' ids, retired ones left out, in the
+    /// configuration's order.
     nodes: Arc<Mutex<Vec<String>>>,
     /// Each node's last push, by node id.
     pushes: Arc<Mutex<HashMap<String, NodePush>>>,
 }
 
 impl FederationMetrics {
-    /// Takes the nodes `config` lists, forgetting the pushes of any other.
+    /// Takes the nodes `config` lists and has not retired, forgetting the
+    /// pushes of any other.
     fn configured(&self, config: &Config) {
         let nodes: Vec<String> = config
             .nodes
             .iter()
+            .filter(|node| !node.retired)
             .map(|node| node.id.as_str().to_owned())
             .collect();
         lock(&self.pushes).retain(|node, _| nodes.contains(node));
@@ -707,8 +710,17 @@ impl FederationMetrics {
 
     /// `node` pushed `push`.
     pub fn pushed(&self, node: &str, push: NodePush) {
-        if lock(&self.nodes).iter().any(|known| known == node) {
-            lock(&self.pushes).insert(node.to_owned(), push);
+        if !lock(&self.nodes).iter().any(|known| known == node) {
+            return;
+        }
+        // A batch sent before the last one, as a replay of it is, says
+        // nothing newer of the node, so it does not replace that one.
+        let mut pushes = lock(&self.pushes);
+        if pushes
+            .get(node)
+            .is_none_or(|last| push.sent_at >= last.sent_at)
+        {
+            pushes.insert(node.to_owned(), push);
         }
     }
 

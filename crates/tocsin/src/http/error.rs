@@ -154,6 +154,7 @@ impl From<tocsin_store::Error> for ApiError {
             conflict @ (tocsin_store::Error::Published(_) | tocsin_store::Error::Conflict(_)) => {
                 ApiError::conflict(conflict.to_string())
             }
+            tocsin_store::Error::Retired(message) => ApiError::forbidden(message),
             other => ApiError::internal(&other),
         }
     }

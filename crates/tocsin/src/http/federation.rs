@@ -17,7 +17,7 @@ use axum::http::HeaderMap;
 use tocsin_core::config::Node;
 use tocsin_core::federation::verify;
 use tocsin_core::federation::wire::{
-    self, Batch, BatchReceipt, LastPush, NodeList, NodeStatus, NodeStore, StoreState,
+    self, Batch, BatchReceipt, LastPush, NodeList, NodeStatus, NodeStore,
 };
 use tocsin_core::incident::{FieldError, Timestamp};
 use tocsin_store::{RemoteBatch, RemoteStore};
@@ -54,8 +54,8 @@ pub fn router() -> OpenApiRouter<AppState> {
         (status = 200, description = "Applied and committed", body = BatchReceipt),
         (status = 400, description = "The body is not JSON", body = ErrorBody),
         (status = 401, description = "A header is missing, the node is unknown, or the signature does not verify", body = ErrorBody),
-        (status = 403, description = "The node is retired", body = ErrorBody),
-        (status = 409, description = "The store conflicts with what this node already holds from it, as two machines pushing as one node do", body = ErrorBody),
+        (status = 403, description = "The node, or the store it pushed from, is retired", body = ErrorBody),
+        (status = 409, description = "The node is conflicted, or the batch conflicts with what its store sent before, as two machines pushing as one node do", body = ErrorBody),
         (status = 413, description = "The body is too large", body = ErrorBody),
         (status = 422, description = "A row is another node's, out of order, or holds a bad value", body = ErrorBody),
     ),
@@ -64,33 +64,25 @@ pub async fn push_batch(
     State(state): State<AppState>,
     request: Request,
 ) -> Result<Json<BatchReceipt>, ApiError> {
-    let headers = request.headers().clone();
-    let body = error::body(request, &()).await?;
-    let node_id = header(&headers, wire::NODE_HEADER)?;
-    let store = header(&headers, wire::STORE_HEADER)?;
-    let signature = header(&headers, wire::SIGNATURE_HEADER)?;
+    // The headers and the node first, so a push no configured node could
+    // have sent is refused without reading its body.
+    let headers = request.headers();
+    let node_id = header(headers, wire::NODE_HEADER)?.to_owned();
+    let store = header(headers, wire::STORE_HEADER)?.to_owned();
+    let signature = header(headers, wire::SIGNATURE_HEADER)?.to_owned();
     let node = state
         .config
         .nodes
         .iter()
         .find(|node| node.id.as_str() == node_id)
         .ok_or_else(refused)?;
-    if !verify(&node.public_keys, node_id, store, &body, signature) {
+    let body = error::body(request, &()).await?;
+    if !verify(&node.public_keys, &node_id, &store, &body, &signature) {
         return Err(refused());
     }
     if node.retired {
         return Err(ApiError::forbidden(format!(
             "node {node_id} is retired: its pushes are refused"
-        )));
-    }
-    let remote = state.store.remote_stores().await?;
-    if let Some(conflicted) = remote
-        .iter()
-        .find(|known| known.node_id == node_id && known.state == StoreState::Conflicted)
-    {
-        return Err(ApiError::conflict(format!(
-            "node {node_id} is conflicted: store {} pushed as it too; retire one machine",
-            conflicted.store_id
         )));
     }
     let batch: Batch = error::parse(&body)?;
@@ -119,9 +111,9 @@ pub async fn push_batch(
         .await?;
     let receipt = report.receipt(cursor);
     state.metrics.federation.pushed(
-        node_id,
+        &node_id,
         NodePush {
-            store: store.to_owned(),
+            store,
             sent_at,
             received_at,
             backlog_rows: backlog(head, receipt.cursor),

@@ -285,11 +285,11 @@ node's `public_keys`.
 | Status | When |
 |---|---|
 | 200 | The batch is applied and committed. The receipt counts what was applied and gives the new `cursor`; a pusher moves its own cursor only on this. |
-| 401 | A header is missing, the node is not listed, or the signature does not verify. All three get the same answer, so a caller learns nothing about which nodes exist. |
-| 403 | The node is `retired`. |
-| 409 | The store conflicts with what this server already holds from it: it is marked `conflicted`, or it resent an outage change that differs from the one applied. Both mean two machines pushing as one node. |
-| 413 | The body is over the size limit. |
-| 422 | The body names another node or store than the headers, holds a row that is not the pushing node's, is out of order, or holds a bad value. Nothing is written; `fields[].path` names each problem. |
+| 401 | A header is missing, the node is not listed, or the signature does not verify. All three get the same answer, and the first two are given before the body is read. |
+| 403 | The node is `retired`, or the store it pushed from is. |
+| 409 | The node has a store marked `conflicted`, or this store resent an outage change that differs from the one applied. Both mean two machines pushing as one node. |
+| 413 | The body is over the size limit. The pusher sends fewer rows; nothing was written. |
+| 422 | The body names another node or store than the headers, holds a row that is not the pushing node's, is out of order, or holds a bad value. Nothing is written; `fields[].path` names the problems, by the body's own field names. |
 
 Applying a batch twice is harmless: rows already stored are skipped and
 the receipt's cursor stays where it was.

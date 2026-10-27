@@ -248,8 +248,8 @@ impl BatchReport {
 /// for a day that has not begun by then is left out. The report says where.
 ///
 /// The batch's `node_store` row is made on first sight, and its last push
-/// set to `now_ms`, in the same transaction; its state is the caller's to
-/// keep.
+/// set to `now_ms`, in the same transaction, which first refuses the batch
+/// if its node or store may no longer push.
 ///
 /// # Errors
 ///
@@ -257,9 +257,10 @@ impl BatchReport {
 /// batch is from this node or this store, holds another node's row or a
 /// value the schema refuses, is out of order, opens an outage while the
 /// same check's last one is still open, or ends one it never opened or
-/// before it started; [`Error::Conflict`] if it differs from what
-/// the same store already sent for an outage, which means two machines are
-/// writing as one node; otherwise the write fails.
+/// before it started; [`Error::Conflict`] if any of the node's stores is
+/// conflicted, or the batch differs from what the same store already sent
+/// for an outage, which means two machines are writing as one node;
+/// [`Error::Retired`] if its store was retired; otherwise the write fails.
 pub(crate) fn apply_batch(
     conn: &mut Connection,
     batch: &RemoteBatch,
@@ -268,6 +269,7 @@ pub(crate) fn apply_batch(
 ) -> Result<BatchReport> {
     let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     validate(&transaction, batch, local_node_id)?;
+    refuse_unless_active(&transaction, batch)?;
     let origin = Origin {
         row: remote_store(&transaction, batch, now_ms)?,
         batch,
@@ -287,9 +289,9 @@ pub(crate) fn apply_batch(
 fn validate(conn: &Connection, batch: &RemoteBatch, local_node_id: &str) -> Result<()> {
     let mut errors = Vec::new();
     if batch.node_id.is_empty() {
-        errors.push(FieldError::new("node_id", "is empty"));
+        errors.push(FieldError::new("node", "is empty"));
     } else if batch.node_id == local_node_id {
-        errors.push(FieldError::new("node_id", "is this node's own"));
+        errors.push(FieldError::new("node", "is this node's own"));
     }
     if batch.store_id.len() != 32
         || !batch
@@ -297,12 +299,9 @@ fn validate(conn: &Connection, batch: &RemoteBatch, local_node_id: &str) -> Resu
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
-        errors.push(FieldError::new(
-            "store_id",
-            "is not 32 lowercase hex digits",
-        ));
+        errors.push(FieldError::new("store", "is not 32 lowercase hex digits"));
     } else if batch.store_id == node::local_store_id(conn)? {
-        errors.push(FieldError::new("store_id", "is this database's own store"));
+        errors.push(FieldError::new("store", "is this database's own store"));
     }
     validate_results(batch, &mut errors);
     validate_outages(batch, &mut errors);
@@ -414,6 +413,39 @@ fn not_own(path: String, batch: &RemoteBatch) -> FieldError {
         path,
         format!("is not {}, the node that sent it", batch.node_id),
     )
+}
+
+/// Refuses a batch whose node has a conflicted store, as two machines
+/// pushing as one leave it, or whose own store was retired. Read under the
+/// write lock, so a store marked between the read and the write cannot
+/// slip a batch through.
+fn refuse_unless_active(conn: &Connection, batch: &RemoteBatch) -> Result<()> {
+    let mut statement =
+        conn.prepare_cached("SELECT store_id, state FROM node_store WHERE node_id = ?1")?;
+    let stores = statement
+        .query_map(params![batch.node_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let state = |text: &str| text.parse::<wire::StoreState>().ok();
+    if let Some((store, _)) = stores
+        .iter()
+        .find(|(_, text)| state(text) == Some(wire::StoreState::Conflicted))
+    {
+        return Err(Error::Conflict(format!(
+            "node {} is conflicted: store {store} pushed as it too; retire one machine",
+            batch.node_id
+        )));
+    }
+    if stores.iter().any(|(store, text)| {
+        *store == batch.store_id && state(text) == Some(wire::StoreState::Retired)
+    }) {
+        return Err(Error::Retired(format!(
+            "store {} of node {} is retired: its pushes are refused",
+            batch.store_id, batch.node_id
+        )));
+    }
+    Ok(())
 }
 
 /// The `node_store` row for the batch's store, made on first sight, its

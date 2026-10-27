@@ -28,10 +28,11 @@ use super::notifier::NotifierType;
 use super::telemetry::OWN_RESOURCE_ATTRIBUTES;
 use super::values::{Id, Secret, Text, email_address, is_unanswerable};
 use super::{
-    Auth, AuthMode, Check, Component, Config, Group, Heartbeat, Link, MAX_APP_NAME, Node,
-    NodeIdSource, Notifier, Page, Project, Route, Server, Slack, Subscribers, Telemetry, Token,
-    Topology, TopologyNode,
+    Auth, AuthMode, Check, Component, Config, Federation, Group, Heartbeat, Link, MAX_APP_NAME,
+    Node, NodeIdSource, Notifier, Page, Project, Route, Server, Slack, Subscribers, Telemetry,
+    Token, Topology, TopologyNode,
 };
+use crate::federation::{NodeKey, PublicKey};
 use crate::link::{http_url, site_path};
 
 /// One configuration file's name and contents.
@@ -60,6 +61,7 @@ pub struct Environment<'a> {
 pub(crate) const TOP_LEVEL_KEYS: &[&str] = &[
     "server",
     "node",
+    "federation",
     "page",
     "group",
     "component",
@@ -176,6 +178,7 @@ struct Item<T> {
 struct Items {
     server: Option<Item<Server>>,
     nodes: Vec<Item<Node>>,
+    federation: Option<Item<Federation>>,
     page: Option<Item<Page>>,
     groups: Vec<Item<Group>>,
     components: Vec<Item<Component>>,
@@ -355,6 +358,10 @@ impl<'a> Loader<'a> {
                         items.server = self.singleton(&origin, "server", items.server.take());
                     }
                     "node" => items.nodes.extend(self.array(&origin, "node")),
+                    "federation" => {
+                        items.federation =
+                            self.singleton(&origin, "federation", items.federation.take());
+                    }
                     "page" => items.page = self.singleton(&origin, "page", items.page.take()),
                     "group" => items.groups.extend(self.array(&origin, "group")),
                     "component" => items.components.extend(self.array(&origin, "component")),
@@ -551,6 +558,22 @@ impl<'a> Loader<'a> {
             return;
         }
         let mut references: Vec<(&'static str, &Id, Origin)> = Vec::new();
+        for node in &items.nodes {
+            for (index, target) in node.value.push_to.iter().enumerate() {
+                references.push(("node", target, node.origin.key("push_to").index(index)));
+            }
+        }
+        if let Some(federation) = &items.federation {
+            let lists = [
+                ("default_nodes", &federation.value.default_nodes),
+                ("alert_order", &federation.value.alert_order),
+            ];
+            for (key, ids) in lists {
+                for (index, id) in ids.iter().enumerate() {
+                    references.push(("node", id, federation.origin.key(key).index(index)));
+                }
+            }
+        }
         for component in &items.components {
             if let Some(group) = &component.value.group {
                 references.push(("group", group, component.origin.key("group")));
@@ -622,6 +645,7 @@ impl<'a> Loader<'a> {
         if let Some(server) = &items.server {
             self.validate_server(server);
         }
+        self.validate_federation(items);
         self.validate_email_senders(items);
         if let Some(subscribers) = &items.subscribers {
             self.validate_subscribers(subscribers, items.server.as_ref());
@@ -825,7 +849,21 @@ impl<'a> Loader<'a> {
             );
             return;
         }
-        if listed.contains(&node_id) {
+        if let Some(node) = items
+            .nodes
+            .iter()
+            .find(|node| node.value.id.as_str() == node_id)
+        {
+            if node.value.retired {
+                self.report_node_id(
+                    located.as_ref(),
+                    format!("{given_as} `{node_id}` is a retired `[[node]]`; no server may run as it"),
+                    Some(
+                        "run this server as a node that is not retired; a retired id is never reused"
+                            .to_owned(),
+                    ),
+                );
+            }
             return;
         }
         let hint = closest(node_id, listed.iter().copied()).map_or_else(
@@ -842,6 +880,204 @@ impl<'a> Loader<'a> {
             format!("{given_as} `{node_id}` is not a listed `[[node]]`"),
             Some(hint),
         );
+    }
+
+    /// `[[node]]` and `[federation]`: the shape of the federation, before
+    /// any key is read.
+    fn validate_federation(&mut self, items: &Items) {
+        match (items.nodes.first(), &items.federation) {
+            (None, Some(federation)) => self.report(
+                &federation.origin,
+                "`[federation]` needs at least one `[[node]]`",
+                Some("list each server as a `[[node]]`, or remove `[federation]`".to_owned()),
+            ),
+            (Some(first), None) => self.report(
+                &first.origin,
+                "`[[node]]` is listed, so `[federation]` is required",
+                Some(
+                    "add `[federation]` with `default_nodes`, the nodes a check runs on unless it names its own"
+                        .to_owned(),
+                ),
+            ),
+            _ => {}
+        }
+        if items.nodes.is_empty()
+            && let Some(server) = &items.server
+            && server.value.node_key.is_some()
+        {
+            self.report(
+                &server.origin.key("node_key"),
+                "`node_key` signs pushes to other nodes, and no `[[node]]` is listed",
+                Some(
+                    "list this server as a `[[node]]` with the key's public key, or remove `node_key`"
+                        .to_owned(),
+                ),
+            );
+        }
+        let retired: HashSet<&str> = items
+            .nodes
+            .iter()
+            .filter(|node| node.value.retired)
+            .map(|node| node.value.id.as_str())
+            .collect();
+        if let Some(federation) = &items.federation {
+            let origin = &federation.origin;
+            let value = &federation.value;
+            if value.default_nodes.is_empty() && !items.nodes.is_empty() {
+                self.report(
+                    &origin.key("default_nodes"),
+                    "`default_nodes` must name at least one node",
+                    Some("the nodes a check runs on unless it names its own".to_owned()),
+                );
+            }
+            for (key, ids) in [
+                ("default_nodes", &value.default_nodes),
+                ("alert_order", &value.alert_order),
+            ] {
+                let mut seen = HashSet::new();
+                for (index, id) in ids.iter().enumerate() {
+                    let at = origin.key(key).index(index);
+                    if !seen.insert(id.as_str()) {
+                        self.report(&at, format!("`{id}` is listed twice"), None);
+                    } else if retired.contains(id.as_str()) {
+                        self.report(&at, format!("node `{id}` is retired"), None);
+                    }
+                }
+            }
+            if value.push_interval.get().is_zero() {
+                self.report(
+                    &origin.key("push_interval"),
+                    "`push_interval` must be longer than 0s",
+                    None,
+                );
+            }
+        }
+        self.validate_nodes(items, &retired);
+    }
+
+    /// Each `[[node]]`: its `url`, whom it pushes to, and that no public
+    /// key is listed twice anywhere.
+    fn validate_nodes(&mut self, items: &Items, retired: &HashSet<&str>) {
+        let without_url: HashSet<&str> = items
+            .nodes
+            .iter()
+            .filter(|node| node.value.url.is_none())
+            .map(|node| node.value.id.as_str())
+            .collect();
+        let mut keys: HashMap<PublicKey, (&Id, Origin)> = HashMap::new();
+        for node in &items.nodes {
+            let origin = &node.origin;
+            let value = &node.value;
+            if let Some(url) = &value.url {
+                self.url(&origin.key("url"), url);
+            }
+            let mut seen = HashSet::new();
+            for (index, target) in value.push_to.iter().enumerate() {
+                let at = origin.key("push_to").index(index);
+                if !seen.insert(target.as_str()) {
+                    self.report(&at, format!("`{target}` is listed twice"), None);
+                } else if *target == value.id {
+                    self.report(&at, "a node does not push to itself", None);
+                } else if retired.contains(target.as_str()) {
+                    self.report(&at, format!("node `{target}` is retired"), None);
+                } else if without_url.contains(target.as_str()) {
+                    self.report(
+                        &at,
+                        format!("node `{target}` has no `url` to take pushes at"),
+                        Some(format!("add `url` to node `{target}`'s `[[node]]`")),
+                    );
+                }
+            }
+            for (index, key) in value.public_keys.iter().enumerate() {
+                let at = origin.key("public_keys").index(index);
+                if let Some((owner, first)) = keys.get(key) {
+                    let message = if *owner == &value.id {
+                        format!("public key `{key}` is listed twice")
+                    } else {
+                        format!(
+                            "public key `{key}` is also listed under node `{owner}` at {}",
+                            self.describe(first)
+                        )
+                    };
+                    self.report(
+                        &at,
+                        message,
+                        Some(
+                            "each node has its own key pair: run `tocsin node keygen` once per node"
+                                .to_owned(),
+                        ),
+                    );
+                } else {
+                    keys.insert(*key, (&value.id, at));
+                }
+            }
+        }
+    }
+
+    /// `[server] node_key` against the running node's `[[node]]`, so a key
+    /// copied to the wrong host fails there, at startup, rather than at the
+    /// node it pushes to. Runs once secrets are resolved; the key itself is
+    /// never repeated.
+    fn validate_node_key(&mut self, items: &Items, environment: &Environment<'_>) {
+        let (node_id, _) = node_id(items, environment);
+        // No federation, or a node id that is already reported.
+        let Some(node) = items
+            .nodes
+            .iter()
+            .find(|node| node.value.id.as_str() == node_id)
+        else {
+            return;
+        };
+        let Some((server, secret)) = items.server.as_ref().and_then(|server| {
+            server
+                .value
+                .node_key
+                .as_ref()
+                .map(|secret| (server, secret))
+        }) else {
+            if !node.value.push_to.is_empty() {
+                self.report(
+                    &node.origin.key("push_to"),
+                    format!(
+                        "node `{node_id}` pushes to other nodes, so `[server] node_key` is required to sign its pushes"
+                    ),
+                    Some(
+                        "run `tocsin node keygen`, list the public key in this node's `public_keys`, and set `node_key = \"${ENV:TOCSIN_NODE_KEY}\"` in `[server]`"
+                            .to_owned(),
+                    ),
+                );
+            }
+            return;
+        };
+        // An unset variable is already reported.
+        let Some(text) = secret.resolved() else {
+            return;
+        };
+        let origin = server.origin.key("node_key");
+        let variable = secret.variable();
+        let key = match NodeKey::parse(text) {
+            Ok(key) => key,
+            Err(problem) => {
+                self.report(
+                    &origin,
+                    format!("the value of `{variable}` is {problem}"),
+                    None,
+                );
+                return;
+            }
+        };
+        let public_key = key.public_key();
+        if !node.value.public_keys.contains(&public_key) {
+            self.report(
+                &origin,
+                format!(
+                    "the key in `{variable}` is not listed under node `{node_id}`: its public key is {public_key}"
+                ),
+                Some(format!(
+                    "add \"{public_key}\" to `public_keys` in node `{node_id}`'s `[[node]]`, or set {variable} to node `{node_id}`'s own key"
+                )),
+            );
+        }
     }
 
     /// Reports a problem with the `node_id` at `origin`, or with no file
@@ -2016,15 +2252,7 @@ impl<'a> Loader<'a> {
     /// anywhere that is not a secret field.
     fn resolve_secrets(&mut self, items: &mut Items, environment: &Environment<'_>) {
         let mut secrets: Vec<(Origin, &mut Secret)> = Vec::new();
-        if let Some(server) = &mut items.server
-            && let Some(smtp) = server
-                .value
-                .email
-                .as_mut()
-                .and_then(|email| email.smtp_url.as_mut())
-        {
-            secrets.push((server.origin.keys(&["email", "smtp_url"]), smtp));
-        }
+        server_secrets(&mut items.server, &mut secrets);
         if let Some(subscribers) = &mut items.subscribers
             && let Some(turnstile) = &mut subscribers.value.turnstile
         {
@@ -2098,6 +2326,7 @@ impl<'a> Loader<'a> {
         self.validate_smtp_url(items);
         self.reject_shared_token_secrets(items);
         self.validate_headers(items);
+        self.validate_node_key(items, environment);
 
         // Items that failed to deserialize are skipped: their secret fields
         // are unknown, and their error is already reported.
@@ -2209,6 +2438,7 @@ impl<'a> Loader<'a> {
             server,
             node_id_source,
             nodes: values(items.nodes),
+            federation: items.federation.map(|item| item.value),
             components: values(items.components),
             groups: values(items.groups),
             checks: values(items.checks),
@@ -2558,6 +2788,26 @@ fn is_domain(text: &str) -> bool {
     text.len() <= 253 && text.contains('.') && text.split('.').all(is_label)
 }
 
+/// `[server]`'s secrets: the SMTP URL and the node key.
+fn server_secrets<'a>(
+    server: &'a mut Option<Item<Server>>,
+    secrets: &mut Vec<(Origin, &'a mut Secret)>,
+) {
+    let Some(Item { origin, value }) = server else {
+        return;
+    };
+    if let Some(smtp) = value
+        .email
+        .as_mut()
+        .and_then(|email| email.smtp_url.as_mut())
+    {
+        secrets.push((origin.keys(&["email", "smtp_url"]), smtp));
+    }
+    if let Some(node_key) = &mut value.node_key {
+        secrets.push((origin.key("node_key"), node_key));
+    }
+}
+
 /// Adds the `${ENV:...}` header values of `[telemetry.otlp]`, if there
 /// is one, to `secrets`.
 fn telemetry_secrets<'a>(
@@ -2634,7 +2884,11 @@ mod tests {
             ("topology", "[topology]\n"),
             (
                 "node",
-                "[server]\nnode_id = \"sample\"\n[[node]]\nid = \"sample\"\n",
+                "[server]\nnode_id = \"sample\"\n[[node]]\nid = \"sample\"\n[federation]\ndefault_nodes = [\"sample\"]\n",
+            ),
+            (
+                "federation",
+                "[server]\nnode_id = \"sample\"\n[[node]]\nid = \"sample\"\n[federation]\ndefault_nodes = [\"sample\"]\n",
             ),
         ];
         let kinds: BTreeSet<&str> = TOP_LEVEL_KEYS.iter().copied().collect();

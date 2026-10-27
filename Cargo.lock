@@ -3151,9 +3151,11 @@ dependencies = [
 name = "tocsin-core"
 version = "0.7.0"
 dependencies = [
+ "base64 0.23.1",
  "http",
  "jiff",
  "regex",
+ "ring",
  "schemars",
  "serde",
  "serde_json",

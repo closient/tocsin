@@ -93,6 +93,11 @@ pub enum Command {
         #[command(subcommand)]
         command: SlackCommand,
     },
+    /// Make the key pair a node of a federation signs its pushes with.
+    Node {
+        #[command(subcommand)]
+        command: NodeCommand,
+    },
     /// Ping a heartbeat on a running server, from the job it watches.
     Heartbeat {
         #[command(subcommand)]
@@ -710,6 +715,15 @@ pub enum SlackCommand {
         #[arg(long, env = "TOCSIN_NODE_ID", value_name = "ID")]
         node: Option<String>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NodeCommand {
+    /// Print a new key pair: the public key for this node's
+    /// `[[node]] public_keys`, and the private key for the secret store
+    /// that `[server] node_key` reads. Run once per node; the private key
+    /// is shown once and kept nowhere.
+    Keygen,
 }
 
 #[derive(Debug, Subcommand)]

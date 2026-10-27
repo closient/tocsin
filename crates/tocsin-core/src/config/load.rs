@@ -810,8 +810,8 @@ impl<'a> Loader<'a> {
                      it would otherwise be the hostname `{node_id}`"
                 ),
                 Some(format!(
-                    "pass `--node <id>`, set TOCSIN_NODE_ID or set `node_id` in `[server]` \
-                     to one of {}",
+                    "set `node_id` in `[server]`, or pass `--node <id>` or TOCSIN_NODE_ID \
+                     (a running server takes those only at restart), to one of {}",
                     list(&listed)
                 )),
             );

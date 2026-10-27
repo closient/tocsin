@@ -1923,8 +1923,8 @@ fn listed_nodes_need_the_node_id_given_not_defaulted() {
     assert_eq!(
         diagnostic.hint.as_deref(),
         Some(
-            "pass `--node <id>`, set TOCSIN_NODE_ID or set `node_id` in `[server]` \
-             to one of `probe-a`, `probe-b`"
+            "set `node_id` in `[server]`, or pass `--node <id>` or TOCSIN_NODE_ID \
+             (a running server takes those only at restart), to one of `probe-a`, `probe-b`"
         )
     );
 }

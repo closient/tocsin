@@ -765,7 +765,12 @@ impl Server {
         Parameters(input): Parameters<ValidateInput>,
     ) -> CallToolResult {
         let folder = PathBuf::from(input.folder);
-        let node = input.node.or_else(|| std::env::var("TOCSIN_NODE_ID").ok());
+        // An empty variable counts as unset, as it does for the CLI's `--node`.
+        let node = input.node.or_else(|| {
+            std::env::var("TOCSIN_NODE_ID")
+                .ok()
+                .filter(|value| !value.is_empty())
+        });
         let checked = tokio::task::spawn_blocking(move || {
             crate::config::check(&folder, node.as_deref(), None)
         })

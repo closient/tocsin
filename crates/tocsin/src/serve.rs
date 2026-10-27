@@ -251,9 +251,10 @@ async fn serve(
     let subscriptions = subscriptions(config)?;
     let slack = slack(config)?;
     let telemetry = telemetry(config)?;
+    // Bound before the store opens, so a port in use leaves no store to close.
+    let (listener, address) = bind(config.server.listen).await?;
     let store = open_store(data)?;
     warn_of_orphaned_outages(config, &store).await;
-    let (listener, address) = bind(config.server.listen).await?;
     let events = EventBus::new();
     let metrics = Arc::new(Metrics::new());
     metrics.configured(config);

@@ -241,6 +241,7 @@ A probe run on an interval.
 | `interval` | duration | `"60s"` | Time between probes. At least `1s`. |
 | `timeout` | duration | `"10s"` | Must be shorter than `interval`. |
 | `confirm` | integer | `1` | Consecutive results needed before the state changes. At least 1. |
+| `class` | string | `"production"` | What kind of probe this is: `production`, `test`, `drill` or `canary`. Its alerts carry it as the `class` label. See [`alerting.md`](alerting.md#probe-classes). |
 | `labels` | table of strings | `{}` | Labels its alerts carry, for a receiver to route on. See [`[alerting]`](#alerting). |
 | `annotations` | table of strings | `{}` | Annotations its alerts carry, such as a ticket or a runbook. See [`[alerting]`](#alerting). |
 
@@ -346,6 +347,7 @@ A ping tocsin expects to receive, such as a cron job reporting in. Pings arrive 
 | `component` | component id | none | The component whose state this heartbeat sets. |
 | `interval` | duration | | Required. How often a ping is expected. At least `1s`. |
 | `grace` | duration | `"60s"` | How late a ping may be before the heartbeat is down: it is missed once `interval + grace` passes after its last result. |
+| `class` | string | `"production"` | As on a [check](#check). |
 | `labels` | table of strings | `{}` | As on a [check](#check). |
 | `annotations` | table of strings | `{}` | As on a [check](#check). |
 
@@ -442,7 +444,7 @@ labels = { page_class = "page", team = "web" }
 annotations = { ticket = "OPS-12" }
 ```
 
-Names the contract does not cover are allowed and unchecked. Whether or not `[alerting]` is declared, a label or annotation name must be letters, digits and underscores, not starting with a digit or `__`, as Alertmanager requires; its value may not be empty; and it may not be a name tocsin sets itself: the labels `alertname`, `node`, `subject_kind` and `subject_id`, and the annotations `summary`, `description`, `health`, `name`, `component`, `component_name`, `tocsin_test` and `ended_by`. [`alerting.md`](alerting.md) shows where each notifier puts them. An alert keeps the labels and annotations it opened with until it resolves, so a reload that changes them takes effect from the next alert.
+Names the contract does not cover are allowed and unchecked. Whether or not `[alerting]` is declared, a label or annotation name must be letters, digits and underscores, not starting with a digit or `__`, as Alertmanager requires; its value may not be empty; and it may not be a name tocsin sets itself: the labels `alertname`, `node`, `subject_kind`, `subject_id` and `class` (set the check's or heartbeat's [`class`](alerting.md#probe-classes) instead), and the annotations `summary`, `description`, `health`, `name`, `component`, `component_name`, `tocsin_test` and `ended_by`. [`alerting.md`](alerting.md) shows where each notifier puts them. An alert keeps the labels and annotations it opened with until it resolves, so a reload that changes them takes effect from the next alert.
 
 ## `[subscribers]`
 

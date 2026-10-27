@@ -183,6 +183,36 @@ fn a_resolve_carries_its_fire_s_identity_and_the_outage_s_duration() {
     });
 }
 
+#[test]
+fn a_drill_check_s_alert_carries_its_class_from_fire_to_resolve() {
+    paused(async {
+        let fixture = Fixture::new();
+        let config = config(&monitored(&["slack"], "").replace(
+            "component = \"web\"\n\n[[",
+            "component = \"web\"\nclass = \"drill\"\n\n[[",
+        ));
+        let (sender, mut receiver) = channel();
+        let slack: Arc<dyn Notifier> = Fake::accepting("slack", &sender);
+        let running = start(
+            &fixture,
+            &config,
+            &[("slack", slack)],
+            &AlertMetrics::default(),
+        );
+
+        let id = running.change(down(T0)).await.unwrap();
+        let fire = next_from(&mut receiver, "slack").await.alert;
+        running.change(up(id, T0 + 90_000)).await;
+        let resolve = next_from(&mut receiver, "slack").await.alert;
+
+        // A receiver routes a drill away from the pager on this label, so
+        // the resolve must carry the same set or it opens a second alert.
+        assert_eq!(fire.labels.get("class").map(String::as_str), Some("drill"));
+        assert_eq!(resolve.labels, fire.labels);
+        running.alerter.stop().await;
+    });
+}
+
 /// `monitored`'s check, given `labels` and `annotations`, repeating hourly.
 fn labelled(labels: &str, annotations: &str) -> Config {
     config(&monitored(&["slack"], "repeat = \"1h\"").replace(
@@ -229,7 +259,10 @@ fn an_alert_keeps_the_labels_it_opened_with_through_a_reload_until_it_resolves()
             &AlertMetrics::default(),
         );
         let opened = (
-            vec![("page_class".to_owned(), "page".to_owned())],
+            vec![
+                ("class".to_owned(), "production".to_owned()),
+                ("page_class".to_owned(), "page".to_owned()),
+            ],
             vec![("ticket".to_owned(), "OPS-1".to_owned())],
         );
 
@@ -264,7 +297,10 @@ fn an_alert_keeps_the_labels_it_opened_with_through_a_reload_until_it_resolves()
         assert_eq!(
             carried(&next),
             (
-                vec![("page_class".to_owned(), "ticket".to_owned())],
+                vec![
+                    ("class".to_owned(), "production".to_owned()),
+                    ("page_class".to_owned(), "ticket".to_owned()),
+                ],
                 vec![("ticket".to_owned(), "OPS-2".to_owned())],
             )
         );
@@ -285,7 +321,10 @@ fn an_alert_that_re_fires_after_a_reload_keeps_the_labels_it_opened_with() {
             &AlertMetrics::default(),
         );
         let opened = (
-            vec![("page_class".to_owned(), "page".to_owned())],
+            vec![
+                ("class".to_owned(), "production".to_owned()),
+                ("page_class".to_owned(), "page".to_owned()),
+            ],
             vec![("ticket".to_owned(), "OPS-1".to_owned())],
         );
 
@@ -372,7 +411,7 @@ fn a_resolve_queued_before_a_reload_removes_its_check_keeps_its_labels() {
             (AlertEvent::Resolve, Answer::Accept)
         );
         assert_eq!(carried(&resolve), carried(&fire));
-        assert_eq!(resolve.alert.labels.len(), 1);
+        assert_eq!(resolve.alert.labels.len(), 2);
         running.alerter.stop().await;
     });
 }
@@ -841,7 +880,7 @@ fn a_check_a_reload_removes_resolves_everywhere_it_fired_as_ended_by_the_configu
             assert_eq!(resolve.alert.duration_ms(), Some(90_000));
             assert_eq!(resolve.alert.component_id, fire.alert.component_id);
             assert_eq!(carried(&resolve), carried(&fire));
-            assert_eq!(resolve.alert.labels.len(), 1);
+            assert_eq!(resolve.alert.labels.len(), 2);
             assert_eq!(resolve.alert.ended_by, Some(EndedBy::Config));
             let mut annotations = fire.alert.annotations();
             assert_eq!(annotations.len(), 1);

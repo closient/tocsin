@@ -949,6 +949,38 @@ values = ["false", "true"]
     }
 
     #[tokio::test]
+    async fn a_reload_with_an_unknown_probe_class_keeps_the_last_good_configuration() {
+        let (target, _accepting) = target().await;
+        let mut served = Served::start(&target).await;
+        let classed = |class: &str| {
+            BASE.replace("TARGET", &target).replace(
+                "confirm = 1\n",
+                &format!("confirm = 1\nclass = \"{class}\"\n"),
+            )
+        };
+
+        let status = served.change("base.toml", Some(&classed("drill"))).await;
+        assert!(status.ok, "{status:?}");
+        let loaded_at = status.loaded_at;
+
+        // A class tocsin does not know would leave receivers routing on a
+        // value nobody wrote a rule for: it is refused, and the drill runs on.
+        let status = served.change("base.toml", Some(&classed("exercise"))).await;
+        assert!(!status.ok, "{status:?}");
+        assert_eq!(status.loaded_at, loaded_at, "the old configuration runs");
+        assert!(
+            status
+                .errors
+                .iter()
+                .any(|error| error.message.contains("exercise")),
+            "{status:?}"
+        );
+        let monitor = served.reloader.into_monitor().await;
+        assert_eq!(running(&monitor), ["kept"]);
+        monitor.stop().await;
+    }
+
+    #[tokio::test]
     async fn the_status_page_follows_a_reload() {
         let (target, _accepting) = target().await;
         let mut served = Served::start(&target).await;

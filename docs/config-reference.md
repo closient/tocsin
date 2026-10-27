@@ -47,6 +47,7 @@ A probe run on an interval, whose result sets a component's health.
 |-----|------|----------|---------|-------------|
 | `annotations` | table of string |  |  | Annotations on the check's alerts, such as a runbook: shown, not routed on. `[alerting]` can require some and limit their values. |
 | `assert` | [array of tables](#table-assertion) |  |  | Conditions a result must meet, each `[[check.assert]]` table holding one. With none, a probe that completes counts as up, except that `http` needs a 2xx or 3xx status, `dns` a `NOERROR` response and `tls` a certificate that verifies for the host. |
+| `class` | [`ProbeClass`](#type-probeclass) |  |  | What kind of probe this is: `production` (the default), `test`, `drill` or `canary`. Every alert of the check carries it as the `class` label, so a receiver can tell a drill from an outage without matching names. |
 | `component` | [`Id`](#type-id) |  |  | The `[[component]]` whose health this check sets. |
 | `confirm` | integer |  | `1` | Consecutive results that disagree with the current state before the state changes. |
 | `dns` | [table](#table-dnssettings) |  |  | Settings for `dns` checks. |
@@ -259,6 +260,7 @@ A `[[check.link]]` or `[[heartbeat.link]]`: a named link to somewhere an operato
 | Key | Type | Required | Default | Description |
 |-----|------|----------|---------|-------------|
 | `annotations` | table of string |  |  | Annotations on the heartbeat's alerts, such as a runbook: shown, not routed on. `[alerting]` can require some and limit their values. |
+| `class` | [`ProbeClass`](#type-probeclass) |  |  | What kind of probe this is: `production` (the default), `test`, `drill` or `canary`. Every alert of the heartbeat carries it as the `class` label. |
 | `component` | [`Id`](#type-id) |  |  | The `[[component]]` whose health this heartbeat sets. |
 | `grace` | [`Duration`](#type-duration) |  | `"1m"` | How late a ping may be before the heartbeat is down: it is down once `interval + grace` passes without one. |
 | `id` | [`Id`](#type-id) | yes |  | Unique among checks and heartbeats in every file: they share one history. |
@@ -706,6 +708,19 @@ How OTLP is carried.
 |-------|---------|
 | `"http/protobuf"` | Protobuf in an HTTP POST, to port 4318 by convention. |
 | `"grpc"` | gRPC, to port 4317 by convention. |
+
+<a id="type-probeclass"></a>
+
+### `ProbeClass`
+
+What kind of probe a check or heartbeat is, carried on its alerts as the `class` label.
+
+| Value | Meaning |
+|-------|---------|
+| `"production"` | Watches something real; its alerts are real. |
+| `"test"` | Exercises tocsin or a receiver; its alerts are not outages. |
+| `"drill"` | A rehearsal of an outage, such as a paging drill. |
+| `"canary"` | Watches a canary, which is expected to fail now and then. |
 
 <a id="type-recordtype"></a>
 

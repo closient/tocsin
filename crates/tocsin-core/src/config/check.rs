@@ -64,6 +64,12 @@ pub struct Check {
     /// `[[check.link]]` table.
     #[serde(default, rename = "link", skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
+    /// What kind of probe this is: `production` (the default), `test`,
+    /// `drill` or `canary`. Every alert of the check carries it as the
+    /// `class` label, so a receiver can tell a drill from an outage without
+    /// matching names.
+    #[serde(default, skip_serializing_if = "ProbeClass::is_production")]
+    pub class: ProbeClass,
     /// Labels on the check's alerts, such as `{ team = "ops" }`: a receiver
     /// like Alertmanager routes on them. `[alerting]` can require some and
     /// limit their values.
@@ -122,6 +128,41 @@ impl CheckType {
             CheckType::Icmp => "icmp",
             CheckType::Tls => "tls",
         }
+    }
+}
+
+/// What kind of probe a check or heartbeat is, carried on its alerts as the
+/// `class` label.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ProbeClass {
+    /// Watches something real; its alerts are real.
+    #[default]
+    Production,
+    /// Exercises tocsin or a receiver; its alerts are not outages.
+    Test,
+    /// A rehearsal of an outage, such as a paging drill.
+    Drill,
+    /// Watches a canary, which is expected to fail now and then.
+    Canary,
+}
+
+impl ProbeClass {
+    /// The name used in configuration and on alerts.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProbeClass::Production => "production",
+            ProbeClass::Test => "test",
+            ProbeClass::Drill => "drill",
+            ProbeClass::Canary => "canary",
+        }
+    }
+
+    /// Whether this is the default, `production`.
+    #[must_use]
+    pub fn is_production(&self) -> bool {
+        *self == ProbeClass::Production
     }
 }
 

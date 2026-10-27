@@ -78,6 +78,17 @@ pub struct Router {
     routes: Vec<CompiledRoute>,
 }
 
+/// A subject's configured labels with its `class` among them, which every
+/// alert of it carries.
+fn with_class(
+    labels: &BTreeMap<String, String>,
+    class: config::ProbeClass,
+) -> BTreeMap<String, String> {
+    let mut labels = labels.clone();
+    labels.insert(config::CLASS_LABEL.to_owned(), class.as_str().to_owned());
+    labels
+}
+
 fn millis(duration: Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
@@ -91,7 +102,7 @@ impl Router {
             let id = heartbeat.id.as_str().to_owned();
             let subject = Subject {
                 name: heartbeat.name.clone().unwrap_or_else(|| id.clone()),
-                labels: heartbeat.labels.clone(),
+                labels: with_class(&heartbeat.labels, heartbeat.class),
                 annotations: heartbeat.annotations.clone(),
             };
             subjects.insert((SubjectKind::Heartbeat, id), subject);
@@ -100,7 +111,7 @@ impl Router {
             let id = check.id.as_str().to_owned();
             let subject = Subject {
                 name: check.name.clone().unwrap_or_else(|| id.clone()),
-                labels: check.labels.clone(),
+                labels: with_class(&check.labels, check.class),
                 annotations: check.annotations.clone(),
             };
             subjects.insert((SubjectKind::Check, id), subject);

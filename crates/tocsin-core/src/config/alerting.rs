@@ -12,6 +12,15 @@ use serde::{Deserialize, Serialize};
 /// identity. A check or heartbeat may not set them.
 pub const IDENTITY_LABELS: &[&str] = &["alertname", "node", "subject_kind", "subject_id"];
 
+/// The label carrying a check's or heartbeat's `class`, pinned on each of
+/// its alerts when the alert opens. Configuration sets it only through
+/// `class`.
+pub const CLASS_LABEL: &str = "class";
+
+/// Every label tocsin sets: [`IDENTITY_LABELS`] and [`CLASS_LABEL`]. A check
+/// or heartbeat may not set them in `labels`.
+pub const OWN_LABELS: &[&str] = &["alertname", "node", "subject_kind", "subject_id", "class"];
+
 /// The annotations tocsin sets on alerts it posts to Alertmanager (and, for
 /// `ended_by`, to a webhook). A check or heartbeat may not set them.
 pub const OWN_ANNOTATIONS: &[&str] = &[

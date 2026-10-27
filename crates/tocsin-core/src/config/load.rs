@@ -779,15 +779,20 @@ impl<'a> Loader<'a> {
             NodeIdSource::Config | NodeIdSource::Hostname => "`node_id`",
         };
         if node_id.is_empty() || node_id.contains(char::is_whitespace) {
-            // `validate_server` has already reported a `node_id` written so.
-            if source == NodeIdSource::Argument {
-                self.report_node_id(
-                    located.as_ref(),
-                    format!("{given_as} must be non-empty with no whitespace"),
-                    None,
-                );
+            // `validate_server` has already reported a `node_id` written so,
+            // and a hostname is reported below only once nodes are listed.
+            match source {
+                NodeIdSource::Argument => {
+                    self.report_node_id(
+                        located.as_ref(),
+                        format!("{given_as} must be non-empty with no whitespace"),
+                        None,
+                    );
+                    return;
+                }
+                NodeIdSource::Config => return,
+                NodeIdSource::Hostname => {}
             }
-            return;
         }
         let Some(first) = items.nodes.first() else {
             return;

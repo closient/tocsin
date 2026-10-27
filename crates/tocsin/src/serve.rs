@@ -1038,8 +1038,8 @@ mod tests {
     use tocsin_engine::Ping;
     use tocsin_engine::ports::{BoxFuture, History};
     use tocsin_store::{
-        DB_FILE, LastUp, LatestResult, NewCheckResult, Outage, OutageChange, Retention, Store,
-        SubjectKind,
+        DB_FILE, LastUp, LatestResult, NewCheckResult, NewOutage, Outage, OutageChange, Retention,
+        Store, SubjectKind,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -1048,7 +1048,7 @@ mod tests {
 
     use super::{
         Connections, Grace, Metrics, Monitor, ReloadError, close, orphaned_outages, spawn_server,
-        start_checks, supervise,
+        start_checks, supervise, warn_of_orphaned_outages,
     };
     use crate::exit::Exit;
     use crate::http::events::{Event, EventBus};
@@ -1089,6 +1089,59 @@ mod tests {
             "{warning}"
         );
         assert!(warning.contains("`node_id` in `[server]`"), "{warning}");
+    }
+
+    fn named(hostname: &str, toml: &str) -> tocsin_core::config::Config {
+        tocsin_core::config::load(
+            &[Source {
+                name: "tocsin.toml".into(),
+                text: Ok(toml.into()),
+            }],
+            &Environment {
+                hostname: hostname.into(),
+                node_id: None,
+                variable: &|_| None,
+            },
+        )
+        .unwrap()
+    }
+
+    /// A host renamed from `old-host` to `new-host` is told about the
+    /// outage it left open under the old name, unless its id was set.
+    #[tokio::test]
+    async fn a_renamed_host_is_warned_of_the_outages_left_under_its_old_name() {
+        let (_dir, store) = open();
+        store
+            .open_outage(NewOutage {
+                node_id: "old-host".into(),
+                subject_kind: SubjectKind::Check,
+                check_id: "api".into(),
+                component_id: None,
+                health: Health::Down,
+                started_at_ms: 1_000,
+                alerted: true,
+            })
+            .await
+            .unwrap();
+
+        let log = Captured::default();
+        {
+            let _log = log.capture();
+            warn_of_orphaned_outages(&named("new-host", ""), &store).await;
+        }
+        let text = log.text();
+        assert!(text.contains("WARN"), "{text}");
+        assert!(text.contains("running as `new-host`"), "{text}");
+        assert!(text.contains("`old-host` (check `api`)"), "{text}");
+
+        let set = Captured::default();
+        {
+            let _log = set.capture();
+            let config = named("new-host", "[server]\nnode_id = \"new-host\"\n");
+            warn_of_orphaned_outages(&config, &store).await;
+        }
+        assert_eq!(set.text(), "", "an id that was set is not second-guessed");
+        assert!(close(store).await);
     }
 
     fn open() -> (tempfile::TempDir, Arc<Store>) {

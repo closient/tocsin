@@ -21,6 +21,7 @@ mod history;
 mod incident;
 mod node;
 mod outage;
+mod push;
 mod readers;
 mod release;
 mod rollup;
@@ -33,6 +34,7 @@ mod subscriber;
 mod tests;
 mod writer;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -60,6 +62,7 @@ pub use crate::history::{Checks, HistoryPage, Newest, ResultFilter, ResultSlice}
 pub use crate::incident::{Drafts, OpenIncident, Opened};
 pub use crate::node::RemoteStore;
 pub use crate::outage::{LastUp, LatestResult, Outage};
+pub use crate::push::{PushCursor, Unpushed};
 use crate::readers::Readers;
 pub use crate::release::{ComponentScope, Order, Projects, ReleaseQuery, TimelineQuery, Written};
 pub use crate::rollup::DailyRollup;
@@ -211,10 +214,16 @@ pub struct RetentionReport {
     pub purged_before_ms: Option<i64>,
     /// Rollup rows finalized before deleting.
     pub rolled_up: usize,
+    /// The first day finalizing rewrote rollups for, if it ran.
+    pub finalized_from: Option<Day>,
     /// Results deleted.
     pub deleted: usize,
     /// DELETE statements run.
     pub chunks: u32,
+    /// For each upstream with a push cursor, how many of the results deleted
+    /// were this store's own and not yet acknowledged by it: rows it will
+    /// never receive.
+    pub unpushed: BTreeMap<String, u64>,
 }
 
 /// Sizes, counts and the time span of stored results.
@@ -1333,6 +1342,58 @@ impl Store {
         self.read(node::remote_stores).await
     }
 
+    /// How far `upstream` has acknowledged this node's (`node_id`'s) rows,
+    /// starting it at the beginning if it has no cursor yet.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn push_cursor(&self, upstream: String, node_id: String) -> Result<PushCursor> {
+        self.writer
+            .run(move |conn| push::ensure_cursor(conn, &upstream, &node_id))
+            .await
+    }
+
+    /// This node's (`node_id`'s) rows past `cursor`, at most `limit` of them
+    /// but for a single day of rollups: see [`Unpushed`].
+    ///
+    /// # Errors
+    ///
+    /// The read fails.
+    pub async fn unpushed(
+        &self,
+        node_id: String,
+        cursor: PushCursor,
+        limit: u32,
+    ) -> Result<Unpushed> {
+        self.read(move |conn| push::unpushed(conn, &node_id, &cursor, limit))
+            .await
+    }
+
+    /// Moves `upstream`'s cursor to `cursor`.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn advance_push_cursor(&self, upstream: String, cursor: PushCursor) -> Result<()> {
+        self.writer
+            .run(move |conn| push::advance(conn, &upstream, &cursor))
+            .await
+    }
+
+    /// Sends every upstream this node's rollups again from `from`, a day
+    /// whose rollups were rewritten: a cursor already past it moves back
+    /// to it.
+    ///
+    /// # Errors
+    ///
+    /// The write fails.
+    pub async fn repush_rollups_from(&self, from: Day) -> Result<()> {
+        self.writer
+            .run(move |conn| push::repush_rollups_from(conn, from))
+            .await
+    }
+
     /// Signs `signup.email` up, or refreshes the confirmation of an address
     /// that signed up but never confirmed. An address already confirmed is
     /// left as it is.
@@ -1734,12 +1795,14 @@ impl Store {
             .plus(-i64::from(policy.days))
             .start_ms();
         let mut rolled_up = 0;
+        let mut finalized_from = None;
         // A cutoff before 1970 finalizes nothing: the watermark starts at 0.
         while let Some(plan) = self
             .read(move |conn| rollup::plan_finalize(conn, cutoff, now_ms))
             .await?
         {
             self.checkpointer.make_room().await;
+            finalized_from.get_or_insert(Day::containing(plan.from_ms));
             rolled_up += self
                 .writer
                 .run(move |conn| rollup::finalize(conn, plan))
@@ -1751,18 +1814,24 @@ impl Store {
             return Ok(RetentionReport {
                 purged_before_ms: None,
                 rolled_up,
+                finalized_from,
                 deleted: 0,
                 chunks: 0,
+                unpushed: BTreeMap::new(),
             });
         };
         let limit = policy.chunk_rows.max(1);
         let (mut deleted, mut chunks) = (0, 0);
+        let mut unpushed = BTreeMap::new();
         loop {
             self.checkpointer.make_room().await;
-            let removed = self
+            let (removed, unacknowledged) = self
                 .writer
                 .run(move |conn| rollup::delete_chunk(conn, target, limit))
                 .await?;
+            for (upstream, rows) in unacknowledged {
+                *unpushed.entry(upstream).or_insert(0) += rows;
+            }
             if removed == 0 {
                 break;
             }
@@ -1776,8 +1845,10 @@ impl Store {
         Ok(RetentionReport {
             purged_before_ms: Some(target),
             rolled_up,
+            finalized_from,
             deleted,
             chunks,
+            unpushed,
         })
     }
 

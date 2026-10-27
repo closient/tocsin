@@ -40,6 +40,7 @@ use crate::lock;
 use crate::metrics::{Counted, Metered, Metrics};
 use crate::otlp;
 use crate::output::{Failure, Report};
+use crate::push::{Pushers, Upstreams};
 use crate::reload::{ConfigStatus, LiveRouter, Reloader, Reloading};
 use crate::subscribers::Subscriptions;
 use crate::subscribers::worker::Postman;
@@ -251,19 +252,21 @@ async fn serve(
     let subscriptions = subscriptions(config)?;
     let slack = slack(config)?;
     let telemetry = telemetry(config)?;
+    let metrics = Arc::new(Metrics::new());
+    metrics.configured(config);
+    let upstreams = Upstreams::from_config(config, &metrics)?;
     // Bound before the store opens, so a port in use leaves no store to close.
     let (listener, address) = bind(config.server.listen).await?;
     let store = open_store(data)?;
     warn_of_orphaned_outages(config, &store).await;
     let events = EventBus::new();
-    let metrics = Arc::new(Metrics::new());
-    metrics.configured(config);
     let (mut monitor, maintenance) = match start_checks(
         config,
         &store,
         &events,
         &metrics,
         Retention::days(retention_days),
+        &upstreams,
     )
     .await
     {
@@ -280,6 +283,7 @@ async fn serve(
         subscriptions.as_ref(),
         telemetry,
     );
+    monitor.attach_pushers(upstreams.start(&store));
     let (status, config_status) = watch::channel(ConfigStatus::loaded(http::now()));
     let state = AppState {
         store: Arc::clone(&store),
@@ -356,6 +360,8 @@ pub(crate) struct Monitor {
     postman: Option<Postman>,
     /// Sends metrics over OTLP, when `[telemetry.otlp]` is on.
     exporter: Option<otlp::Exporter>,
+    /// The pushers to the nodes in `push_to`, if any.
+    pushers: Option<Pushers>,
 }
 
 /// Why [`Monitor::reload`] failed.
@@ -480,6 +486,7 @@ impl Monitor {
             store: Arc::clone(store),
             postman: None,
             exporter: None,
+            pushers: None,
         })
     }
 
@@ -579,6 +586,9 @@ impl Monitor {
         if let Some(exporter) = self.exporter {
             exporter.stop().await;
         }
+        if let Some(pushers) = self.pushers {
+            pushers.stop().await;
+        }
     }
 
     /// Stops `postman` with the checks. Subscriber mail is not part of a
@@ -591,6 +601,12 @@ impl Monitor {
     /// `[telemetry]` is read only at startup.
     pub(crate) fn attach_exporter(&mut self, exporter: otlp::Exporter) {
         self.exporter = Some(exporter);
+    }
+
+    /// Stops `pushers` with the checks. The nodes pushed to are read only
+    /// at startup.
+    pub(crate) fn attach_pushers(&mut self, pushers: Pushers) {
+        self.pushers = Some(pushers);
     }
 }
 
@@ -943,15 +959,16 @@ pub(crate) async fn start_checks(
     events: &EventBus,
     metrics: &Metrics,
     retention: Retention,
+    upstreams: &Upstreams,
 ) -> Result<(Monitor, JoinHandle<()>), Failure> {
-    maintenance_pass(store, retention).await;
+    maintenance_pass(store, retention, upstreams).await;
     let monitor = Monitor::start(config, store, events, metrics).await?;
-    let maintenance = tokio::spawn(maintain(Arc::clone(store), retention));
+    let maintenance = tokio::spawn(maintain(Arc::clone(store), retention, upstreams.clone()));
     Ok((monitor, maintenance))
 }
 
 /// Hourly after the pass [`start_checks`] runs: see [`maintenance_pass`].
-async fn maintain(store: Arc<Store>, retention: Retention) {
+async fn maintain(store: Arc<Store>, retention: Retention, upstreams: Upstreams) {
     let mut ticks = tokio::time::interval_at(
         tokio::time::Instant::now() + MAINTENANCE_EVERY,
         MAINTENANCE_EVERY,
@@ -959,29 +976,39 @@ async fn maintain(store: Arc<Store>, retention: Retention) {
     ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         ticks.tick().await;
-        maintenance_pass(&store, retention).await;
+        maintenance_pass(&store, retention, &upstreams).await;
     }
 }
 
 /// Rolls up the days since the last pass, then deletes results older than
-/// the retention window. Failures are logged and retried on the next pass;
-/// a pass never stops the monitor.
-async fn maintenance_pass(store: &Store, retention: Retention) {
+/// the retention window. The days either rewrote go to `upstreams` again,
+/// and the results retention deleted before an upstream had them are
+/// counted. Failures are logged and retried on the next pass; a pass never
+/// stops the monitor.
+async fn maintenance_pass(store: &Store, retention: Retention, upstreams: &Upstreams) {
     match store.rollup_recent().await {
-        Ok(report) => tracing::debug!(rows = report.rows, "daily rollups updated"),
+        Ok(report) => {
+            tracing::debug!(rows = report.rows, "daily rollups updated");
+            upstreams.rewrote(store, report.since).await;
+        }
         Err(error) => tracing::error!(%error, "daily rollup failed"),
     }
     match store
         .apply_retention(retention, tocsin_store::now_ms())
         .await
     {
-        Ok(report) if report.deleted > 0 => tracing::info!(
-            deleted = report.deleted,
-            chunks = report.chunks,
-            rolled_up = report.rolled_up,
-            "retention purged old check results"
-        ),
-        Ok(_) => {}
+        Ok(report) => {
+            if report.deleted > 0 {
+                tracing::info!(
+                    deleted = report.deleted,
+                    chunks = report.chunks,
+                    rolled_up = report.rolled_up,
+                    "retention purged old check results"
+                );
+            }
+            upstreams.expired(&report.unpushed);
+            upstreams.rewrote(store, report.finalized_from).await;
+        }
         Err(error) => tracing::error!(%error, "retention failed"),
     }
 }
@@ -1054,6 +1081,7 @@ mod tests {
     use crate::exit::Exit;
     use crate::http::events::{Event, EventBus};
     use crate::http::{self, AppState};
+    use crate::push::Upstreams;
     use crate::testing::Captured;
 
     fn orphan(node_id: &str, subject_kind: SubjectKind, check_id: &str) -> Outage {
@@ -1643,6 +1671,7 @@ mod tests {
             &EventBus::new(),
             &Metrics::new(),
             Retention::days(90),
+            &Upstreams::default(),
         )
         .await
         .unwrap();

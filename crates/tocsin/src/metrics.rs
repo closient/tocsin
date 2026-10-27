@@ -72,6 +72,8 @@ pub struct Metrics {
     pub export: ExportMetrics,
     /// What the other nodes' pushes say of them.
     pub federation: FederationMetrics,
+    /// How this node's own pushes go.
+    pub push: PushMetrics,
     /// The Slack connections the running configuration's notifiers name,
     /// as [`slack_names`] gives them, for [`Metrics::read`].
     slack: Mutex<Option<Vec<(String, String)>>>,
@@ -84,6 +86,7 @@ impl Metrics {
         let alerting = AlertMetrics::register(&mut registry);
         let config = ConfigMetrics::register(&mut registry);
         let checks = CheckMetrics::register(&mut registry);
+        let push = PushMetrics::register(&mut registry);
         let build = Family::<Labels, Gauge>::default();
         build
             .get_or_create(&vec![("version", env!("CARGO_PKG_VERSION").to_owned())])
@@ -103,6 +106,7 @@ impl Metrics {
             checks,
             export,
             federation: FederationMetrics::default(),
+            push,
             slack: Mutex::default(),
         }
     }
@@ -415,6 +419,65 @@ impl ConfigMetrics {
         self.reload_success.set(0);
         self.last_error.set(at.as_millis().div_euclid(1000));
     }
+}
+
+/// How this node's pushes to the nodes in its `push_to` go, by
+/// `upstream`, the node pushed to:
+///
+/// - `tocsin_push_failures_total{upstream}`, every push that did not
+///   succeed: unanswered, refused, or answered with anything but 2xx;
+/// - `tocsin_push_rows_expired_total{upstream}`, this node's results that
+///   retention deleted before `upstream` acknowledged them, so it will
+///   never have them.
+///
+/// Each upstream's series start at 0 when its pusher does. The upstreams
+/// are read only at startup, so the series are bounded by the
+/// configuration tocsin started with.
+#[derive(Debug, Clone, Default)]
+pub struct PushMetrics {
+    failures: Family<Labels, Counter>,
+    expired: Family<Labels, Counter>,
+}
+
+impl PushMetrics {
+    fn register(registry: &mut Registry) -> Self {
+        let metrics = PushMetrics::default();
+        registry.register(
+            "tocsin_push_failures",
+            "Pushes to an upstream node that did not succeed, by upstream",
+            metrics.failures.clone(),
+        );
+        registry.register(
+            "tocsin_push_rows_expired",
+            "This node's results deleted by retention before an upstream node acknowledged them, by upstream",
+            metrics.expired.clone(),
+        );
+        metrics
+    }
+
+    /// Starts `upstream`'s series at 0.
+    pub fn pushing_to(&self, upstream: &str) {
+        let labels = upstream_label(upstream);
+        let _ = self.failures.get_or_create(&labels);
+        let _ = self.expired.get_or_create(&labels);
+    }
+
+    /// A push to `upstream` failed.
+    pub fn failed(&self, upstream: &str) {
+        self.failures.get_or_create(&upstream_label(upstream)).inc();
+    }
+
+    /// Retention deleted `rows` of this node's results `upstream` had not
+    /// acknowledged.
+    pub fn expired(&self, upstream: &str, rows: u64) {
+        self.expired
+            .get_or_create(&upstream_label(upstream))
+            .inc_by(rows);
+    }
+}
+
+fn upstream_label(upstream: &str) -> Labels {
+    vec![("upstream", upstream.to_owned())]
 }
 
 /// What the checks and heartbeats do, as it happens:

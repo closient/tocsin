@@ -6,7 +6,7 @@
 //! retention also checks, under the write lock, for results committed after
 //! the reader's snapshot and recounts the day if there are any.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use tocsin_core::Health;
@@ -14,6 +14,7 @@ use tocsin_core::Health;
 use crate::SubjectKind;
 use crate::day::{Day, MS_PER_DAY};
 use crate::error::Result;
+use crate::push;
 
 /// One check's or heartbeat's results on one node for one UTC day.
 ///
@@ -339,7 +340,7 @@ pub(crate) fn raise_purged_before(conn: &Connection, ms: i64) -> Result<()> {
 /// The next span retention will finalize, counted on a reader.
 pub(crate) struct Finalize {
     /// The watermark the span starts at.
-    from_ms: i64,
+    pub(crate) from_ms: i64,
     /// Where the watermark moves to: the end of the oldest day with results,
     /// or `cutoff_ms` if none remain before it.
     until_ms: i64,
@@ -413,19 +414,26 @@ pub(crate) fn finalize(conn: &mut Connection, plan: Finalize) -> Result<usize> {
     Ok(rows)
 }
 
+/// The oldest results started before `?1`, at most `?2` of them: the rows
+/// one retention chunk deletes.
+const CHUNK: &str =
+    "SELECT id FROM check_result WHERE started_at < ?1 ORDER BY started_at, id LIMIT ?2";
+
 /// Deletes up to `limit` of the oldest results started before `before_ms`.
-/// Returns how many were deleted.
-pub(crate) fn delete_chunk(conn: &mut Connection, before_ms: i64, limit: u32) -> Result<usize> {
+/// Returns how many were deleted and, for each upstream, how many of them
+/// this store recorded and that upstream had not yet acknowledged.
+pub(crate) fn delete_chunk(
+    conn: &mut Connection,
+    before_ms: i64,
+    limit: u32,
+) -> Result<(usize, BTreeMap<String, u64>)> {
     let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let unacknowledged = push::unacknowledged_in(&transaction, CHUNK, before_ms, limit)?;
     let deleted = transaction
-        .prepare_cached(
-            "DELETE FROM check_result WHERE id IN (
-                 SELECT id FROM check_result WHERE started_at < ?1 ORDER BY started_at LIMIT ?2
-             )",
-        )?
+        .prepare_cached(&format!("DELETE FROM check_result WHERE id IN ({CHUNK})"))?
         .execute(params![before_ms, limit])?;
     transaction.commit()?;
-    Ok(deleted)
+    Ok((deleted, unacknowledged))
 }
 
 pub(crate) fn parse_column<T: std::str::FromStr>(index: usize, text: &str) -> rusqlite::Result<T>

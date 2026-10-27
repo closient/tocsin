@@ -27,6 +27,7 @@ mod notify;
 mod otlp;
 mod output;
 mod probe;
+mod push;
 mod query;
 mod release;
 mod reload;

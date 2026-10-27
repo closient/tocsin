@@ -19,7 +19,9 @@
 //! running server. A reload keeps the running `[server]` and warns when the
 //! files say something else. `[subscribers]` is the same: its rate limits
 //! and mailer start with the server. So is `[telemetry]`: its exporter
-//! starts with the server.
+//! starts with the server. The nodes this node pushes its history to, and
+//! how often, are read at startup as well; a reload that changes them warns
+//! and the running pushers keep going.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
@@ -43,6 +45,7 @@ use crate::exit::Exit;
 use crate::http::{self, AppState};
 use crate::metrics::ConfigMetrics;
 use crate::output::Failure;
+use crate::push;
 use crate::serve::{Monitor, ReloadError};
 
 /// How long the configuration folder must be quiet before a change to it
@@ -271,6 +274,12 @@ impl Running {
             );
         }
         config.telemetry.clone_from(&running.telemetry);
+        if push::settings_changed(running, &config) {
+            tracing::warn!(
+                "this node's `push_to` or `[federation] push_interval` changed; they are read \
+                 only at startup, so the running pushers keep going until tocsin restarts"
+            );
+        }
 
         let unfinished = match self.monitor.reload(&config).await {
             Ok(()) => None,

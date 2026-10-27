@@ -319,7 +319,7 @@ pub(crate) fn slices(
 }
 
 /// The error for a `before` that names no row this read can resume from.
-fn lost_cursor(before: i64, what: &str) -> Error {
+pub(crate) fn lost_cursor(before: i64, what: &str) -> Error {
     Error::Invalid(vec![FieldError::new(
         "before",
         format!(

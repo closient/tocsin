@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use tocsin_core::alert::AlertState;
 use tocsin_core::incident::{Impact, IncidentStatus, Timestamp};
 
 pub use crate::http::heartbeats::PingStatus;
@@ -120,6 +121,20 @@ pub enum Command {
         #[command(flatten)]
         page: HistoryArgs,
     },
+    /// Alerts sent to notifiers at any time in the window, newest first,
+    /// with the labels they carried and how each message's delivery went.
+    /// Needs a token with the `status:read` scope.
+    Alerts {
+        #[command(flatten)]
+        server: ServerArgs,
+
+        /// Only `firing` or only `resolved` alerts.
+        #[arg(long, value_name = "STATE")]
+        state: Option<AlertState>,
+
+        #[command(flatten)]
+        page: HistoryArgs,
+    },
     /// Outages, incidents and deploys, oldest first. Non-public projects'
     /// deploys need a token with the `status:read` scope.
     Timeline {
@@ -157,7 +172,7 @@ pub enum Command {
 pub struct HistoryArgs {
     /// The start of the window: a duration back from now, such as `2h` or
     /// `7d`, or RFC 3339. At most 366 days back; defaults to one day for
-    /// results and 30 days for outages.
+    /// results and 30 days for outages and alerts.
     #[arg(long, value_name = "WHEN", value_parser = crate::query::parse_since)]
     pub since: Option<Timestamp>,
 

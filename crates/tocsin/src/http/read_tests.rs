@@ -17,7 +17,10 @@ use tocsin_core::state::{ComponentStatus, Confirmed};
 use tocsin_engine::{
     CheckSnapshot, ComponentSnapshot, HeartbeatHandle, LastResult, MemberKind, Snapshot,
 };
-use tocsin_store::{NewCheckResult, NewOutage, Store, SubjectKind};
+use tocsin_store::{
+    AlertRouting, AlertTarget, DeliveryOutcome, NewCheckResult, NewOutage, OutageChange, OutageEnd,
+    Store, SubjectKind,
+};
 use tower::ServiceExt;
 
 use super::events::EventBus;
@@ -791,4 +794,145 @@ async fn llms_txt_is_the_status_in_plain_text_with_where_to_go_next() {
         !text.contains("Secret"),
         "a private project leaked:\n{text}"
     );
+}
+
+/// Opens an alerting outage of `api-https` routed to `slack`, whose fire
+/// fails for good, then recovers it so its resolve waits. Returns the
+/// outage's start. The routing is the store's alone, so no `class` is
+/// pinned; the worker test pins the full set against what was posted.
+async fn failed_alert(api: &Api) -> i64 {
+    let store = &api.state.store;
+    let started = now().as_millis() - 10 * 60_000;
+    let routing = AlertRouting {
+        targets: vec![AlertTarget {
+            notifier_id: "slack".into(),
+            route_id: "ops".into(),
+            repeat_ms: None,
+        }],
+        labels: [("team".to_owned(), "platform".to_owned())].into(),
+        ..AlertRouting::default()
+    };
+    let opened = OutageChange {
+        end: None,
+        open: Some(NewOutage {
+            node_id: "node-a".into(),
+            subject_kind: SubjectKind::Check,
+            check_id: "api-https".into(),
+            component_id: Some("api".into()),
+            health: Down,
+            started_at_ms: started,
+            alerted: true,
+        }),
+    };
+    let id = store
+        .change_outage_alerting(opened, Some(routing), started)
+        .await
+        .unwrap()
+        .opened
+        .unwrap();
+    let fire = store.outbox().await.unwrap().pending[0].id;
+    store
+        .finish_delivery(
+            fire,
+            DeliveryOutcome::Failed {
+                error: "HTTP 410 Gone".into(),
+            },
+            started + 1_000,
+        )
+        .await
+        .unwrap();
+    let ended = OutageChange {
+        end: Some(OutageEnd {
+            id,
+            ended_at_ms: started + 60_000,
+        }),
+        open: None,
+    };
+    store
+        .change_outage_alerting(ended, None, started + 60_000)
+        .await
+        .unwrap();
+    started
+}
+
+#[tokio::test]
+async fn the_alert_history_needs_a_reader_and_a_known_state() {
+    let api = api();
+    let (status, _) = api.get("/api/v1/alerts/history", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, body) = api.get("/api/v1/alerts/history", Some(ONCALL)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let (status, body) = api
+        .get("/api/v1/alerts/history?state=pending", Some(READER))
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        body["message"].as_str().unwrap().contains("state"),
+        "{body}"
+    );
+    let (status, body) = api
+        .get("/api/v1/alerts/history?before=999", Some(READER))
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["fields"][0]["path"], "before", "{body}");
+}
+
+#[tokio::test]
+async fn the_alert_history_shows_an_alert_s_labels_and_how_each_delivery_went() {
+    let api = api();
+    let started = failed_alert(&api).await;
+
+    let (status, page) = api.get("/api/v1/alerts/history", Some(READER)).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["next_before"], Value::Null);
+    let alert = &page["alerts"][0];
+    assert_eq!(page["alerts"].as_array().unwrap().len(), 1, "{page}");
+    assert_eq!(alert["subject_kind"], "check");
+    assert_eq!(alert["subject_id"], "api-https");
+    assert_eq!(alert["notifier_id"], "slack");
+    assert_eq!(alert["route_id"], "ops");
+    assert_eq!(alert["state"], "resolved");
+    assert_eq!(alert["ended_by"], "recovery");
+    assert_eq!(
+        alert["started_at"],
+        Timestamp::from_millis(started).to_string()
+    );
+    assert_eq!(
+        alert["labels"],
+        json!({
+            "alertname": "TocsinCheckFailing",
+            "node": "node-a",
+            "subject_id": "api-https",
+            "subject_kind": "check",
+            "team": "platform",
+        })
+    );
+    let deliveries: Vec<_> = alert["deliveries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|delivery| {
+            (
+                delivery["kind"].as_str().unwrap(),
+                delivery["status"].as_str().unwrap(),
+                delivery["last_error"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        deliveries,
+        [
+            ("fire", "failed", json!("HTTP 410 Gone")),
+            ("resolve", "pending", Value::Null),
+        ]
+    );
+
+    let (_, firing) = api
+        .get("/api/v1/alerts/history?state=firing", Some(READER))
+        .await;
+    assert_eq!(firing["alerts"], json!([]), "{firing}");
+    let (_, resolved) = api
+        .get("/api/v1/alerts/history?state=resolved", Some(READER))
+        .await;
+    assert_eq!(resolved["alerts"], page["alerts"]);
 }

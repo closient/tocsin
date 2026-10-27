@@ -87,7 +87,7 @@ const MINUTE: i64 = 60_000;
 const DAY: i64 = 24 * 60 * MINUTE;
 
 /// Every tool `/mcp` lists; stdio adds `validate_config`.
-const TOOLS: [&str; 15] = [
+const TOOLS: [&str; 16] = [
     "create_incident",
     "create_silence",
     "discard_incident",
@@ -96,6 +96,7 @@ const TOOLS: [&str; 15] = [
     "get_check_history",
     "get_status",
     "get_timeline",
+    "list_alert_history",
     "list_incidents",
     "list_outages",
     "list_releases",
@@ -396,6 +397,12 @@ async fn drives_every_tool(peer: &Peer<RoleClient>, node: &Node) {
     assert_eq!(first["outages"].as_array().unwrap().len(), 1, "{first}");
     assert!(first["next_before"].is_i64(), "{first}");
 
+    let alerts = ok(peer, "list_alert_history", json!({ "since": week_ago })).await;
+    let rest = node
+        .rest(AGENT, &format!("/api/v1/alerts/history?since={week_ago}"))
+        .await;
+    assert_eq!(alerts, rest);
+
     let history = ok(
         peer,
         "get_check_history",
@@ -557,6 +564,7 @@ async fn drives_every_tool(peer: &Peer<RoleClient>, node: &Node) {
     // A limit past the REST page is held to it, never refused.
     for (name, arguments) in [
         ("list_outages", json!({ "limit": 100_000 })),
+        ("list_alert_history", json!({ "limit": 100_000 })),
         (
             "get_check_history",
             json!({ "check": "api-https", "limit": 100_000 }),

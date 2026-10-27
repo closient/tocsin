@@ -114,7 +114,10 @@ limit instead of tripping the service's rate limit. A permanent failure, such as
 than 408 and 429, or a notifier that is no longer configured, is given up on
 at once. A delivery given up on is kept as `failed`, with its last error,
 for 90 days; delivered rows are kept for a week. Either way the next
-delivery for that alert, such as its resolve, goes ahead.
+delivery for that alert, such as its resolve, goes ahead. `tocsin alerts`
+(`GET /api/v1/alerts/history`, the `list_alert_history` MCP tool) shows
+each alert's labels and how every one of its deliveries went; see
+[api.md](api.md#history).
 
 **Independence.** Each delivery runs on its own task. A notifier that hangs
 or fails holds up only its own alerts; the other notifiers' fires and

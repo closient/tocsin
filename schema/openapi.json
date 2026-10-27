@@ -10,6 +10,103 @@
     "version": "1"
   },
   "paths": {
+    "/api/v1/alerts/history": {
+      "get": {
+        "tags": [
+          "history"
+        ],
+        "summary": "Every alert sent to a notifier that fired at any moment in the window,\nnewest start first, with the labels its messages carry and how each\nmessage's delivery went.",
+        "operationId": "list_alert_history",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "description": "The start of the window (RFC 3339): alerts still firing at or after\nit. At most 366 days ago; default 30 days ago. Keep it the same\nwhile paging. An alert is kept only while one of its deliveries is,\nso the history reaches back no further than delivery retention.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Timestamp"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Only alerts after the previous page's last: its `next_before`. One\nthat names no alert of this read (pruned since, or from a read with\nanother `state`) is 422; start again without it.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Alerts, 1 to 500; default 100.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Only `firing` or only `resolved` alerts; default both.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/AlertState"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertHistory"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks the `status:read` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A bad `since`, `limit` or `state`, or a `before` naming no alert of this read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/checks": {
       "get": {
         "tags": [
@@ -2102,6 +2199,231 @@
           "person"
         ]
       },
+      "AlertDelivery": {
+        "type": "object",
+        "description": "One message queued for an alert, and how its delivery went.",
+        "required": [
+          "id",
+          "kind",
+          "health",
+          "created_at",
+          "status",
+          "attempts"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Attempts made so far.",
+            "minimum": 0
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When it was queued."
+          },
+          "finished_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When it was delivered, given up on or held back; `null` while\npending."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "health": {
+            "$ref": "#/components/schemas/Health",
+            "description": "The alert's health when it was queued."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Its id in the outbox."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/MessageKind",
+            "description": "Fire, repeat, resolve or cancel."
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The last failed attempt's error, secrets redacted; `null` if none\nfailed."
+          },
+          "silence_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The silence that held it back, if one did."
+          },
+          "status": {
+            "$ref": "#/components/schemas/DeliveryStatus",
+            "description": "Pending, delivered, failed or silenced."
+          }
+        }
+      },
+      "AlertEnding": {
+        "type": "string",
+        "description": "Why an alert ended.",
+        "enum": [
+          "recovery",
+          "config"
+        ]
+      },
+      "AlertHistory": {
+        "type": "object",
+        "description": "`GET /api/v1/alerts/history`: one page of alerts, newest first.",
+        "required": [
+          "since",
+          "alerts"
+        ],
+        "properties": {
+          "alerts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlertRecord"
+            },
+            "description": "Newest first, by start."
+          },
+          "next_before": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Pass as `before`, with the same `since` and `state`, for the next\npage; `null` on the last."
+          },
+          "since": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "The start of the window: alerts still firing at or after it."
+          }
+        }
+      },
+      "AlertRecord": {
+        "type": "object",
+        "description": "One notifier's alert for one check or heartbeat on one node, from fire\nto resolve.",
+        "required": [
+          "id",
+          "node_id",
+          "subject_kind",
+          "subject_id",
+          "notifier_id",
+          "route_id",
+          "health",
+          "state",
+          "started_at",
+          "labels",
+          "annotations",
+          "deliveries"
+        ],
+        "properties": {
+          "annotations": {
+            "type": "object",
+            "description": "The subject's configured annotations as they were when it opened.\nAn Alertmanager message adds `summary`, `description` and the rest.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "component_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The subject's component when it last fired, if any."
+          },
+          "deliveries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlertDelivery"
+            },
+            "description": "Every message queued for it that is still kept, oldest first."
+          },
+          "ended_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When it ended; `null` while it fires."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ended_by": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AlertEnding",
+                "description": "Why it ended; `null` while it fires."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "health": {
+            "$ref": "#/components/schemas/Health",
+            "description": "Its latest health."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Its id."
+          },
+          "labels": {
+            "type": "object",
+            "description": "The labels every Alertmanager message of it carries, fire, repeat\nand resolve alike: the subject's configured labels as they were when\nit opened, its `class`, and `alertname`, `node`, `subject_kind` and\n`subject_id`. Other notifiers get the same identity.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "node_id": {
+            "type": "string",
+            "description": "The node that saw it."
+          },
+          "notifier_id": {
+            "type": "string",
+            "description": "The notifier it was sent to."
+          },
+          "route_id": {
+            "type": "string",
+            "description": "The route that sent it there."
+          },
+          "started_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When the outage it first fired for started."
+          },
+          "state": {
+            "$ref": "#/components/schemas/AlertState",
+            "description": "Firing or resolved."
+          },
+          "subject_id": {
+            "type": "string",
+            "description": "The check or heartbeat."
+          },
+          "subject_kind": {
+            "$ref": "#/components/schemas/CheckKind",
+            "description": "Whether `subject_id` is a check or a heartbeat."
+          }
+        }
+      },
+      "AlertState": {
+        "type": "string",
+        "description": "Whether an alert still fires.",
+        "enum": [
+          "firing",
+          "resolved"
+        ]
+      },
       "CheckKind": {
         "type": "string",
         "description": "Whether a member of a component is probed or pinged.",
@@ -2429,6 +2751,16 @@
             "description": "Whether the last attempt put its configuration in place. False\nmeans the configuration from `loaded_at` is still running."
           }
         }
+      },
+      "DeliveryStatus": {
+        "type": "string",
+        "description": "How a delivery stands.",
+        "enum": [
+          "pending",
+          "delivered",
+          "failed",
+          "silenced"
+        ]
       },
       "DeployStamp": {
         "type": "object",
@@ -2961,6 +3293,16 @@
           }
         },
         "additionalProperties": false
+      },
+      "MessageKind": {
+        "type": "string",
+        "description": "Which message a delivery carries.",
+        "enum": [
+          "fire",
+          "repeat",
+          "resolve",
+          "cancel"
+        ]
       },
       "NewIncident": {
         "type": "object",
@@ -4036,7 +4378,7 @@
     },
     {
       "name": "history",
-      "description": "Outages and raw check results"
+      "description": "Outages, raw check results and the alert history"
     },
     {
       "name": "incidents",

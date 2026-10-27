@@ -37,6 +37,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, TransactionBehavior};
 use tocsin_core::Health;
+use tocsin_core::alert::AlertState;
 use tocsin_core::incident::{
     Actor, Incident, IncidentEdit, IncidentInternals, NewIncident, NewUpdate, Timestamp,
 };
@@ -45,8 +46,9 @@ use tocsin_core::silence::{NewSilence, Silence};
 use tocsin_core::status::{CheckResult, OutageRecord};
 
 pub use crate::alert::{
-    AlertRouting, AlertTarget, DeliveryKind, DeliveryOutcome, DeliveryPrune, DeliveryRetention,
-    EndedBy, FailedDelivery, OutageAlerts, Outbox, PendingDelivery, StoredAlert, SubjectKind,
+    AlertEntry, AlertRouting, AlertTarget, DeliveryKind, DeliveryOutcome, DeliveryPrune,
+    DeliveryRetention, EndedBy, FailedDelivery, OutageAlerts, Outbox, PendingDelivery, StoredAlert,
+    SubjectKind,
 };
 use crate::checkpoint::Checkpointer;
 pub use crate::day::Day;
@@ -769,6 +771,23 @@ impl Store {
     /// The read fails.
     pub async fn failed_deliveries(&self, limit: u32) -> Result<Vec<FailedDelivery>> {
         self.read(move |conn| alert::failed(conn, limit)).await
+    }
+
+    /// One page of the alerts firing at any moment since `page.since`,
+    /// newest start first, each with the deliveries still kept; only the
+    /// firing or resolved ones when `state` says so.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] when `page.before` names no alert of this read,
+    /// or the read fails.
+    pub async fn alert_history(
+        &self,
+        page: HistoryPage,
+        state: Option<AlertState>,
+    ) -> Result<Vec<AlertEntry>> {
+        self.read(move |conn| alert::alert_history(conn, page, state))
+            .await
     }
 
     /// Every stored alert, oldest first.

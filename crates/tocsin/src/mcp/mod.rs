@@ -28,6 +28,7 @@ use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, tool, tool_handler,
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tocsin_core::alert::AlertState;
 use tocsin_core::incident::{IncidentStatus, NewIncident, NewUpdate, Timestamp};
 use tocsin_core::release::{DeployStamp, NewRelease};
 use tocsin_core::silence::NewSilence;
@@ -35,7 +36,7 @@ use tocsin_core::silence::NewSilence;
 use crate::client::Api;
 use crate::http::auth::{Caller, scope};
 use crate::http::error::ApiError;
-use crate::http::history::{OutageParams, ResultsParams};
+use crate::http::history::{AlertParams, OutageParams, ResultsParams};
 use crate::http::timeline::{DAY_MS, Window};
 use crate::http::{AppState, history, incidents, now, releases, silences, status, timeline};
 use crate::output::Failure;
@@ -108,6 +109,23 @@ struct OutagesInput {
     /// Outages per page; default 100, at most 500 (more is cut to 500).
     #[schemars(range(min = 1, max = 500))]
     limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct AlertHistoryInput {
+    /// The start of the window: alerts still firing at or after it. At
+    /// most 366 days ago; default 30 days ago. Keep it the same while
+    /// paging.
+    since: Option<Timestamp>,
+    /// The previous page's `next_before`, with the same `since` and
+    /// `state`.
+    before: Option<i64>,
+    /// Alerts per page; default 100, at most 500 (more is cut to 500).
+    #[schemars(range(min = 1, max = 500))]
+    limit: Option<u32>,
+    /// Only `firing` or only `resolved` alerts; default both.
+    state: Option<AlertState>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -290,6 +308,42 @@ impl Server {
             Backend::Remote(api) => {
                 let query = page_query(input.since, input.before, limit);
                 remote(get(api, &["api", "v1", "outages"], &query, api.has_token()).await)
+            }
+        }
+    }
+
+    /// Alerts sent to notifiers in a window, newest first: the labels each
+    /// carried, and for every fire, repeat and resolve whether it was
+    /// delivered, is still retrying (attempts and last error), failed or
+    /// was held by a silence. Needs the `status:read` scope.
+    #[tool(name = "list_alert_history")]
+    async fn list_alert_history(
+        &self,
+        extensions: Extensions,
+        Parameters(input): Parameters<AlertHistoryInput>,
+    ) -> CallToolResult {
+        let limit = clamp(input.limit, timeline::DEFAULT_LIMIT, timeline::MAX_LIMIT);
+        match &self.backend {
+            Backend::Local(state) => local(
+                async {
+                    caller(&extensions)?.grant::<scope::StatusRead>()?;
+                    history::alert_history(
+                        state,
+                        AlertParams {
+                            since: input.since,
+                            before: input.before,
+                            limit: Some(limit),
+                            state: input.state,
+                        },
+                    )
+                    .await
+                }
+                .await,
+            ),
+            Backend::Remote(api) => {
+                let mut query = page_query(input.since, input.before, limit);
+                query.extend(input.state.map(|state| ("state", state.to_string())));
+                remote(get(api, &["api", "v1", "alerts", "history"], &query, true).await)
             }
         }
     }
@@ -737,7 +791,8 @@ impl ServerHandler for Server {
             "tocsin's status, history, incidents, releases and silences. To find what is \
              down and why: get_status, then list_outages and explain_check, then \
              get_timeline for what changed just before. To quiet a known outage's alerts, \
-             create_silence with its outage id as `episode`. Writes need a token with the \
+             create_silence with its outage id as `episode`; list_alert_history shows \
+             whether each alert reached its notifier. Writes need a token with the \
              matching scope.",
         )
     }
@@ -904,6 +959,7 @@ mod tests {
     fn every_list_tool_advertises_its_page_bound() {
         for (name, max) in [
             ("list_outages", timeline::MAX_LIMIT),
+            ("list_alert_history", timeline::MAX_LIMIT),
             ("get_check_history", timeline::MAX_LIMIT),
             ("get_timeline", timeline::MAX_LIMIT),
             ("list_incidents", incidents::MAX_LIMIT),

@@ -109,6 +109,7 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
 | `GET /api/v1/checks` | none, or `status:read` | 200, `{checks}` |
 | `GET /api/v1/checks/{id}/results?since=&before=&limit=` | `status:read` | 200, `{check_id, since, results, next_before}`, newest first |
 | `GET /api/v1/outages?since=&before=&limit=` | none, or `status:read` | 200, `{since, outages, next_before}`, newest start first |
+| `GET /api/v1/alerts/history?since=&before=&limit=&state=` | `status:read` | 200, `{since, alerts, next_before}`, newest start first |
 | `GET /api/v1/incidents?limit=&before=` | none; `status:read` adds drafts and internals | 200, `{incidents, next_before}`, newest first |
 | `GET /api/v1/incidents?external_key=` | `status:read` | 200, `{incidents, next_before}`, the incidents with that key, newest first, paged by `limit` and `before` |
 | `GET /api/v1/incidents/{id}` | none; `status:read` for a draft and internals | 200, the incident |
@@ -176,6 +177,23 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
   `node_id` is public here, as it is on the timeline: it is the
   `[server] node_id` setting, which defaults to the host name, so set it
   in config if the host name is sensitive.
+- **`alerts/history`** lists every alert open at any moment in the
+  window, one per notifier per check or heartbeat per outage: one that
+  started before `since` but ended after it is included, as is one still
+  firing. `state=firing` or `state=resolved` keeps to one kind; keep it
+  the same while paging. `labels` are exactly the labels every
+  Alertmanager message of the alert carried, fire, repeat and resolve
+  alike, built by the same code that posted them; `ended_by` is
+  `recovery`, or `config` when a reload removed the check, heartbeat or
+  notifier while it fired. `deliveries` lists each fire, repeat, resolve
+  and cancel queued for it, oldest first: `status` is `pending` (with
+  `attempts` and `last_error` while it is retrying), `delivered`,
+  `failed` (given up on, with its last error) or `silenced` (with the
+  `silence_id` that held it). Retention bounds it: delivered rows go
+  after a week and failed and silenced ones after 90 days, and an ended
+  alert goes with its last delivery (see
+  [alerting.md](alerting.md#delivery)). So a month back shows every
+  failure but only the past week's successes.
 - **`timeline`** merges outages, incidents, deploys and releases; see
   [releases.md](releases.md#http-api). `component=` narrows it to one
   component's checks, incidents and projects. Without `status:read` its
@@ -186,7 +204,7 @@ The full `[[token]]` reference is in [`config.md`](config.md#token).
 
 | Parameter | Meaning |
 |---|---|
-| `since` | RFC 3339. The start of the window: at most 366 days ago. Defaults to one day ago for check results and 30 days ago for outages and the timeline. (Releases take it as a plain filter with no default.) |
+| `since` | RFC 3339. The start of the window: at most 366 days ago. Defaults to one day ago for check results and 30 days ago for outages, alerts and the timeline. (Releases take it as a plain filter with no default.) |
 | `limit` | 1 to 500, default 100 (incidents: 1 to 100, default 20; releases: 1 to 200, default 50). |
 | `before` | The previous page's `next_before`. Keep `since` the same. |
 | `after` | The timeline's previous `next_after`. Keep `since` the same. |
@@ -259,8 +277,8 @@ what `status.json` shows the public. Links are absolute when
 The query commands are HTTP clients of a running server. `--url` or
 `TOCSIN_URL` names it; `--token` or `TOCSIN_TOKEN` is sent with every read
 when set. A token without `status:read` reads the public view, so a write
-token in the environment is harmless; `history` alone needs `status:read`
-and exits 2 on the 401 or 403 without it, with a `hint` (in `--json`, under
+token in the environment is harmless; `history` and `alerts` need `status:read`
+and exit 2 on the 401 or 403 without it, with a `hint` (in `--json`, under
 `error`) naming the `status:read` scope it needs. Leave it unset to read as
 the public.
 
@@ -270,6 +288,7 @@ export TOCSIN_URL=https://status.example.com TOCSIN_TOKEN=...
 tocsin status [--json]
 tocsin history <check> [--since 2h] [--before ID] [--limit N] [--json]
 tocsin outages [--since 7d] [--before ID] [--limit N] [--json]
+tocsin alerts [--state firing|resolved] [--since 7d] [--before ID] [--limit N] [--json]
 tocsin timeline [--component api] [--since 1d] [--after CURSOR] [--limit N] [--json]
 ```
 

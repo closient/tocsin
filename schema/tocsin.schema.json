@@ -451,6 +451,17 @@
           ],
           "description": "Settings for `tls` checks."
         },
+        "topology_node": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TopologyNode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The node this check watches in a map of the estate, such as\n`operations-01`, so alerts can be grouped by what broke rather than\nby host names that drift. Every alert of the check carries it as the\n`topology_node` label; `[topology]` can limit the ids allowed."
+        },
         "type": {
           "allOf": [
             {
@@ -854,6 +865,17 @@
             "string",
             "null"
           ]
+        },
+        "topology_node": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TopologyNode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The node this heartbeat watches in a map of the estate, such as\n`operations-01/job:backup`. Every alert of the heartbeat carries it\nas the `topology_node` label; `[topology]` can limit the ids\nallowed."
         }
       },
       "required": [
@@ -2112,6 +2134,27 @@
         }
       ]
     },
+    "Topology": {
+      "additionalProperties": false,
+      "description": "`[topology]`: the known nodes of the map that `topology_node` refers to.\nWithout it, any well-formed id is allowed.\n\nThe list is usually generated from the map itself into a file of its\nown in the configuration folder, so a node added to the map is allowed\non the next reload.",
+      "properties": {
+        "nodes": {
+          "default": [],
+          "description": "Every node id a `topology_node` may name.",
+          "items": {
+            "$ref": "#/definitions/TopologyNode"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "TopologyNode": {
+      "description": "A node id in an external map of the estate: lowercase letters and digits joined by single `-`, `.`, `_`, `/` or `:`.",
+      "maxLength": 128,
+      "pattern": "^[a-z0-9]+([-._/:][a-z0-9]+)*$",
+      "type": "string"
+    },
     "Turnstile": {
       "additionalProperties": false,
       "description": "`[subscribers.turnstile]`: a Cloudflare Turnstile widget every sign-up\nmust pass.",
@@ -2293,6 +2336,17 @@
         "$ref": "#/definitions/Token"
       },
       "type": "array"
+    },
+    "topology": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Topology"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The node ids a `topology_node` may name. At most one file may hold\n`[topology]`; without it, any well-formed id is allowed."
     }
   },
   "title": "tocsin configuration file",

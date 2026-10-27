@@ -50,6 +50,9 @@ the number of series is fixed by what is configured:
 - `node`: this server's `node_id`, the hostname unless `[server]` sets
   it. It tells nodes apart when several tocsins feed one Prometheus.
 - `kind`: `check` or `heartbeat`.
+- `topology_node`: the check's or heartbeat's `topology_node`, only on
+  `tocsin_check_info`; empty, and so absent in Prometheus, when it sets
+  none.
 - `status`: one of the five component statuses.
 - `notifier`: a `[[notifier]]` id.
 
@@ -65,6 +68,7 @@ on a removed check resolves rather than firing on forever.
 | `tocsin_check_duration_seconds` | histogram | `check`, `component`, `node` | How long each check's probes take. |
 | `tocsin_check_last_run_timestamp` | gauge | `check`, `component`, `node` | When a check's latest probe started, unix seconds. |
 | `tocsin_heartbeat_last_ping_timestamp` | gauge | `check`, `component`, `node` | When a heartbeat was last pinged, unix seconds. |
+| `tocsin_check_info` | gauge | `check`, `component`, `node`, `kind`, `topology_node` | Always 1, one series per check and heartbeat, carrying the node it watches. Join it onto another family with `* on (check, node) group_left (topology_node)`. |
 | `tocsin_component_status` | gauge | `component`, `node`, `status` | 1 for the status each component shows, 0 for the other four. |
 | `tocsin_notification_failures_total` | counter | `notifier` | Failed attempts to deliver an alert message, retried or not. |
 | `tocsin_notifications_abandoned_total` | counter | `notifier` | Alert messages given up on after their last attempt failed. |
@@ -284,6 +288,7 @@ The attributes carry the Prometheus labels under namespaced names:
 |---|---|---|
 | `tocsin.check.id` | `check` | every check metric |
 | `tocsin.check.kind` | `kind` | every check metric |
+| `tocsin.check.topology_node` | `topology_node` | every check metric, when the check or heartbeat sets one; OTLP has no counterpart of `tocsin_check_info` |
 | `tocsin.check.type` | none | checks: `http`, `tcp`, `dns`, `icmp` or `tls`; absent on heartbeats |
 | `tocsin.component.id` | `component` | when the check has a component, and on `tocsin.component.status` |
 | `tocsin.node.id` | `node` | every check and component metric |

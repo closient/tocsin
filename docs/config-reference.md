@@ -61,6 +61,7 @@ A probe run on an interval, whose result sets a component's health.
 | `tcp` | [table](#table-tcpsettings) |  |  | Settings for `tcp` checks. |
 | `timeout` | [`Duration`](#type-duration) |  | `"10s"` | How long one probe may take before it counts as failed. Must be shorter than the interval. |
 | `tls` | [table](#table-tlssettings) |  |  | Settings for `tls` checks. |
+| `topology_node` | [`TopologyNode`](#type-topologynode) |  |  | The node this check watches in a map of the estate, such as `operations-01`, so alerts can be grouped by what broke rather than by host names that drift. Every alert of the check carries it as the `topology_node` label; `[topology]` can limit the ids allowed. |
 | `type` | [`CheckType`](#type-checktype) | yes |  | Which probe runs. |
 
 <a id="table-assertion"></a>
@@ -268,6 +269,7 @@ A `[[check.link]]` or `[[heartbeat.link]]`: a named link to somewhere an operato
 | `labels` | table of string |  |  | Labels on the heartbeat's alerts, such as `{ team = "ops" }`: a receiver like Alertmanager routes on them. `[alerting]` can require some and limit their values. |
 | `link` | [array of tables](#table-link) |  |  | Links shown with the heartbeat, such as the job's logs or runbook, each a `[[heartbeat.link]]` table. |
 | `name` | string |  |  | Display name; the id is shown when it is absent. |
+| `topology_node` | [`TopologyNode`](#type-topologynode) |  |  | The node this heartbeat watches in a map of the estate, such as `operations-01/job:backup`. Every alert of the heartbeat carries it as the `topology_node` label; `[topology]` can limit the ids allowed. |
 
 <a id="table-notifier"></a>
 
@@ -573,6 +575,18 @@ It needs `[server] public_url`, for the links in each email, and a complete `[se
 | `scopes` | array of [`TokenScope`](#type-tokenscope) | yes |  | What the token may write. |
 | `secret` | [`Secret`](#type-secret) | yes |  | The token's value. Secret. |
 
+<a id="table-topology"></a>
+
+### `[topology]`
+
+`[topology]`: the known nodes of the map that `topology_node` refers to. Without it, any well-formed id is allowed.
+
+The list is usually generated from the map itself into a file of its own in the configuration folder, so a node added to the map is allowed on the next reload.
+
+| Key | Type | Required | Default | Description |
+|-----|------|----------|---------|-------------|
+| `nodes` | array of [`TopologyNode`](#type-topologynode) |  | `[]` | Every node id a `topology_node` may name. |
+
 ## Value types
 
 Types a key's **Type** column links to: strings with a fixed form, and the values a choice accepts.
@@ -770,4 +784,12 @@ What a token may do.
 | `"status:read"` | Reading what is not public in the read API: non-public components, checks and heartbeats on no component or a non-public one, non-public projects' releases and deploys, check targets, raw check results, and how the configuration last reloaded. The internal board behind proxy auth reads the same. |
 | `"subscribers:admin"` | Listing, counting and removing email subscribers. |
 | `"silence"` | Silences: make, list and end them. Every silence records the token or person that made it. |
+
+<a id="type-topologynode"></a>
+
+### `TopologyNode`
+
+A node id in an external map of the estate: lowercase letters and digits joined by single `-`, `.`, `_`, `/` or `:`.
+
+A string matching `^[a-z0-9]+([-._/:][a-z0-9]+)*$`.
 

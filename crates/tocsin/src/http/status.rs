@@ -11,7 +11,7 @@
 
 use axum::Json;
 use axum::extract::{Path, State};
-use tocsin_core::config::{Component, Config, Id};
+use tocsin_core::config::{Component, Config, Id, TopologyNode};
 use tocsin_core::incident::{Incident, Timestamp};
 use tocsin_core::state::ComponentStatus;
 use tocsin_core::status::{
@@ -186,7 +186,7 @@ fn component_state(component: &Component, snapshot: &Snapshot) -> ComponentState
 
 /// Every check, then every heartbeat, in configuration order, with what
 /// the snapshot knows of each. Only a [`Viewer::Trusted`] sees targets,
-/// and those on no component or on one that is not public
+/// topology nodes, and those on no component or on one that is not public
 /// ([`public::may_see`]).
 pub(crate) fn checks(config: &Config, snapshot: &Snapshot, viewer: Viewer) -> Vec<CheckState> {
     let trusted = viewer == Viewer::Trusted;
@@ -198,6 +198,7 @@ pub(crate) fn checks(config: &Config, snapshot: &Snapshot, viewer: Viewer) -> Ve
         check_type: Some(check.check_type.as_str()),
         interval: check.interval.to_string(),
         target: trusted.then(|| check.target.clone()),
+        topology_node: topology_node(trusted, check.topology_node.as_ref()),
     });
     let pinged = config.heartbeats.iter().map(|heartbeat| Member {
         id: &heartbeat.id,
@@ -207,12 +208,19 @@ pub(crate) fn checks(config: &Config, snapshot: &Snapshot, viewer: Viewer) -> Ve
         check_type: None,
         interval: heartbeat.interval.to_string(),
         target: None,
+        topology_node: topology_node(trusted, heartbeat.topology_node.as_ref()),
     });
     probed
         .chain(pinged)
         .filter(|member| public::may_see(config, viewer, member.component.map(Id::as_str)))
         .map(|member| member.state(snapshot))
         .collect()
+}
+
+/// A member's `topology_node`, shown only to a [`Viewer::Trusted`].
+fn topology_node(trusted: bool, node: Option<&TopologyNode>) -> Option<String> {
+    node.filter(|_| trusted)
+        .map(|node| node.as_str().to_owned())
 }
 
 /// A check or heartbeat as configured.
@@ -224,6 +232,7 @@ struct Member<'a> {
     check_type: Option<&'static str>,
     interval: String,
     target: Option<String>,
+    topology_node: Option<String>,
 }
 
 impl Member<'_> {
@@ -243,6 +252,7 @@ impl Member<'_> {
             check_type: self.check_type.map(str::to_owned),
             interval: self.interval,
             target: self.target,
+            topology_node: self.topology_node,
             health: confirmed.map(|state| state.health),
             since: confirmed.map(|state| Timestamp::from_millis(state.since_ms)),
             last_health: last.map(|last| last.health),

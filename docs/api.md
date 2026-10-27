@@ -24,6 +24,7 @@ the `status:read` scope to read the rest:
 | A component with `public = false`, its checks and heartbeats, their changes, outages and timeline | no | yes |
 | Checks and heartbeats on no component, their changes and their outages | no | yes |
 | A check's `target` (its URL or host, which can name an internal host) | no | yes |
+| A check's or heartbeat's `topology_node` (which can name an internal host) | no | yes |
 | A check's raw results (`/checks/{id}/results`) | no, 401 | yes |
 | How the configuration last reloaded (`/config/status`), whose errors name files and environment variables | no, 401 | yes |
 | Prometheus metrics (`/metrics`, see [metrics.md](metrics.md)) | no, 401 | yes |

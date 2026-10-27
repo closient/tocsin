@@ -13,7 +13,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use tocsin_core::Health::{Degraded, Down, Up};
-use tocsin_core::config::{Environment, Source};
+use tocsin_core::config::{Environment, Source, TopologyNode};
 use tocsin_core::state::{ComponentStatus, Confirmed};
 use tocsin_engine::{
     CheckSnapshot, ComponentSnapshot, HeartbeatHandle, LastResult, MemberKind, Snapshot,
@@ -50,6 +50,7 @@ id = "db"
 type = "tcp"
 target = "db.internal.example.com:5432"
 interval = "1m"
+topology_node = "internal-01/postgres"
 
 [[heartbeat]]
 id = "backup"
@@ -80,8 +81,9 @@ const READER: &str = "reader-secret-0123456789";
 const NODE: &str = "node-a";
 
 /// Every family `/metrics` serves.
-const FAMILIES: [&str; 13] = [
+const FAMILIES: [&str; 14] = [
     "tocsin_build_info",
+    "tocsin_check_info",
     "tocsin_check_up",
     "tocsin_check_duration_seconds",
     "tocsin_check_last_run_timestamp",
@@ -179,6 +181,9 @@ fn api() -> Api {
     .unwrap();
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join(tocsin_store::DB_FILE)).unwrap();
+    // As `tocsin serve` does before its first scrape.
+    let metrics = Metrics::new();
+    metrics.configured(&config);
     let state = AppState {
         store: Arc::new(store),
         config: Arc::new(config),
@@ -188,7 +193,7 @@ fn api() -> Api {
         heartbeats: HeartbeatHandle::default(),
         alert_wake: Arc::default(),
         config_status: crate::reload::steady_status(),
-        metrics: Arc::new(Metrics::new()),
+        metrics: Arc::new(metrics),
         subscribers: None,
         slack: None,
     };
@@ -489,6 +494,19 @@ async fn label_sets_are_bounded_by_the_configuration() {
         .map(|component| component.id.as_str())
         .chain([""])
         .collect();
+    let topology_nodes: BTreeSet<&str> = config
+        .checks
+        .iter()
+        .filter_map(|check| check.topology_node.as_ref())
+        .chain(
+            config
+                .heartbeats
+                .iter()
+                .filter_map(|heartbeat| heartbeat.topology_node.as_ref()),
+        )
+        .map(TopologyNode::as_str)
+        .chain([""])
+        .collect();
     let statuses: BTreeSet<&str> = ComponentStatus::ALL
         .iter()
         .map(|status| status.as_str())
@@ -500,6 +518,7 @@ async fn label_sets_are_bounded_by_the_configuration() {
                 "component" => components.contains(value.as_str()),
                 "node" => value == NODE,
                 "kind" => ["check", "heartbeat"].contains(&value.as_str()),
+                "topology_node" => topology_nodes.contains(value.as_str()),
                 "status" => statuses.contains(value.as_str()),
                 "notifier" => value == "pager",
                 "version" => value == env!("CARGO_PKG_VERSION"),

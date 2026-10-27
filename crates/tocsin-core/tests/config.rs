@@ -5,7 +5,7 @@
 
 use tocsin_core::config::{
     AuthMode, CheckType, Config, DARK, Diagnostic, Environment, Id, NotifierType, ProbeClass,
-    Secret, Source, TokenScope, load,
+    Secret, Source, TokenScope, TopologyNode, load,
 };
 
 const HOSTNAME: &str = "probe-01";
@@ -1644,7 +1644,7 @@ annotations = { summary = "mine" }
         shown,
         [
             "checks.toml:6:28: check `api`: `needs-human` is not a valid label name (check[0].labels.needs-human)\n  hint: use letters, digits and underscores, not starting with a digit or `__`, as Alertmanager requires",
-            "checks.toml:6:49: check `api`: label `subject_id` is set by tocsin (check[0].labels.subject_id)\n  hint: tocsin sets `alertname`, `node`, `subject_kind`, `subject_id`, `class` on every alert; choose another name",
+            "checks.toml:6:49: check `api`: label `subject_id` is set by tocsin (check[0].labels.subject_id)\n  hint: tocsin sets `alertname`, `node`, `subject_kind`, `subject_id`, `class`, `topology_node` on every alert; choose another name",
             "checks.toml:6:65: check `api`: label `team` is empty (check[0].labels.team)\n  hint: Alertmanager drops an empty label: give it a value or remove it",
             "checks.toml:7:27: check `api`: annotation `summary` is set by tocsin (check[0].annotations.summary)\n  hint: tocsin sets `summary`, `description`, `health`, `name`, `component`, `component_name`, `tocsin_test`, `ended_by` on every alert; choose another name",
         ]
@@ -1705,6 +1705,126 @@ labels = { class = "drill" }
         [
             "checks.toml:6:20: check `api`: label `class` is set by tocsin (check[0].labels.class)\n  hint: set the check's or heartbeat's `class` instead",
         ]
+    );
+}
+
+#[test]
+fn a_probe_s_topology_node_is_well_formed_and_optional() {
+    let config = run(&[(
+        "checks.toml",
+        r#"
+[[check]]
+id = "api"
+type = "icmp"
+target = "192.0.2.1"
+topology_node = "operations-01"
+
+[[check]]
+id = "web"
+type = "icmp"
+target = "192.0.2.2"
+
+[[heartbeat]]
+id = "backup"
+interval = "1h"
+topology_node = "operations-01/job:backup"
+"#,
+    )])
+    .expect("valid");
+    let nodes: Vec<Option<&str>> = config
+        .checks
+        .iter()
+        .map(|check| check.topology_node.as_ref().map(TopologyNode::as_str))
+        .collect();
+    assert_eq!(nodes, [Some("operations-01"), None]);
+    assert_eq!(
+        config.heartbeats[0]
+            .topology_node
+            .as_ref()
+            .map(TopologyNode::as_str),
+        Some("operations-01/job:backup")
+    );
+
+    let text = "[[check]]\nid = \"api\"\ntype = \"icmp\"\ntarget = \"192.0.2.1\"\ntopology_node = \"Operations 01\"\n";
+    let shown = errors(&[("checks.toml", text)]);
+    assert_eq!(shown.len(), 1, "{shown:?}");
+    assert!(shown[0].starts_with("checks.toml:5:"), "{shown:?}");
+    assert!(shown[0].contains("invalid topology node"), "{shown:?}");
+}
+
+#[test]
+fn a_topology_node_label_points_at_the_topology_node_setting() {
+    let text = r#"
+[[check]]
+id = "api"
+type = "icmp"
+target = "192.0.2.1"
+labels = { topology_node = "operations-01" }
+"#;
+    let shown: Vec<String> = run(&[("checks.toml", text)])
+        .expect_err("invalid")
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            "checks.toml:6:28: check `api`: label `topology_node` is set by tocsin (check[0].labels.topology_node)\n  hint: set the check's or heartbeat's `topology_node` instead",
+        ]
+    );
+}
+
+#[test]
+fn with_a_topology_only_its_nodes_are_allowed() {
+    const TOPOLOGY: &str =
+        "[topology]\nnodes = [\"operations-01\", \"production-01\", \"production-01/web-a\"]\n";
+    let probes = r#"
+[[check]]
+id = "api"
+type = "icmp"
+target = "192.0.2.1"
+topology_node = "production-01/web-a"
+
+[[check]]
+id = "ops"
+type = "icmp"
+target = "192.0.2.2"
+topology_node = "operatons-01"
+
+[[heartbeat]]
+id = "backup"
+interval = "1h"
+topology_node = "replication-03"
+"#;
+    let shown: Vec<String> = run(&[("checks.toml", probes), ("topology.toml", TOPOLOGY)])
+        .expect_err("invalid")
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            "checks.toml:12:17: check `ops`: topology node `operatons-01` is not in `[topology]` (check[1].topology_node)\n  hint: did you mean `operations-01`?",
+            "checks.toml:17:17: heartbeat `backup`: topology node `replication-03` is not in `[topology]` (heartbeat[0].topology_node)\n  hint: it must be one of the 3 nodes `[topology]` lists; add it there if it is new",
+        ]
+    );
+
+    // The same probes load once the map knows their nodes, and without a
+    // `[topology]` any well-formed id goes.
+    let known =
+        "[topology]\nnodes = [\"production-01/web-a\", \"operatons-01\", \"replication-03\"]\n";
+    let config = run(&[("checks.toml", probes), ("topology.toml", known)]).expect("valid");
+    assert_eq!(config.topology.expect("loaded").nodes.len(), 3);
+    run(&[("checks.toml", probes)]).expect("valid without [topology]");
+
+    let bad = only_error(&[("topology.toml", "[topology]\nnodes = [\"Operations 01\"]\n")]);
+    assert!(bad.message.contains("invalid topology node"), "{bad}");
+    let twice = only_error(&[("one.toml", TOPOLOGY), ("two.toml", TOPOLOGY)]);
+    assert!(
+        twice
+            .message
+            .starts_with("`[topology]` is already defined at one.toml"),
+        "{twice}"
     );
 }
 

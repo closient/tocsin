@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::Link;
 use super::assertion::Assertion;
-use super::values::{ByteSize, Duration, Id, Secret, Text};
+use super::values::{ByteSize, Duration, Id, Secret, Text, TopologyNode};
 
 /// A probe run on an interval, whose result sets a component's health.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -70,6 +70,12 @@ pub struct Check {
     /// matching names.
     #[serde(default, skip_serializing_if = "ProbeClass::is_production")]
     pub class: ProbeClass,
+    /// The node this check watches in a map of the estate, such as
+    /// `operations-01`, so alerts can be grouped by what broke rather than
+    /// by host names that drift. Every alert of the check carries it as the
+    /// `topology_node` label; `[topology]` can limit the ids allowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topology_node: Option<TopologyNode>,
     /// Labels on the check's alerts, such as `{ team = "ops" }`: a receiver
     /// like Alertmanager routes on them. `[alerting]` can require some and
     /// limit their values.

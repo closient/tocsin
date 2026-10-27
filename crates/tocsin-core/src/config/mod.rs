@@ -17,6 +17,7 @@ mod notifier;
 mod slack;
 mod subscribers;
 mod telemetry;
+mod topology;
 mod values;
 
 use std::collections::BTreeMap;
@@ -28,7 +29,7 @@ use serde::{Deserialize, Serialize};
 
 pub use alerting::{
     Alerting, AlertingRule, CLASS_LABEL, IDENTITY_LABELS, LABEL_NAME_PATTERN, OWN_ANNOTATIONS,
-    OWN_LABELS, is_label_name,
+    OWN_LABELS, TOPOLOGY_NODE_LABEL, is_label_name,
 };
 pub use assertion::{
     Assertion, CONDITION_KEYS, Comparison, Condition, FailureState, HeaderAssertion, JsonAssertion,
@@ -48,9 +49,11 @@ pub use notifier::{
 pub use slack::{MAX_APP_NAME, Slack};
 pub use subscribers::{Subscribers, Turnstile};
 pub use telemetry::{OWN_RESOURCE_ATTRIBUTES, Otlp, OtlpProtocol, Telemetry};
+pub use topology::Topology;
 pub use values::{
     BYTE_SIZE_PATTERN, ByteSize, Cidr, DURATION_PATTERN, Duration, ID_PATTERN, Id, SECRET_PATTERN,
-    Secret, Text, email_address, is_unanswerable,
+    Secret, TOPOLOGY_NODE_MAX, TOPOLOGY_NODE_PATTERN, Text, TopologyNode, email_address,
+    is_unanswerable,
 };
 
 /// One configuration file. Every key is optional in a single file; rules
@@ -110,6 +113,10 @@ pub struct ConfigFile {
     /// checked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alerting: Option<Alerting>,
+    /// The node ids a `topology_node` may name. At most one file may hold
+    /// `[topology]`; without it, any well-formed id is allowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topology: Option<Topology>,
 }
 
 /// The merged, validated configuration of a whole folder.
@@ -154,6 +161,8 @@ pub struct Config {
     pub telemetry: Option<Telemetry>,
     /// `[alerting]`, if the labels and annotations are held to a contract.
     pub alerting: Option<Alerting>,
+    /// `[topology]`, if the `topology_node` ids are limited to known ones.
+    pub topology: Option<Topology>,
 }
 
 /// `[server]`.
@@ -488,6 +497,12 @@ pub struct Heartbeat {
     /// `class` label.
     #[serde(default, skip_serializing_if = "ProbeClass::is_production")]
     pub class: ProbeClass,
+    /// The node this heartbeat watches in a map of the estate, such as
+    /// `operations-01/job:backup`. Every alert of the heartbeat carries it
+    /// as the `topology_node` label; `[topology]` can limit the ids
+    /// allowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topology_node: Option<TopologyNode>,
     /// Labels on the heartbeat's alerts, such as `{ team = "ops" }`: a
     /// receiver like Alertmanager routes on them. `[alerting]` can require
     /// some and limit their values.

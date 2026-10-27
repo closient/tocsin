@@ -214,6 +214,37 @@ fn a_drill_check_s_alert_carries_its_class_from_fire_to_resolve() {
     });
 }
 
+#[test]
+fn a_check_s_alert_carries_its_topology_node_from_fire_to_resolve() {
+    paused(async {
+        let fixture = Fixture::new();
+        let config = config(&monitored(&["slack"], "").replace(
+            "component = \"web\"\n\n[[",
+            "component = \"web\"\ntopology_node = \"operations-01/job:api\"\n\n[[",
+        ));
+        let (sender, mut receiver) = channel();
+        let slack: Arc<dyn Notifier> = Fake::accepting("slack", &sender);
+        let running = start(
+            &fixture,
+            &config,
+            &[("slack", slack)],
+            &AlertMetrics::default(),
+        );
+
+        let id = running.change(down(T0)).await.unwrap();
+        let fire = next_from(&mut receiver, "slack").await.alert;
+        running.change(up(id, T0 + 90_000)).await;
+        let resolve = next_from(&mut receiver, "slack").await.alert;
+
+        assert_eq!(
+            fire.labels.get("topology_node").map(String::as_str),
+            Some("operations-01/job:api")
+        );
+        assert_eq!(resolve.labels, fire.labels);
+        running.alerter.stop().await;
+    });
+}
+
 /// `monitored`'s check, given `labels` and `annotations`, repeating hourly.
 fn labelled(labels: &str, annotations: &str) -> Config {
     config(&monitored(&["slack"], "repeat = \"1h\"").replace(

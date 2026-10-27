@@ -16,6 +16,7 @@ pub mod alert;
 mod checkpoint;
 pub mod day;
 mod error;
+mod federation;
 mod history;
 mod incident;
 mod node;
@@ -54,6 +55,7 @@ pub use crate::alert::{
 use crate::checkpoint::Checkpointer;
 pub use crate::day::Day;
 pub use crate::error::{Error, Result};
+pub use crate::federation::{BatchReport, RemoteBatch, RemoteOutageChange, RemoteResult};
 pub use crate::history::{Checks, HistoryPage, Newest, ResultFilter, ResultSlice};
 pub use crate::incident::{Drafts, OpenIncident, Opened};
 pub use crate::outage::{LastUp, LatestResult, Outage};
@@ -1294,6 +1296,28 @@ impl Store {
     /// The read fails.
     pub async fn store_id(&self) -> Result<String> {
         self.read(node::local_store_id).await
+    }
+
+    /// Applies a batch another node pushed, as this node (`local_node_id`)
+    /// at `now_ms`, in one transaction: see `docs/design/federation.md`.
+    /// Applying the same batch twice changes nothing the second time.
+    ///
+    /// # Errors
+    ///
+    /// Nothing is written on any error. [`Error::Invalid`] if the batch is
+    /// this node's or this store's own, holds another node's row, or is out
+    /// of order; [`Error::Conflict`] if it ends or opens an outage
+    /// differently from how the same store did before; otherwise the write
+    /// fails.
+    pub async fn apply_batch(
+        &self,
+        batch: RemoteBatch,
+        local_node_id: String,
+        now_ms: i64,
+    ) -> Result<BatchReport> {
+        self.writer
+            .run(move |conn| federation::apply_batch(conn, &batch, &local_node_id, now_ms))
+            .await
     }
 
     /// Signs `signup.email` up, or refreshes the confirmation of an address

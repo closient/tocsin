@@ -21,6 +21,7 @@ use tocsin_core::status::{CheckKind, OutageEnding};
 use crate::error::{Error, Result};
 use crate::history::{HistoryPage, lost_cursor};
 use crate::incident::{snapshot, text};
+use crate::node::take_seq;
 use crate::rollup::parse_column;
 use crate::writer::{apply_outage_change, insert_result};
 use crate::{NewCheckResult, NewOutage, OutageChange};
@@ -462,9 +463,15 @@ pub(crate) fn withdraw_outage(conn: &mut Connection, id: i64, now_ms: i64) -> Re
     };
     transaction
         .prepare_cached(
-            "UPDATE outage SET ended_at = max(?2, started_at), ending = ?3 WHERE id = ?1",
+            "UPDATE outage SET ended_at = max(?2, started_at), ending = ?3, ended_seq = ?4
+             WHERE id = ?1",
         )?
-        .execute(params![id, now_ms, OutageEnding::Withdrawn.as_str()])?;
+        .execute(params![
+            id,
+            now_ms,
+            OutageEnding::Withdrawn.as_str(),
+            take_seq(&transaction)?,
+        ])?;
     let open_alerts = open_alerts(&transaction, &identity)?;
     let queued = end_alerts(&transaction, &open_alerts, now_ms, now_ms, EndedBy::Config)?;
     transaction.commit()?;

@@ -51,6 +51,10 @@ pub enum Error {
     /// draft takes: publishing, discarding, or a drafts-only writer's
     /// change.
     Published(i64),
+    /// A node sent an outage differently from how the same store sent it
+    /// before: one writer cannot disagree with itself, so two machines are
+    /// writing as one node.
+    Conflict(String),
 }
 
 /// The result of a store operation.
@@ -82,6 +86,7 @@ impl fmt::Display for Error {
                  ({now_ms} ms); check the clock of the node that ran it"
             ),
             Error::Published(id) => write!(f, "incident {id} is already published"),
+            Error::Conflict(message) => write!(f, "federation conflict: {message}"),
             Error::Invalid(errors) => {
                 f.write_str("invalid write")?;
                 for (index, error) in errors.iter().enumerate() {

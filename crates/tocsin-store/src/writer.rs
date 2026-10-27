@@ -24,6 +24,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::checkpoint::Nudge;
 use crate::error::{Error, Result};
+use crate::node::take_seq;
 use crate::{NewCheckResult, OutageChange, SubjectKind};
 
 /// Queued writes beyond this make callers wait (backpressure).
@@ -394,11 +395,14 @@ pub(crate) fn apply_outage_change(
     let mut id = 0;
     if let Some(end) = &change.end {
         let changed = conn
-            .prepare_cached("UPDATE outage SET ended_at = ?2, ending = ?3 WHERE id = ?1")?
+            .prepare_cached(
+                "UPDATE outage SET ended_at = ?2, ending = ?3, ended_seq = ?4 WHERE id = ?1",
+            )?
             .execute(params![
                 end.id,
                 end.ended_at_ms,
-                OutageEnding::Recovered.as_str()
+                OutageEnding::Recovered.as_str(),
+                take_seq(conn)?,
             ])?;
         if changed == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
@@ -408,8 +412,8 @@ pub(crate) fn apply_outage_change(
     if let Some(outage) = &change.open {
         conn.prepare_cached(
             "INSERT INTO outage (node_id, subject_kind, check_id, component_id, health,
-                 started_at, alerted)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 started_at, alerted, opened_seq)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )?
         .execute(params![
             outage.node_id,
@@ -419,6 +423,7 @@ pub(crate) fn apply_outage_change(
             outage.health.as_str(),
             outage.started_at_ms,
             outage.alerted,
+            take_seq(conn)?,
         ])?;
         id = conn.last_insert_rowid();
     }

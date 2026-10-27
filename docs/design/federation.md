@@ -262,13 +262,16 @@ recompute, and the receiver upserts them by `(check_id, node_id, date)`.
 This matters for long partitions: once the receiver has finalized a day,
 its trigger refuses raw results for it, but the origin's rollup for that
 day still arrives and is complete. The receiver's hourly recompute
-filters to its own `node_id`. The page's bar, which already sums nodes,
+skips every node that pushes to it (a `node_store` row other than its
+own), so it never overwrites their rollups. The page's bar, which already sums nodes,
 needs no change.
 
 **Raw rows the receiver refuses.** A result dated before the receiver's
 `purged_before` is skipped, counted, and reported in the response; the
 cursor moves past it and its rollup covers it. A result from more than
-`FUTURE_TOLERANCE` ahead stops the batch at that row (see clock skew).
+`FUTURE_TOLERANCE` ahead stops results at that row (see clock skew);
+an outage change or rollup that far ahead does the same for its kind.
+Each kind has its own cursor, so the others still apply.
 
 ## Failure modes
 
@@ -280,7 +283,7 @@ cursor moves past it and its rollup covers it. A result from more than
   as `tocsin_node_clock_offset_seconds{node}`, a warning past 5 seconds
   and an alert (with resolve) past 60, both configurable.
 - An origin more than an hour ahead hits `FutureResult`. The batch stops
-  at that row and the node shows `skewed`. Nothing is skipped: the row is
+  at that row for its kind and the node shows `skewed`. Nothing is skipped: the row is
   real, and it is accepted once the clocks agree.
 - Freshness, liveness and quorum (below) are measured on the receiver's
   clock only, from `received_at`.
@@ -464,7 +467,7 @@ behind a failover is the operator's proxy configuration.
 
 ## What changes in the schema and API
 
-**Migrations** (0011 on; all `STRICT`, enums as `CHECK`, no JSON
+**Migrations** (0018 on; all `STRICT`, enums as `CHECK`, no JSON
 queried):
 
 - `node_store`: `id`, `node_id`, `store_id` (32 hex characters), `local`
@@ -481,7 +484,7 @@ queried):
 - `push_cursor` on the pusher: `upstream_id`, `results_through`,
   `outages_through`, `rollups_from`, `acked_at`.
 - `daily_rollup`: no change. Remote rows arrive by upsert; the local
-  recompute filters to the local node.
+  recompute skips nodes that push to it.
 - Node liveness and quorum outages need no schema change (`node:<id>`
   heartbeats, `node_id = '*'`).
 
@@ -575,8 +578,8 @@ Migrations for `node_store`, origin columns, outage seqs and the
 recreated trigger, and `push_cursor`. A store function that applies one
 batch in one `IMMEDIATE` transaction: insert-or-ignore results and
 outage opens, monotone ends, rollup upserts, expired rows skipped and
-counted, a future row stopping the batch, a differing end refused as a
-conflict. The local rollup recompute filters to the local node.
+counted, a future row stopping its kind, a differing end refused as a
+conflict. The local rollup recompute skips nodes that push to it.
 Acceptance: applying a batch twice leaves the database byte-for-byte the
 same as applying it once (row counts and contents); a batch whose outage
 open precedes the previous outage's end in seq order applies, and one

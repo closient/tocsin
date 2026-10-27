@@ -248,6 +248,7 @@ trigger aborts every `UPDATE`. `DELETE` stays open for retention. The
 | `error` | text | Transport or assertion error, if any. |
 | `status_code` | integer | HTTP status, 0–999, or null. |
 | `kind` | text | `check` (a probe's result) or `heartbeat` (a ping or a missed deadline). Added by 0006; older rows are `check`. |
+| `origin_store`, `origin_id` | integer | For a result another node pushed: its store's `node_store` row and the result's id there, unique together (`check_result_origin`) so a batch applied twice stores it once. Both null on local rows, never one alone. Added by 0019. |
 
 Indexes: `(check_id, started_at)` for one check's history,
 `(node_id, started_at)` for one node's results, a covering
@@ -262,8 +263,10 @@ deletes.
 ### `outage`
 
 A machine-detected outage of one check on one node. The only change ever made
-to a row is setting `ended_at` and `ending` together, once; the
-`outage_only_ends` trigger aborts any other `UPDATE`. A partial unique index (`outage_open`) allows at most one open
+to a row is setting `ended_at`, `ending` and `ended_seq` together, once; the
+`outage_only_ends` trigger aborts any other `UPDATE`, and `outage_numbered`
+aborts an insert without `opened_seq`, or with `ended_seq` set exactly when
+`ended_at` is not. A partial unique index (`outage_open`) allows at most one open
 outage (`ended_at IS NULL`) per check per node. Outages are kept indefinitely:
 they are small and they are the incident history.
 
@@ -277,6 +280,8 @@ they are small and they are the incident history.
 | `ended_at` | integer | Null while open; ≥ `started_at`. |
 | `ending` | text | Null while open, else `recovered` (tocsin saw the check leave this health) or `withdrawn` (the check was removed from the configuration while out). Added by 0008, which set every outage already ended to `recovered`. |
 | `alerted` | integer | 1 if the change that opened it alerted, 0 if a maintenance window silenced it; its recovery alerts the same way. Added by 0003; older rows are 1. |
+| `opened_seq`, `ended_seq` | integer | Where its store opened and ended it in one sequence that numbers both (`node_store.next_seq` for this store), so another store replaying those changes in seq order never has two open for one check. `ended_seq` is null while open and greater than `opened_seq`. Added by 0019, which numbered existing outages in id order, each end straight after its open. |
+| `origin_store`, `origin_id` | integer | For an outage another node pushed: as on `check_result` (`outage_origin`). Added by 0019. |
 
 ### `daily_rollup`
 
@@ -547,7 +552,31 @@ one; a partial unique index (`node_store_local`) allows only one such row.
 | `local` | integer | 1 for this database's own row, else 0. |
 | `state` | text | `active`, `retired` or `conflicted`. |
 | `first_seen_at`, `last_push_at` | integer | When the row was made, and the last push received from that store. |
-| `next_seq` | integer | The next sequence number this store will stamp; set on the local row only, and at least 1. |
+| `next_seq` | integer | The next sequence number this store will stamp; set on the local row only, and at least 1. Each outage open and end takes one. |
+
+A row with `local = 0` is made the first time a batch from that store is
+applied. Applying a batch is idempotent: results and outages already stored
+under their origin key are skipped, an outage change that matches what is
+stored is a no-op, and one that differs is refused as a conflict with
+nothing written. Outage changes must arrive in seq order, after any already
+applied from that store. A result dated before `purged_before` is skipped and
+counted; one dated past `FUTURE_TOLERANCE` stops that kind of row for the
+batch, keeping the ones before it. Rollups another node pushed are stored as
+they came, and the local recompute counts only this node's raw results and
+those of nodes with no `node_store` row, so it never overwrites them.
+
+### `push_cursor`
+
+How far each upstream this store pushes to has acknowledged its rows, added
+by 0019. One row per upstream.
+
+| Column | Type | Notes |
+|---|---|---|
+| `upstream_id` | text | Primary key; non-empty. |
+| `results_through` | integer | The last `check_result.id` the upstream committed; 0 for none. |
+| `outages_through` | integer | The last outage seq the upstream committed; 0 for none. |
+| `rollups_from` | text | `YYYY-MM-DD`: the first day whose rollups it may not have yet, or null. |
+| `acked_at` | integer | When it last acknowledged, or null. |
 
 ## Rollups
 

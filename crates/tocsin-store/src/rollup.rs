@@ -94,6 +94,7 @@ fn heartbeat_results(
     let mut statement = conn.prepare_cached(
         "SELECT check_id, node_id, started_at, health FROM check_result
          WHERE started_at >= ?1 AND started_at < ?2 AND kind = 'heartbeat'
+             AND node_id NOT IN (SELECT node_id FROM node_store WHERE local = 0)
          ORDER BY check_id, node_id, started_at, id",
     )?;
     let rows = statement.query_map(params![from_ms, until_ms], |row| {
@@ -135,6 +136,7 @@ fn count_checks(
                 sum(health = 'up'), sum(health = 'degraded'), sum(health = 'down')
          FROM check_result
          WHERE started_at >= ?1 AND started_at < ?2
+             AND node_id NOT IN (SELECT node_id FROM node_store WHERE local = 0)
          GROUP BY check_id, node_id, day"
     ))?;
     let rows = statement.query_map(params![from_ms, until_ms], |row| {
@@ -216,6 +218,18 @@ fn weigh_heartbeats(heartbeats: &[HeartbeatResult], now_ms: i64) -> Vec<DailyRol
 /// Returns how many rows were written.
 pub(crate) fn upsert(conn: &Connection, rollups: &[DailyRollup]) -> Result<usize> {
     let floor = purged_before(conn)?.unwrap_or(0);
+    let kept: Vec<DailyRollup> = rollups
+        .iter()
+        .filter(|r| r.date.start_ms() >= floor)
+        .cloned()
+        .collect();
+    upsert_all(conn, &kept)
+}
+
+/// Inserts or replaces each rollup, days before the retention watermark
+/// included: another node's rollups, which are complete wherever its raw
+/// results went. Returns how many rows were written.
+pub(crate) fn upsert_all(conn: &Connection, rollups: &[DailyRollup]) -> Result<usize> {
     let mut statement = conn.prepare_cached(
         "INSERT INTO daily_rollup (check_id, node_id, date, total, up, degraded, down, worst, kind)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -224,7 +238,7 @@ pub(crate) fn upsert(conn: &Connection, rollups: &[DailyRollup]) -> Result<usize
              down = excluded.down, worst = excluded.worst, kind = excluded.kind",
     )?;
     let mut written = 0;
-    for rollup in rollups.iter().filter(|r| r.date.start_ms() >= floor) {
+    for rollup in rollups {
         written += statement.execute(params![
             rollup.check_id,
             rollup.node_id,

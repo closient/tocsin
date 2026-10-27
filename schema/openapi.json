@@ -392,6 +392,172 @@
         ]
       }
     },
+    "/api/v1/federation/batch": {
+      "post": {
+        "tags": [
+          "federation"
+        ],
+        "summary": "Take a batch of results, outage changes and rollups another node\npushed from one of its stores.",
+        "operationId": "push_batch",
+        "parameters": [
+          {
+            "name": "Tocsin-Node",
+            "in": "header",
+            "description": "The pushing node's id, as its `[[node]]` names it",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Tocsin-Store",
+            "in": "header",
+            "description": "The store the rows come from, 32 lowercase hex digits",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Tocsin-Signature",
+            "in": "header",
+            "description": "The node key's signature over the node, the store and the body, base64",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Batch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Applied and committed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is not JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A header is missing, the node is unknown, or the signature does not verify",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The node, or the store it pushed from, is retired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The node is conflicted, or the batch conflicts with what its store sent before, as two machines pushing as one node do",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A row is another node's, out of order, or holds a bad value",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/federation/nodes": {
+      "get": {
+        "tags": [
+          "federation"
+        ],
+        "summary": "Every node the configuration lists: whether it is retired, its stores\nthis node holds rows from, and what its last push here said.",
+        "operationId": "list_nodes",
+        "responses": {
+          "200": {
+            "description": "In the configuration's order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token lacks the `status:read` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/heartbeat/{id}": {
       "get": {
         "tags": [
@@ -2434,6 +2600,344 @@
           "resolved"
         ]
       },
+      "Batch": {
+        "type": "object",
+        "description": "One push: the rows a node's store has past the receiver's cursor, up to\na batch's worth, and where the store's own rows end.",
+        "required": [
+          "node",
+          "store",
+          "sent_at"
+        ],
+        "properties": {
+          "config_digest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The digest of the sender's merged configuration, if it gives one."
+          },
+          "cursor": {
+            "$ref": "#/components/schemas/Positions",
+            "description": "Where the batch starts: the last result id and outage seq this\nreceiver acknowledged, as the sender's cursor holds them."
+          },
+          "head": {
+            "$ref": "#/components/schemas/Positions",
+            "description": "Where the sender's store ends: its last result id and outage seq."
+          },
+          "node": {
+            "type": "string",
+            "description": "The node that pushed it; must match `Tocsin-Node`."
+          },
+          "outages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BatchOutageChange"
+            },
+            "description": "Outage changes, in ascending seq."
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BatchResult"
+            },
+            "description": "Results, in ascending `origin_id`."
+          },
+          "rollups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BatchRollup"
+            },
+            "description": "The sender's own daily rollups."
+          },
+          "sent_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When the sender sent it, by its own clock."
+          },
+          "store": {
+            "type": "string",
+            "description": "The store the rows come from, 32 lowercase hex digits; must match\n`Tocsin-Store`."
+          }
+        }
+      },
+      "BatchOutageChange": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The store opened an outage.",
+            "required": [
+              "seq",
+              "origin_id",
+              "node_id",
+              "kind",
+              "check_id",
+              "health",
+              "started_at",
+              "alerted",
+              "change"
+            ],
+            "properties": {
+              "alerted": {
+                "type": "boolean",
+                "description": "Whether opening it alerted on the sender."
+              },
+              "change": {
+                "type": "string",
+                "enum": [
+                  "open"
+                ]
+              },
+              "check_id": {
+                "type": "string",
+                "description": "The failing check or heartbeat."
+              },
+              "component_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The component the check belongs to, if any."
+              },
+              "health": {
+                "$ref": "#/components/schemas/Health",
+                "description": "`degraded` or `down`."
+              },
+              "kind": {
+                "$ref": "#/components/schemas/CheckKind",
+                "description": "Whether `check_id` names a check or a heartbeat."
+              },
+              "node_id": {
+                "type": "string",
+                "description": "The node that saw it: the sender."
+              },
+              "origin_id": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The outage's id there."
+              },
+              "seq": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Its seq in the sender's store."
+              },
+              "started_at": {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When it began."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The store ended an outage it opened earlier.",
+            "required": [
+              "seq",
+              "origin_id",
+              "ended_at",
+              "ending",
+              "change"
+            ],
+            "properties": {
+              "change": {
+                "type": "string",
+                "enum": [
+                  "end"
+                ]
+              },
+              "ended_at": {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When it ended."
+              },
+              "ending": {
+                "$ref": "#/components/schemas/OutageEnding",
+                "description": "How it ended."
+              },
+              "origin_id": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The outage's id there."
+              },
+              "seq": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Its seq in the sender's store."
+              }
+            }
+          }
+        ],
+        "description": "An outage opening or ending, as the sender's store numbered it."
+      },
+      "BatchReceipt": {
+        "type": "object",
+        "description": "What the receiver did with a batch, answered only once it committed.",
+        "required": [
+          "results_applied",
+          "results_expired",
+          "outage_changes_applied",
+          "rollups_applied",
+          "cursor"
+        ],
+        "properties": {
+          "cursor": {
+            "$ref": "#/components/schemas/Positions",
+            "description": "The new cursor: the last result id and outage seq the receiver is\ndone with, the batch's `cursor` where it took none of a kind."
+          },
+          "outage_changes_applied": {
+            "type": "integer",
+            "description": "Outage changes made now.",
+            "minimum": 0
+          },
+          "results_applied": {
+            "type": "integer",
+            "description": "Results stored now.",
+            "minimum": 0
+          },
+          "results_expired": {
+            "type": "integer",
+            "description": "Results skipped as older than the receiver keeps; their days are\ncovered by the sender's rollups.",
+            "minimum": 0
+          },
+          "rollups_applied": {
+            "type": "integer",
+            "description": "Rollups written.",
+            "minimum": 0
+          },
+          "skewed_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "The earliest time a row too far ahead of the receiver's clock says\nit happened. It and the rest of its kind wait for the clocks to\nagree."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "BatchResult": {
+        "type": "object",
+        "description": "A result as the sender's store recorded it.",
+        "required": [
+          "origin_id",
+          "node_id",
+          "kind",
+          "check_id",
+          "started_at",
+          "duration_ms",
+          "health"
+        ],
+        "properties": {
+          "check_id": {
+            "type": "string",
+            "description": "The check or heartbeat."
+          },
+          "detail": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "How each assertion fared."
+          },
+          "duration_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long the run took."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the run failed, when it did."
+          },
+          "health": {
+            "$ref": "#/components/schemas/Health",
+            "description": "The verdict."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CheckKind",
+            "description": "Whether `check_id` names a check or a heartbeat."
+          },
+          "node_id": {
+            "type": "string",
+            "description": "The node that ran it: the sender."
+          },
+          "origin_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Its id in the sender's store."
+          },
+          "started_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When the run started."
+          },
+          "status_code": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The protocol status code, when the check has one.",
+            "minimum": 0
+          }
+        }
+      },
+      "BatchRollup": {
+        "type": "object",
+        "description": "One day of one check's results on the sender.",
+        "required": [
+          "check_id",
+          "node_id",
+          "date",
+          "kind",
+          "total",
+          "up",
+          "degraded",
+          "down",
+          "worst"
+        ],
+        "properties": {
+          "check_id": {
+            "type": "string",
+            "description": "The check or heartbeat."
+          },
+          "date": {
+            "type": "string",
+            "description": "The UTC day, `YYYY-MM-DD`."
+          },
+          "degraded": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Results, or milliseconds, degraded."
+          },
+          "down": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Results, or milliseconds, down."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CheckKind",
+            "description": "Whether the figures are result counts (a check) or milliseconds (a\nheartbeat)."
+          },
+          "node_id": {
+            "type": "string",
+            "description": "The node that recorded the results: the sender."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`up + degraded + down`."
+          },
+          "up": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Results, or milliseconds, up."
+          },
+          "worst": {
+            "$ref": "#/components/schemas/Health",
+            "description": "The worst health of any result that day."
+          }
+        }
+      },
       "CheckKind": {
         "type": "string",
         "description": "Whether a member of a component is probed or pinged.",
@@ -3265,6 +3769,48 @@
           }
         }
       },
+      "LastPush": {
+        "type": "object",
+        "description": "What a node's last push said of it.",
+        "required": [
+          "store",
+          "sent_at",
+          "received_at",
+          "clock_offset_seconds",
+          "backlog_rows"
+        ],
+        "properties": {
+          "backlog_rows": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The results and outage changes the node had yet to push."
+          },
+          "clock_offset_seconds": {
+            "type": "number",
+            "format": "double",
+            "description": "`sent_at` less `received_at`, in seconds: how far ahead the node's\nclock is, transit included; negative when behind."
+          },
+          "config_digest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The digest of the node's merged configuration, if it gave one."
+          },
+          "received_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When the receiver took it, by its own clock."
+          },
+          "sent_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When the node sent it, by its clock."
+          },
+          "store": {
+            "type": "string",
+            "description": "The store it came from."
+          }
+        }
+      },
       "Matchers": {
         "type": "object",
         "description": "Which alerts a silence holds back: every field set must equal the\nalert's. A field left out matches anything.",
@@ -3592,6 +4138,98 @@
         },
         "additionalProperties": false
       },
+      "NodeList": {
+        "type": "object",
+        "description": "The answer to `GET /api/v1/federation/nodes`.",
+        "required": [
+          "nodes"
+        ],
+        "properties": {
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeStatus"
+            },
+            "description": "Every `[[node]]` the receiver's configuration lists, in its order."
+          }
+        }
+      },
+      "NodeStatus": {
+        "type": "object",
+        "description": "A configured node, as the receiver sees it.",
+        "required": [
+          "id",
+          "retired",
+          "local",
+          "stores"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The node's id."
+          },
+          "last_push": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LastPush",
+                "description": "Its last push since the receiver started, if any."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "local": {
+            "type": "boolean",
+            "description": "Whether it is the receiver itself."
+          },
+          "retired": {
+            "type": "boolean",
+            "description": "Whether the configuration marks it decommissioned; its pushes are\nrefused."
+          },
+          "stores": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeStore"
+            },
+            "description": "Each of its stores whose pushes were applied here, oldest first."
+          }
+        }
+      },
+      "NodeStore": {
+        "type": "object",
+        "description": "One of a node's stores, as the receiver keeps it.",
+        "required": [
+          "store",
+          "state",
+          "first_seen_at"
+        ],
+        "properties": {
+          "first_seen_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When the receiver first applied a push from it, by its own clock."
+          },
+          "last_push_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When the receiver last applied one, by its own clock."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "$ref": "#/components/schemas/StoreState",
+            "description": "Whether its pushes are taken."
+          },
+          "store": {
+            "type": "string",
+            "description": "The store's id, 32 lowercase hex digits."
+          }
+        }
+      },
       "OutageEnding": {
         "type": "string",
         "description": "How an outage ended.",
@@ -3727,6 +4365,28 @@
           "up",
           "down"
         ]
+      },
+      "Positions": {
+        "type": "object",
+        "description": "A result id and an outage seq in one store; `null` before the first.",
+        "properties": {
+          "outages": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "An outage seq."
+          },
+          "results": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "A result id."
+          }
+        }
       },
       "Publish": {
         "type": "object",
@@ -4041,6 +4701,15 @@
             "description": "The `[page]` title."
           }
         }
+      },
+      "StoreState": {
+        "type": "string",
+        "description": "Whether the receiver takes a store's pushes.",
+        "enum": [
+          "active",
+          "retired",
+          "conflicted"
+        ]
       },
       "SubscriberEntry": {
         "type": "object",
@@ -4428,6 +5097,10 @@
     {
       "name": "silences",
       "description": "Holding alert messages back until a silence expires"
+    },
+    {
+      "name": "federation",
+      "description": "Pushes from the other nodes of a federation, and what this node knows of each"
     }
   ]
 }

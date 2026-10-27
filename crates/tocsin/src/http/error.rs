@@ -154,6 +154,7 @@ impl From<tocsin_store::Error> for ApiError {
             conflict @ (tocsin_store::Error::Published(_) | tocsin_store::Error::Conflict(_)) => {
                 ApiError::conflict(conflict.to_string())
             }
+            tocsin_store::Error::Retired(message) => ApiError::forbidden(message),
             other => ApiError::internal(&other),
         }
     }
@@ -249,7 +250,10 @@ fn not_json() -> ApiError {
 }
 
 /// The whole body, or 413 past [`super::BODY_LIMIT`].
-async fn body<S: Send + Sync>(request: Request, state: &S) -> Result<axum::body::Bytes, ApiError> {
+pub(super) async fn body<S: Send + Sync>(
+    request: Request,
+    state: &S,
+) -> Result<axum::body::Bytes, ApiError> {
     axum::body::Bytes::from_request(request, state)
         .await
         .map_err(|rejection| match rejection.status() {

@@ -8,7 +8,8 @@
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use tocsin_core::Health;
-use tocsin_core::incident::FieldError;
+use tocsin_core::federation::wire;
+use tocsin_core::incident::{FieldError, Timestamp};
 use tocsin_core::status::OutageEnding;
 
 use crate::day::Day;
@@ -100,6 +101,140 @@ pub struct BatchReport {
     pub skewed_at_ms: Option<i64>,
 }
 
+impl RemoteBatch {
+    /// The batch a node sent over the wire, in the store's terms.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] naming each rollup whose `date` is not a
+    /// `YYYY-MM-DD` day.
+    pub fn from_wire(batch: wire::Batch) -> Result<Self> {
+        let mut errors = Vec::new();
+        let rollups = batch
+            .rollups
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, rollup)| {
+                let Ok(date) = rollup.date.parse::<Day>() else {
+                    errors.push(FieldError::new(
+                        format!("rollups[{index}].date"),
+                        "is not a YYYY-MM-DD day",
+                    ));
+                    return None;
+                };
+                Some(DailyRollup {
+                    check_id: rollup.check_id,
+                    node_id: rollup.node_id,
+                    date,
+                    kind: rollup.kind.into(),
+                    total: rollup.total,
+                    up: rollup.up,
+                    degraded: rollup.degraded,
+                    down: rollup.down,
+                    worst: rollup.worst,
+                })
+            })
+            .collect();
+        if !errors.is_empty() {
+            return Err(Error::Invalid(errors));
+        }
+        Ok(RemoteBatch {
+            node_id: batch.node,
+            store_id: batch.store,
+            results: batch
+                .results
+                .into_iter()
+                .map(RemoteResult::from_wire)
+                .collect(),
+            outages: batch
+                .outages
+                .into_iter()
+                .map(RemoteOutageChange::from_wire)
+                .collect(),
+            rollups,
+        })
+    }
+}
+
+impl RemoteResult {
+    fn from_wire(result: wire::BatchResult) -> Self {
+        RemoteResult {
+            origin_id: result.origin_id,
+            kind: result.kind.into(),
+            result: NewCheckResult {
+                node_id: result.node_id,
+                check_id: result.check_id,
+                started_at_ms: result.started_at.as_millis(),
+                duration_ms: result.duration_ms,
+                health: result.health,
+                detail: result.detail,
+                error: result.error,
+                status_code: result.status_code,
+            },
+        }
+    }
+}
+
+impl RemoteOutageChange {
+    fn from_wire(change: wire::BatchOutageChange) -> Self {
+        match change {
+            wire::BatchOutageChange::Open {
+                seq,
+                origin_id,
+                node_id,
+                kind,
+                check_id,
+                component_id,
+                health,
+                started_at,
+                alerted,
+            } => RemoteOutageChange::Open {
+                seq,
+                origin_id,
+                outage: NewOutage {
+                    node_id,
+                    subject_kind: kind.into(),
+                    check_id,
+                    component_id,
+                    health,
+                    started_at_ms: started_at.as_millis(),
+                    alerted,
+                },
+            },
+            wire::BatchOutageChange::End {
+                seq,
+                origin_id,
+                ended_at,
+                ending,
+            } => RemoteOutageChange::End {
+                seq,
+                origin_id,
+                ended_at_ms: ended_at.as_millis(),
+                ending,
+            },
+        }
+    }
+}
+
+impl BatchReport {
+    /// The answer to the batch this report is for, whose cursor was
+    /// `cursor`: the cursor moves past every row the batch is done with.
+    #[must_use]
+    pub fn receipt(&self, cursor: wire::Positions) -> wire::BatchReceipt {
+        wire::BatchReceipt {
+            results_applied: self.results_applied,
+            results_expired: self.results_expired,
+            outage_changes_applied: self.outage_changes_applied,
+            rollups_applied: self.rollups_applied,
+            cursor: wire::Positions {
+                results: self.results_through.or(cursor.results),
+                outages: self.outages_through.or(cursor.outages),
+            },
+            skewed_at: self.skewed_at_ms.map(Timestamp::from_millis),
+        }
+    }
+}
+
 /// Applies `batch` from another node in one IMMEDIATE transaction, given
 /// this node's id and clock.
 ///
@@ -112,8 +247,9 @@ pub struct BatchReport {
 /// ahead stops its kind at that row, keeping what came before it; a rollup
 /// for a day that has not begun by then is left out. The report says where.
 ///
-/// The batch's `node_store` row is made on first sight; its state and last
-/// push are the caller's to keep.
+/// The batch's `node_store` row is made on first sight, and its last push
+/// set to `now_ms`, in the same transaction, which first refuses the batch
+/// if its node or store may no longer push.
 ///
 /// # Errors
 ///
@@ -121,9 +257,10 @@ pub struct BatchReport {
 /// batch is from this node or this store, holds another node's row or a
 /// value the schema refuses, is out of order, opens an outage while the
 /// same check's last one is still open, or ends one it never opened or
-/// before it started; [`Error::Conflict`] if it differs from what
-/// the same store already sent for an outage, which means two machines are
-/// writing as one node; otherwise the write fails.
+/// before it started; [`Error::Conflict`] if any of the node's stores is
+/// conflicted, or the batch differs from what the same store already sent
+/// for an outage, which means two machines are writing as one node;
+/// [`Error::Retired`] if its store was retired; otherwise the write fails.
 pub(crate) fn apply_batch(
     conn: &mut Connection,
     batch: &RemoteBatch,
@@ -132,6 +269,7 @@ pub(crate) fn apply_batch(
 ) -> Result<BatchReport> {
     let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     validate(&transaction, batch, local_node_id)?;
+    refuse_unless_active(&transaction, batch)?;
     let origin = Origin {
         row: remote_store(&transaction, batch, now_ms)?,
         batch,
@@ -151,9 +289,9 @@ pub(crate) fn apply_batch(
 fn validate(conn: &Connection, batch: &RemoteBatch, local_node_id: &str) -> Result<()> {
     let mut errors = Vec::new();
     if batch.node_id.is_empty() {
-        errors.push(FieldError::new("node_id", "is empty"));
+        errors.push(FieldError::new("node", "is empty"));
     } else if batch.node_id == local_node_id {
-        errors.push(FieldError::new("node_id", "is this node's own"));
+        errors.push(FieldError::new("node", "is this node's own"));
     }
     if batch.store_id.len() != 32
         || !batch
@@ -161,12 +299,9 @@ fn validate(conn: &Connection, batch: &RemoteBatch, local_node_id: &str) -> Resu
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
-        errors.push(FieldError::new(
-            "store_id",
-            "is not 32 lowercase hex digits",
-        ));
+        errors.push(FieldError::new("store", "is not 32 lowercase hex digits"));
     } else if batch.store_id == node::local_store_id(conn)? {
-        errors.push(FieldError::new("store_id", "is this database's own store"));
+        errors.push(FieldError::new("store", "is this database's own store"));
     }
     validate_results(batch, &mut errors);
     validate_outages(batch, &mut errors);
@@ -280,12 +415,46 @@ fn not_own(path: String, batch: &RemoteBatch) -> FieldError {
     )
 }
 
-/// The `node_store` row for the batch's store, made on first sight.
+/// Refuses a batch whose node has a conflicted store, as two machines
+/// pushing as one leave it, or whose own store was retired. Read under the
+/// write lock, so a store marked between the read and the write cannot
+/// slip a batch through.
+fn refuse_unless_active(conn: &Connection, batch: &RemoteBatch) -> Result<()> {
+    let mut statement =
+        conn.prepare_cached("SELECT store_id, state FROM node_store WHERE node_id = ?1")?;
+    let stores = statement
+        .query_map(params![batch.node_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let state = |text: &str| text.parse::<wire::StoreState>().ok();
+    if let Some((store, _)) = stores
+        .iter()
+        .find(|(_, text)| state(text) == Some(wire::StoreState::Conflicted))
+    {
+        return Err(Error::Conflict(format!(
+            "node {} is conflicted: store {store} pushed as it too; retire one machine",
+            batch.node_id
+        )));
+    }
+    if stores.iter().any(|(store, text)| {
+        *store == batch.store_id && state(text) == Some(wire::StoreState::Retired)
+    }) {
+        return Err(Error::Retired(format!(
+            "store {} of node {} is retired: its pushes are refused",
+            batch.store_id, batch.node_id
+        )));
+    }
+    Ok(())
+}
+
+/// The `node_store` row for the batch's store, made on first sight, its
+/// last push moved to `now_ms`.
 fn remote_store(conn: &Connection, batch: &RemoteBatch, now_ms: i64) -> Result<i64> {
     conn.prepare_cached(
-        "INSERT INTO node_store (node_id, store_id, local, first_seen_at)
-         VALUES (?1, ?2, 0, ?3)
-         ON CONFLICT (node_id, store_id) DO NOTHING",
+        "INSERT INTO node_store (node_id, store_id, local, first_seen_at, last_push_at)
+         VALUES (?1, ?2, 0, ?3, ?3)
+         ON CONFLICT (node_id, store_id) DO UPDATE SET last_push_at = excluded.last_push_at",
     )?
     .execute(params![batch.node_id, batch.store_id, now_ms])?;
     Ok(conn.query_row(

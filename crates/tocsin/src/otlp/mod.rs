@@ -436,6 +436,8 @@ struct Points {
     statuses: Vec<NumberDataPoint>,
     slack_connections: Vec<NumberDataPoint>,
     slack_up: Vec<NumberDataPoint>,
+    node_offsets: Vec<NumberDataPoint>,
+    node_backlogs: Vec<NumberDataPoint>,
 }
 
 impl Points {
@@ -514,6 +516,19 @@ impl Points {
         }
         if let Some(slack) = &reading.slack {
             points.slack(slack, now);
+        }
+        for each in &reading.nodes {
+            let attributes = [attribute(NODE_ID, &each.node)];
+            points.node_offsets.push(number(
+                &attributes,
+                now,
+                number_data_point::Value::AsDouble(each.clock_offset_seconds),
+            ));
+            points.node_backlogs.push(number(
+                &attributes,
+                now,
+                number_data_point::Value::AsInt(each.backlog_rows),
+            ));
         }
         points
     }
@@ -611,6 +626,22 @@ impl Points {
                 "1",
                 metric::Data::Gauge(Gauge {
                     data_points: self.slack_up,
+                }),
+            ),
+            metric(
+                "tocsin.node.clock_offset",
+                "How far ahead of this node's clock each other node's was at its last push, transit included; negative when behind",
+                "s",
+                metric::Data::Gauge(Gauge {
+                    data_points: self.node_offsets,
+                }),
+            ),
+            metric(
+                "tocsin.node.backlog",
+                "The results and outage changes each other node had not yet pushed here, as its last push counted them",
+                "{row}",
+                metric::Data::Gauge(Gauge {
+                    data_points: self.node_backlogs,
                 }),
             ),
         ]

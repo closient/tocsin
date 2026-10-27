@@ -201,6 +201,17 @@ async fn applying_a_batch_twice_changes_nothing() {
     assert_eq!(second.results_through, Some(9));
     assert_eq!(second.outage_changes_applied, 0);
     assert_eq!(second.outages_through, Some(3));
+
+    // The second push is heard, and nothing else changes.
+    let stores = fixture.store.remote_stores().await.unwrap();
+    assert_eq!(stores.len(), 1);
+    assert_eq!(stores[0].last_push_at_ms, Some(noon() + 60_000));
+    raw(&fixture.path)
+        .execute(
+            "UPDATE node_store SET last_push_at = ?1 WHERE local = 0",
+            [noon()],
+        )
+        .unwrap();
     assert_eq!(dump(&fixture.path), once);
 }
 
@@ -417,11 +428,11 @@ async fn a_batch_from_this_node_or_store_or_with_another_nodes_rows_is_refused()
     let mut own = batch(vec![result(1, base)], vec![], vec![]);
     own.node_id = LOCAL.into();
     own.results[0].result.node_id = LOCAL.into();
-    assert!(invalid(apply(&fixture, own).await).contains("node_id"));
+    assert!(invalid(apply(&fixture, own).await).contains("node: is this node's own"));
 
     let mut own_store = batch(vec![result(1, base)], vec![], vec![]);
     own_store.store_id = fixture.store.store_id().await.unwrap();
-    assert!(invalid(apply(&fixture, own_store).await).contains("store_id"));
+    assert!(invalid(apply(&fixture, own_store).await).contains("store: is this database's own"));
 
     let mut relayed = batch(vec![result(1, base), result(2, base)], vec![], vec![]);
     relayed.results[1].result.node_id = "node-c".into();
@@ -563,7 +574,7 @@ async fn a_value_the_schema_refuses_is_named_rather_than_failing_the_write() {
     bad.rollups[0].total = 7;
     let error = invalid(apply(&fixture, bad).await);
     for field in [
-        "store_id",
+        "store: is not",
         "results[0].check_id",
         "results[0].duration_ms",
         "results[1].status_code",

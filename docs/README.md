@@ -44,3 +44,4 @@
 - [The engine](engine.md): scheduling, confirmation and component state.
 - [Storage](storage.md): the SQLite schema and retention.
 - [Federation](design/federation.md): proposed design for several nodes sharing history, quorum checks and nodes watching each other.
+- [Alert hub](design/alert-hub.md): proposed design for taking in Prometheus and other alerts, grouping them, one view, label silences and routing, so Alertmanager can be demoted.

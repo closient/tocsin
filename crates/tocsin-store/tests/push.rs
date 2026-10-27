@@ -311,6 +311,17 @@ async fn rollups_go_in_whole_days_from_the_cursor() {
     assert_eq!(busy.rollups.len(), 0);
     assert_eq!(busy.rollups_next, Some(day("2026-01-01")));
 
+    // A trickle of results that leaves room does not hold a day back for
+    // ever: the day goes whole beside it.
+    let trickle = fixture
+        .store
+        .unpushed(LOCAL.into(), start.clone(), 2)
+        .await
+        .unwrap();
+    assert_eq!(trickle.results.len(), 1);
+    assert_eq!(trickle.rollups.len(), 2);
+    assert_eq!(trickle.rollups_next, Some(day("2026-01-02")));
+
     let all = fixture
         .store
         .unpushed(LOCAL.into(), start, 100)
@@ -346,6 +357,7 @@ async fn a_cursor_is_made_once_and_kept() {
             outages_through: 0,
             rollups_from: None,
             acked_at_ms: None,
+            rollups_rewound: 0,
         }
     );
     let moved = PushCursor {
@@ -353,6 +365,7 @@ async fn a_cursor_is_made_once_and_kept() {
         outages_through: 3,
         rollups_from: Some(day("2026-01-02")),
         acked_at_ms: Some(9_000),
+        rollups_rewound: 0,
     };
     fixture
         .store
@@ -412,46 +425,122 @@ async fn retention_counts_the_rows_each_upstream_never_received() {
     );
 }
 
+/// `upstream`'s cursor moved to `rollups_from`, as read before the move.
+async fn set_rollups_from(fixture: &Fixture, upstream: &str, from: Option<Day>) -> PushCursor {
+    let start = fixture
+        .store
+        .push_cursor(upstream.into(), LOCAL.into())
+        .await
+        .unwrap();
+    fixture
+        .store
+        .advance_push_cursor(
+            upstream.into(),
+            PushCursor {
+                rollups_from: from,
+                ..start.clone()
+            },
+        )
+        .await
+        .unwrap();
+    PushCursor {
+        rollups_from: from,
+        ..start
+    }
+}
+
 #[tokio::test]
-async fn a_rewritten_day_moves_every_later_cursor_back_to_it() {
+async fn rewriting_a_day_moves_every_later_cursor_back_to_it() {
     let fixture = open();
     for (upstream, from) in [
         ("unset", None),
         ("later", Some(day("2026-01-03"))),
         ("earlier", Some(day("2026-01-01"))),
     ] {
-        let start = fixture
-            .store
-            .push_cursor(upstream.into(), LOCAL.into())
-            .await
-            .unwrap();
-        fixture
-            .store
-            .advance_push_cursor(
-                upstream.into(),
-                PushCursor {
-                    rollups_from: from,
-                    ..start
-                },
-            )
-            .await
-            .unwrap();
+        set_rollups_from(&fixture, upstream, from).await;
     }
     fixture
         .store
-        .repush_rollups_from(day("2026-01-02"))
+        .append(result(LOCAL, "web", day("2026-01-02").start_ms() + 5))
         .await
         .unwrap();
+    // A rollup recompute, the CLI's included, rewinds in the transaction
+    // that writes the day; no caller has to.
+    let report = fixture.store.rollup_since(day("2026-01-02")).await.unwrap();
+    assert!(report.rows > 0);
     for (upstream, from) in [
         ("unset", "2026-01-02"),
         ("later", "2026-01-02"),
         ("earlier", "2026-01-01"),
     ] {
-        let cursor = fixture
+        assert_eq!(
+            fixture
+                .store
+                .push_cursor(upstream.into(), LOCAL.into())
+                .await
+                .unwrap()
+                .rollups_from,
+            Some(day(from)),
+            "{upstream}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_push_read_before_a_rewrite_does_not_move_past_it() {
+    let fixture = open();
+    let first = day("2026-01-02");
+    fixture
+        .store
+        .append(result(LOCAL, "web", first.start_ms() + 5))
+        .await
+        .unwrap();
+    // "same-day" is already at the day the rewrite is of: a rewind that
+    // moves nothing still counts.
+    let unset = set_rollups_from(&fixture, "unset", None).await;
+    let same_day = set_rollups_from(&fixture, "same-day", Some(first)).await;
+    let fresh = set_rollups_from(&fixture, "fresh", None).await;
+    fixture.store.rollup_since(first).await.unwrap();
+    let fresh = PushCursor {
+        rollups_rewound: cursor_of(&fixture, "fresh").await.rollups_rewound,
+        ..fresh
+    };
+
+    // Each push read its cursor before the rewrite and sent everything.
+    for (upstream, read) in [("unset", unset), ("same-day", same_day)] {
+        let pushed = PushCursor {
+            results_through: 1,
+            rollups_from: None,
+            ..read
+        };
+        fixture
             .store
-            .push_cursor(upstream.into(), LOCAL.into())
+            .advance_push_cursor(upstream.into(), pushed)
             .await
             .unwrap();
-        assert_eq!(cursor.rollups_from, Some(day(from)), "{upstream}");
+        let stored = cursor_of(&fixture, upstream).await;
+        assert_eq!(stored.rollups_from, Some(first), "{upstream}");
+        assert_eq!(stored.results_through, 1, "{upstream}");
     }
+    // One that read it after moves on.
+    fixture
+        .store
+        .advance_push_cursor(
+            "fresh".into(),
+            PushCursor {
+                rollups_from: None,
+                ..fresh
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(cursor_of(&fixture, "fresh").await.rollups_from, None);
+}
+
+async fn cursor_of(fixture: &Fixture, upstream: &str) -> PushCursor {
+    fixture
+        .store
+        .push_cursor(upstream.into(), LOCAL.into())
+        .await
+        .unwrap()
 }

@@ -1605,11 +1605,12 @@ fn a_fire_whose_answer_timed_out_before_a_silence_still_gets_its_resolve() {
         let id = silence(&fixture, None, T0, T0 + 24 * HOUR_MS).await;
         // Timed out at 10s, the retry is held back. When exactly the worker
         // recorded it depends on how far the paused clock ran meanwhile,
-        // but it is after the timeout and before the 15s backoff.
+        // but it is after the timeout and no later than the 15s backoff: a
+        // pass at the retry's due time looks for a silence before it sends.
         let seen = held(&fixture, id, 1).await;
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].0, HeldKind::Fire);
-        assert!((10_000..15_000).contains(&seen[0].1), "{seen:?}");
+        assert!((10_000..=15_000).contains(&seen[0].1), "{seen:?}");
 
         running.change(up(outage, T0 + HOUR_MS)).await;
         let resolve = next_from(&mut receiver, "slack").await;

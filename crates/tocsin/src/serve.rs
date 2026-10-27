@@ -40,7 +40,7 @@ use crate::lock;
 use crate::metrics::{Counted, Metered, Metrics};
 use crate::otlp;
 use crate::output::{Failure, Report};
-use crate::push::{Pushers, Upstreams};
+use crate::push::{PushSettings, Pushers, Upstreams};
 use crate::reload::{ConfigStatus, LiveRouter, Reloader, Reloading};
 use crate::subscribers::Subscriptions;
 use crate::subscribers::worker::Postman;
@@ -307,6 +307,7 @@ async fn serve(
             node: node.map(str::to_owned),
             data: data.to_owned(),
             variables: Arc::new(|name| std::env::var(name).ok()),
+            push: PushSettings::of(&state.config),
             state,
             app,
             status,
@@ -981,15 +982,14 @@ async fn maintain(store: Arc<Store>, retention: Retention, upstreams: Upstreams)
 }
 
 /// Rolls up the days since the last pass, then deletes results older than
-/// the retention window. The days either rewrote go to `upstreams` again,
-/// and the results retention deleted before an upstream had them are
-/// counted. Failures are logged and retried on the next pass; a pass never
+/// the retention window. The store sends the days either rewrote to every
+/// upstream again; the results retention deleted before an upstream had
+/// them are counted here. Failures are logged and retried on the next pass; a pass never
 /// stops the monitor.
 async fn maintenance_pass(store: &Store, retention: Retention, upstreams: &Upstreams) {
     match store.rollup_recent().await {
         Ok(report) => {
             tracing::debug!(rows = report.rows, "daily rollups updated");
-            upstreams.rewrote(store, report.since).await;
         }
         Err(error) => tracing::error!(%error, "daily rollup failed"),
     }
@@ -1007,7 +1007,6 @@ async fn maintenance_pass(store: &Store, retention: Retention, upstreams: &Upstr
                 );
             }
             upstreams.expired(&report.unpushed);
-            upstreams.rewrote(store, report.finalized_from).await;
         }
         Err(error) => tracing::error!(%error, "retention failed"),
     }

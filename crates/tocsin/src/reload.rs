@@ -143,6 +143,9 @@ pub struct Reloading {
     pub status: watch::Sender<ConfigStatus>,
     /// Each attempt's outcome, as metrics.
     pub metrics: ConfigMetrics,
+    /// Where and how often startup had this node push, which no reload
+    /// changes.
+    pub(crate) push: push::PushSettings,
 }
 
 /// The task that reloads the configuration. It owns the running checks
@@ -274,7 +277,7 @@ impl Running {
             );
         }
         config.telemetry.clone_from(&running.telemetry);
-        if push::settings_changed(running, &config) {
+        if push::PushSettings::of(&config) != self.reloading.push {
             tracing::warn!(
                 "this node's `push_to` or `[federation] push_interval` changed; they are read \
                  only at startup, so the running pushers keep going until tocsin restarts"
@@ -654,6 +657,7 @@ scopes = ["release"]
                     node: None,
                     data: data_dir.path().to_owned(),
                     variables,
+                    push: crate::push::PushSettings::of(&state.config),
                     state,
                     app,
                     status: sender,
@@ -993,6 +997,38 @@ values = ["false", "true"]
         let monitor = served.reloader.into_monitor().await;
         assert_eq!(running(&monitor), ["kept"]);
         monitor.stop().await;
+    }
+
+    #[tokio::test]
+    async fn every_reload_says_the_push_settings_wait_for_a_restart() {
+        const WARNING: &str = "the running pushers keep going until tocsin restarts";
+        let log = Captured::default();
+        let _log = log.capture();
+        let (target, _accepting) = target().await;
+        let mut served = Served::start(&target).await;
+        let warnings = || log.text().matches(WARNING).count();
+
+        let slower = format!(
+            "[server]\nnode_id = \"{node}\"\n\n[[node]]\nid = \"{node}\"\npublic_keys = [\"{key}\"]\n\n\
+             [federation]\ndefault_nodes = [\"{node}\"]\npush_interval = \"1m\"\n",
+            node = served.node,
+            key = tocsin_core::federation::NodeKey::from_seed([2; 32]).public_key(),
+        );
+        let status = served.change("push.toml", Some(&slower)).await;
+        assert!(status.ok, "{status:?}");
+        assert_eq!(warnings(), 1);
+
+        // Measured against what startup read, not the last reload: an
+        // unrelated edit still says so.
+        let extra = EXTRA.replace("TARGET", &target);
+        let status = served.change("extra.toml", Some(&extra)).await;
+        assert!(status.ok, "{status:?}");
+        assert_eq!(warnings(), 2);
+
+        // Back to what startup read: nothing to say.
+        let status = served.change("push.toml", None).await;
+        assert!(status.ok, "{status:?}");
+        assert_eq!(warnings(), 2);
     }
 
     #[tokio::test]

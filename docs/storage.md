@@ -578,6 +578,11 @@ by 0019. One row per upstream.
 | `outages_through` | integer | The last outage seq the upstream committed; 0 for none. |
 | `rollups_from` | text | `YYYY-MM-DD`: the first day whose rollups it may not have yet, or null. |
 | `acked_at` | integer | When it last acknowledged, or null. |
+| `rollups_rewound` | integer | How many times a rollup rewrite moved `rollups_from` back; 0 for none. A push advances `rollups_from` past what it sent only if this is still the count it read, so a day rewritten while the push was in flight goes again. Added by 0020. |
+
+Writing rollups moves every upstream's `rollups_from` back to the first day
+written, in the same transaction, so the hourly recompute, finalize and
+`tocsin db rollup` all send rewritten days again.
 
 ## Rollups
 

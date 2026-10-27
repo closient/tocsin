@@ -214,8 +214,6 @@ pub struct RetentionReport {
     pub purged_before_ms: Option<i64>,
     /// Rollup rows finalized before deleting.
     pub rolled_up: usize,
-    /// The first day finalizing rewrote rollups for, if it ran.
-    pub finalized_from: Option<Day>,
     /// Results deleted.
     pub deleted: usize,
     /// DELETE statements run.
@@ -1347,8 +1345,12 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// The write fails.
+    /// A read or write fails.
     pub async fn push_cursor(&self, upstream: String, node_id: String) -> Result<PushCursor> {
+        let id = upstream.clone();
+        if let Some(cursor) = self.read(move |conn| push::cursor(conn, &id)).await? {
+            return Ok(cursor);
+        }
         self.writer
             .run(move |conn| push::ensure_cursor(conn, &upstream, &node_id))
             .await
@@ -1370,7 +1372,8 @@ impl Store {
             .await
     }
 
-    /// Moves `upstream`'s cursor to `cursor`.
+    /// Moves `upstream`'s cursor to `cursor`, keeping a rollup day
+    /// rewritten since the cursor was read (`cursor.rollups_rewound`).
     ///
     /// # Errors
     ///
@@ -1378,19 +1381,6 @@ impl Store {
     pub async fn advance_push_cursor(&self, upstream: String, cursor: PushCursor) -> Result<()> {
         self.writer
             .run(move |conn| push::advance(conn, &upstream, &cursor))
-            .await
-    }
-
-    /// Sends every upstream this node's rollups again from `from`, a day
-    /// whose rollups were rewritten: a cursor already past it moves back
-    /// to it.
-    ///
-    /// # Errors
-    ///
-    /// The write fails.
-    pub async fn repush_rollups_from(&self, from: Day) -> Result<()> {
-        self.writer
-            .run(move |conn| push::repush_rollups_from(conn, from))
             .await
     }
 
@@ -1795,14 +1785,12 @@ impl Store {
             .plus(-i64::from(policy.days))
             .start_ms();
         let mut rolled_up = 0;
-        let mut finalized_from = None;
         // A cutoff before 1970 finalizes nothing: the watermark starts at 0.
         while let Some(plan) = self
             .read(move |conn| rollup::plan_finalize(conn, cutoff, now_ms))
             .await?
         {
             self.checkpointer.make_room().await;
-            finalized_from.get_or_insert(Day::containing(plan.from_ms));
             rolled_up += self
                 .writer
                 .run(move |conn| rollup::finalize(conn, plan))
@@ -1814,7 +1802,6 @@ impl Store {
             return Ok(RetentionReport {
                 purged_before_ms: None,
                 rolled_up,
-                finalized_from,
                 deleted: 0,
                 chunks: 0,
                 unpushed: BTreeMap::new(),
@@ -1845,7 +1832,6 @@ impl Store {
         Ok(RetentionReport {
             purged_before_ms: Some(target),
             rolled_up,
-            finalized_from,
             deleted,
             chunks,
             unpushed,

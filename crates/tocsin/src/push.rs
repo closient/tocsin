@@ -22,13 +22,13 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::StatusCode;
 use reqwest::header::CONTENT_TYPE;
 use tocsin_alert::{Backoff, Jitter};
-use tocsin_core::config::Config;
+use tocsin_core::config::{Config, Federation};
 use tocsin_core::federation::NodeKey;
 use tocsin_core::federation::wire::{self, Batch, BatchReceipt};
 use tocsin_core::incident::Timestamp;
@@ -63,14 +63,9 @@ pub(crate) struct Pacing {
 }
 
 impl Pacing {
-    fn from_config(config: &Config) -> Pacing {
+    fn from_config(federation: &Federation) -> Pacing {
         Pacing {
-            interval: config
-                .federation
-                .as_ref()
-                .map_or(Duration::from_secs(15), |federation| {
-                    federation.push_interval.get()
-                }),
+            interval: federation.push_interval.get(),
             backoff: Backoff {
                 base: Duration::from_secs(1),
                 cap: Duration::from_secs(60),
@@ -101,16 +96,24 @@ pub(crate) fn targets(config: &Config) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Whether `next` pushes somewhere else, or at another pace, than `running`.
-/// Both are read only at startup.
-pub(crate) fn settings_changed(running: &Config, next: &Config) -> bool {
-    let interval = |config: &Config| {
-        config
-            .federation
-            .as_ref()
-            .map(|federation| federation.push_interval)
-    };
-    targets(running) != targets(next) || interval(running) != interval(next)
+/// Where and how often a configuration has this node push: read only at
+/// startup, so a reload that changes them changes nothing until a restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PushSettings {
+    targets: Vec<(String, String)>,
+    interval: Option<Duration>,
+}
+
+impl PushSettings {
+    pub(crate) fn of(config: &Config) -> PushSettings {
+        PushSettings {
+            targets: targets(config),
+            interval: config
+                .federation
+                .as_ref()
+                .map(|federation| federation.push_interval.get()),
+        }
+    }
 }
 
 /// The nodes this node pushes to, as startup read them.
@@ -133,18 +136,6 @@ struct Inner {
 struct Upstream {
     id: String,
     endpoint: String,
-    /// The first day maintenance rewrote since the pusher last looked, so
-    /// a push in flight does not move the cursor past it.
-    rewritten: Mutex<Option<Day>>,
-}
-
-impl Upstream {
-    fn take_rewritten(&self) -> Option<Day> {
-        self.rewritten
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-    }
 }
 
 impl Upstreams {
@@ -172,7 +163,13 @@ impl Upstreams {
                     format!("cannot push to other nodes: {error}"),
                 )
             })?;
-        let pacing = Pacing::from_config(config);
+        let federation = config.federation.as_ref().ok_or_else(|| {
+            Failure::new(
+                Exit::Runtime,
+                "cannot push to other nodes: `[federation]` is missing",
+            )
+        })?;
+        let pacing = Pacing::from_config(federation);
         let client = net::http_client(pacing.timeout).build().map_err(|error| {
             Failure::new(
                 Exit::Runtime,
@@ -189,7 +186,6 @@ impl Upstreams {
                 Arc::new(Upstream {
                     endpoint: format!("{}{}", url.trim_end_matches('/'), wire::BATCH_PATH),
                     id,
-                    rewritten: Mutex::new(None),
                 })
             })
             .collect();
@@ -238,26 +234,6 @@ impl Upstreams {
             tasks.spawn(pusher.run());
         }
         Pushers { tasks }
-    }
-
-    /// Maintenance rewrote this node's rollups from `from` on: every
-    /// upstream gets them again from there.
-    pub(crate) async fn rewrote(&self, store: &Store, from: Option<Day>) {
-        let Some(from) = from else { return };
-        if self.inner.upstreams.is_empty() {
-            return;
-        }
-        // The cursors first, so a pusher that sees the day has it stored.
-        if let Err(error) = store.repush_rollups_from(from).await {
-            tracing::error!(%error, %from, "cannot mark rewritten rollups to push again");
-        }
-        for upstream in &self.inner.upstreams {
-            let mut rewritten = upstream
-                .rewritten
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            *rewritten = earliest(*rewritten, Some(from));
-        }
     }
 
     /// Retention deleted `unpushed` of this node's results, by upstream,
@@ -387,8 +363,6 @@ impl Pusher {
     /// what the upstream committed.
     async fn push(&self, batch_rows: u32) -> Result<Next, PushError> {
         let upstream = &self.upstream;
-        // The stored cursor already holds whatever day was rewritten.
-        upstream.take_rewritten();
         let store_id = self.store.store_id().await?;
         let cursor = self
             .store
@@ -455,8 +429,10 @@ impl Pusher {
         let next = PushCursor {
             results_through: receipt.cursor.results.unwrap_or(0),
             outages_through: receipt.cursor.outages.unwrap_or(0),
-            rollups_from: earliest(rollups_from, upstream.take_rewritten()),
+            rollups_from,
             acked_at_ms: Some(tocsin_store::now_ms()),
+            // A rewrite since the read keeps its day.
+            rollups_rewound: cursor.rollups_rewound,
         };
         let moved =
             next.positions() != cursor.positions() || next.rollups_from != cursor.rollups_from;

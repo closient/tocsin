@@ -28,6 +28,9 @@ pub struct PushCursor {
     /// The first day whose rollups it may not have, or `None` when it has
     /// every day's latest.
     pub rollups_from: Option<Day>,
+    /// How many times rewritten rollups have moved `rollups_from` back. A
+    /// cursor advanced with a count since passed keeps the rewound day.
+    pub rollups_rewound: i64,
     /// When it last acknowledged a push (unix milliseconds).
     pub acked_at_ms: Option<i64>,
 }
@@ -98,7 +101,7 @@ pub(crate) fn ensure_cursor(
 pub(crate) fn cursor(conn: &Connection, upstream: &str) -> Result<Option<PushCursor>> {
     let row = conn
         .prepare_cached(
-            "SELECT results_through, outages_through, rollups_from, acked_at
+            "SELECT results_through, outages_through, rollups_from, acked_at, rollups_rewound
              FROM push_cursor WHERE upstream_id = ?1",
         )?
         .query_row(params![upstream], |row| {
@@ -108,17 +111,27 @@ pub(crate) fn cursor(conn: &Connection, upstream: &str) -> Result<Option<PushCur
                 outages_through: row.get(1)?,
                 rollups_from: rollups_from.map(|day| parse_column(2, &day)).transpose()?,
                 acked_at_ms: row.get(3)?,
+                rollups_rewound: row.get(4)?,
             })
         })
         .optional()?;
     Ok(row)
 }
 
-/// Moves `upstream`'s cursor to `cursor`.
+/// Moves `upstream`'s cursor to `cursor`, read as `cursor.rollups_rewound`
+/// counted. If rollups were rewritten since, `rollups_from` moves only
+/// back, to the earlier of the rewound day and `cursor`'s, since the push
+/// may have sent the day before it was rewritten. Days are `YYYY-MM-DD`,
+/// so text order is day order.
 pub(crate) fn advance(conn: &Connection, upstream: &str, cursor: &PushCursor) -> Result<()> {
     conn.prepare_cached(
         "UPDATE push_cursor
-         SET results_through = ?2, outages_through = ?3, rollups_from = ?4, acked_at = ?5
+         SET results_through = ?2, outages_through = ?3, acked_at = ?5,
+             rollups_from = CASE
+                 WHEN rollups_rewound = ?6 OR rollups_from IS NULL THEN ?4
+                 WHEN ?4 IS NOT NULL AND ?4 < rollups_from THEN ?4
+                 ELSE rollups_from
+             END
          WHERE upstream_id = ?1",
     )?
     .execute(params![
@@ -127,16 +140,22 @@ pub(crate) fn advance(conn: &Connection, upstream: &str, cursor: &PushCursor) ->
         cursor.outages_through,
         cursor.rollups_from.map(|day| day.to_string()),
         cursor.acked_at_ms,
+        cursor.rollups_rewound,
     ])?;
     Ok(())
 }
 
 /// Moves every cursor's `rollups_from` back to `from` where it is later or
-/// unset. Days are `YYYY-MM-DD`, so text order is day order.
+/// unset, and counts the rewind on each, so a push in flight does not move
+/// past `from` even when its cursor was already there.
 pub(crate) fn repush_rollups_from(conn: &Connection, from: Day) -> Result<()> {
     conn.prepare_cached(
-        "UPDATE push_cursor SET rollups_from = ?1
-         WHERE rollups_from IS NULL OR rollups_from > ?1",
+        "UPDATE push_cursor
+         SET rollups_from = CASE
+                 WHEN rollups_from IS NULL OR rollups_from > ?1 THEN ?1
+                 ELSE rollups_from
+             END,
+             rollups_rewound = rollups_rewound + 1",
     )?
     .execute(params![from.to_string()])?;
     Ok(())
@@ -145,9 +164,10 @@ pub(crate) fn repush_rollups_from(conn: &Connection, from: Day) -> Result<()> {
 /// `node_id`'s rows past `cursor`, at most `limit` of them (rollups may
 /// pass it, below). Outage changes come first, since a remote outage is
 /// what the receiver alerts on; then results; then rollups, in whole days,
-/// from `cursor.rollups_from`. A day of rollups that alone fills more than
-/// `limit` is still sent, whole, when nothing else is, so the cursor
-/// always moves.
+/// from `cursor.rollups_from`. Once results and outages are caught up
+/// (they leave room), the first day of rollups is sent whole even if it
+/// does not fit, so a day larger than the room left beside a trickle of
+/// new results is not put off for ever.
 pub(crate) fn unpushed(
     conn: &Connection,
     node_id: &str,
@@ -160,8 +180,9 @@ pub(crate) fn unpushed(
     };
     batch.results = results(conn, node_id, cursor.results_through, limit - batch.rows())?;
     if let Some(from) = cursor.rollups_from {
+        // Results and outages caught up when they left room.
         let room = limit - batch.rows();
-        let (rollups, next) = rollups(conn, node_id, from, room, batch.is_empty())?;
+        let (rollups, next) = rollups(conn, node_id, from, room, room > 0)?;
         batch.rollups = rollups;
         batch.rollups_next = next;
     }

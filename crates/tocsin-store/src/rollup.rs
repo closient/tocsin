@@ -216,10 +216,20 @@ fn weigh_heartbeats(heartbeats: &[HeartbeatResult], now_ms: i64) -> Vec<DailyRol
 
 /// Inserts or replaces each rollup, skipping days before the retention
 /// watermark: those are final and their raw results may already be gone.
-/// Returns how many rows were written.
+/// Every upstream gets this node's rollups again from the first day
+/// written, in the same transaction, so no rewrite goes unpushed whoever
+/// made it and whenever the process stops. Returns how many rows were
+/// written.
 pub(crate) fn upsert(conn: &Connection, rollups: &[DailyRollup]) -> Result<usize> {
     let floor = purged_before(conn)?.unwrap_or(0);
-    upsert_all(conn, rollups.iter().filter(|r| r.date.start_ms() >= floor))
+    let kept: Vec<&DailyRollup> = rollups
+        .iter()
+        .filter(|r| r.date.start_ms() >= floor)
+        .collect();
+    if let Some(first) = kept.iter().map(|r| r.date).min() {
+        push::repush_rollups_from(conn, first)?;
+    }
+    upsert_all(conn, kept)
 }
 
 /// Inserts or replaces each rollup, days before the retention watermark

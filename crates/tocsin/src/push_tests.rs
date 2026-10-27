@@ -26,7 +26,7 @@ use tocsin_engine::{HeartbeatHandle, Snapshot};
 use tocsin_store::{NewCheckResult, NewOutage, PushCursor, Retention, Store, SubjectKind};
 use tower::ServiceExt;
 
-use super::{Pacing, Pushers, Upstreams, settings_changed};
+use super::{Pacing, PushSettings, Pushers, Upstreams};
 use crate::http::events::EventBus;
 use crate::http::{self, AppState};
 use crate::metrics::Metrics;
@@ -382,8 +382,8 @@ async fn a_backlog_reaches_the_hub_in_batches_in_order_and_the_cursor_follows() 
         .await
         .unwrap();
     let upstreams = spoke.upstreams(10);
-    let rollup = spoke.store.rollup_recent().await.unwrap();
-    upstreams.rewrote(&spoke.store, rollup.since).await;
+    // A cursor made after the rollups starts at their first day.
+    spoke.store.rollup_recent().await.unwrap();
     assert!(spoke.cursor().await.rollups_from.is_some());
 
     let pushers = upstreams.start(&spoke.store);
@@ -431,7 +431,7 @@ async fn rollups_rewritten_after_the_hub_had_them_go_again() {
 
     // Maintenance rewrote a day the hub already has: the cursor goes back
     // to it, and the next push carries its rollups again.
-    upstreams.rewrote(&spoke.store, rewritten).await;
+    spoke.store.rollup_since(rewritten.unwrap()).await.unwrap();
     assert_eq!(spoke.cursor().await.rollups_from, rewritten);
     let pushers = upstreams.start(&spoke.store);
     eventually("the rewritten day is pushed again", || async {
@@ -632,18 +632,18 @@ fn a_node_that_pushes_nowhere_starts_no_pushers() {
 fn a_reload_tells_whether_the_push_settings_moved() {
     let running = load("spoke", "http://hub.invalid", &spoke_key());
     let same = load("spoke", "http://hub.invalid", &spoke_key());
-    assert!(!settings_changed(&running, &same));
+    assert_eq!(PushSettings::of(&running), PushSettings::of(&same));
 
     let moved = load("spoke", "http://elsewhere.invalid", &spoke_key());
-    assert!(settings_changed(&running, &moved));
+    assert_ne!(PushSettings::of(&running), PushSettings::of(&moved));
 
     let text = config_text("spoke", "http://hub.invalid")
         .replace("[federation]\n", "[federation]\npush_interval = \"1m\"\n");
     assert!(text.contains("push_interval"));
     let slower = load_text("spoke", text, Some(&spoke_key()));
-    assert!(settings_changed(&running, &slower));
+    assert_ne!(PushSettings::of(&running), PushSettings::of(&slower));
 
     let text = config_text("spoke", "http://hub.invalid").replace("push_to = [\"hub\"]\n", "");
     let nowhere = load_text("spoke", text, Some(&spoke_key()));
-    assert!(settings_changed(&running, &nowhere));
+    assert_ne!(PushSettings::of(&running), PushSettings::of(&nowhere));
 }

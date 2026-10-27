@@ -59,6 +59,25 @@ groups:
         annotations:
           summary: "Notifier {{ $labels.notifier }} cannot post: Slack connection {{ $labels.connection }} is missing or revoked"
 
+      # Every push to the node has failed for a quarter of an hour, so its
+      # copy of this node's history is falling behind; tocsin's log says why.
+      - alert: TocsinPushFailing
+        expr: rate(tocsin_push_failures_total[5m]) > 0
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "tocsin cannot push its history to node {{ $labels.upstream }}"
+
+      # Retention deleted check results the node had not acknowledged: the
+      # node will never have them.
+      - alert: TocsinPushRowsExpired
+        expr: increase(tocsin_push_rows_expired_total[1d]) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Check results expired before node {{ $labels.upstream }} received them"
+
       # The last good configuration is still running; the change is not.
       - alert: TocsinConfigReloadFailed
         expr: tocsin_config_reload_success == 0

@@ -506,8 +506,9 @@ queried):
 - `GET /api/v1/federation/nodes` (`status:read`): each node's state,
   store, last push by the receiver's clock, clock offset, backlog, config
   match and liveness. TOC-79 serves the state, stores, last push, clock
-  offset and backlog; config match and liveness come with the liveness
-  work.
+  offset and backlog. Liveness, read from the `node:<id>` and
+  `upstream:<id>` heartbeats TOC-81 added, comes with the node board in
+  TOC-80; config match is not served yet.
 
 **Metrics** (labels from configuration only, per
 [metrics.md](../metrics.md)): `tocsin_node_up`,

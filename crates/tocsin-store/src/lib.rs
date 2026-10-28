@@ -523,6 +523,21 @@ impl Store {
             .await
     }
 
+    /// Ends every open alert for a check or heartbeat configured on
+    /// `node_id` (its subject id holds no `:`) at `now_ms` as
+    /// [`EndedBy::Config`], queueing its resolve (and its cancel, if it
+    /// rings): a node outside `[federation] alert_order` leaves those
+    /// alerts to the nodes in it. Resolves with how many alerts it ended.
+    ///
+    /// # Errors
+    ///
+    /// The write fails; nothing is written then.
+    pub async fn end_own_alerts(&self, node_id: String, now_ms: i64) -> Result<usize> {
+        self.writer
+            .run(move |conn| alert::end_own_alerts(conn, &node_id, now_ms))
+            .await
+    }
+
     /// Every notifier among `notifiers` that still has an open alert or a
     /// pending delivery: the worker keeps a removed notifier until none is
     /// left, so it can send the resolves the removal queued.

@@ -235,6 +235,17 @@ it. Heartbeats tocsin keeps itself (ids with a colon: `node:<id>`,
 `upstream:<id>`) never alert from a push: each node watches those on its
 own.
 
+A node left out of a non-empty `alert_order` that pushes to a node in it
+(`push_to`) pages for none of its own checks and configured heartbeats:
+it still stores each outage and pushes it, and the nodes in the list page
+for it. A node outside the list that pushes to none of them pages for its
+own as before, since nobody else would. It keeps paging for the
+heartbeats tocsin keeps and for quorum checks, which no other node pages
+for. An alert it opened for one of its own outages before it left the
+list ends at the next start or reload, with *ended by* `config`, and its
+resolve goes out; the nodes in the list take the outage over from its
+next push.
+
 ## Silences
 
 A silence holds back the messages for the alerts it matches until it

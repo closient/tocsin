@@ -533,6 +533,25 @@ pub(crate) fn end_alerts_without_notifier(
     Ok(orphans.len())
 }
 
+/// Ends every open alert for a check or heartbeat configured on `node_id`
+/// at `now_ms`, as [`EndedBy::Config`], queueing its resolve (and its
+/// cancel, if it rings): those whose subject id holds no `:`, so not the
+/// ones tocsin keeps. Returns the alerts ended.
+pub(crate) fn end_own_alerts(conn: &mut Connection, node_id: &str, now_ms: i64) -> Result<usize> {
+    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let own: Vec<OpenAlert> = transaction
+        .prepare_cached(
+            "SELECT id, notifier_id, health, ringing FROM alert
+             WHERE ended_at IS NULL AND node_id = ?1 AND instr(subject_id, ':') = 0
+             ORDER BY id",
+        )?
+        .query_map([node_id], open_alert)?
+        .collect::<rusqlite::Result<_>>()?;
+    end_alerts(&transaction, &own, now_ms, now_ms, EndedBy::Config)?;
+    transaction.commit()?;
+    Ok(own.len())
+}
+
 /// The outage an alerting change opened, and the identity it fires for.
 pub(crate) struct FiringOutage<'a> {
     pub(crate) id: i64,

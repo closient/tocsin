@@ -442,6 +442,7 @@ impl Monitor {
         // Their resolves go out once the worker starts.
         retire_nodes(store, config).await?;
         let router = Arc::new(Router::new(config));
+        leave_to_alert_order(store, &router).await?;
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let alerter = Alerter::start(
             Arc::clone(store),
@@ -557,6 +558,9 @@ impl Monitor {
             .await
             .map_err(ReloadError::Unfinished)?
             + retire_nodes(&self.store, config)
+                .await
+                .map_err(ReloadError::Unfinished)?
+            + leave_to_alert_order(&self.store, &self.router)
                 .await
                 .map_err(ReloadError::Unfinished)?;
         if ended > 0 {
@@ -699,6 +703,34 @@ async fn retire_nodes(store: &Store, config: &Config) -> Result<usize, Failure> 
         );
     }
     Ok(queued)
+}
+
+/// Ends the open alerts for this node's own checks and heartbeats when
+/// `router` says it is outside `[federation] alert_order`, queueing their
+/// resolves: the nodes in the list page for those outages from its pushes,
+/// and an alert opened before it joined would otherwise re-fire with every
+/// change. Returns how many alerts it ended.
+async fn leave_to_alert_order(store: &Store, router: &Router) -> Result<usize, Failure> {
+    let Some(node_id) = router.quiet_node() else {
+        return Ok(0);
+    };
+    let ended = store
+        .end_own_alerts(node_id.to_owned(), tocsin_store::now_ms())
+        .await
+        .map_err(|error| {
+            Failure::new(
+                Exit::Runtime,
+                format!("cannot end the alerts this node leaves to `alert_order`: {error}"),
+            )
+        })?;
+    if ended > 0 {
+        tracing::warn!(
+            alerts = ended,
+            "ended the open alerts for this node's own checks and heartbeats: it is not in \
+             `[federation] alert_order`, so the nodes in it page for them"
+        );
+    }
+    Ok(ended)
 }
 
 /// The root certificates HTTP and TLS checks verify against. Without a

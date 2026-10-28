@@ -505,7 +505,7 @@ How the [nodes](#node) share the work. Required once any `[[node]]` is listed, a
 | `default_nodes` | node ids | required | The nodes a check runs on unless it names its own. At least one; none retired, none listed twice. |
 | `push_interval` | duration | `"15s"` | How often each node pushes to the nodes in its `push_to`, with nothing new if need be, so the push doubles as a heartbeat. Not zero. |
 | `grace` | duration | `"60s"` | How long past `push_interval` a node may go unheard before the nodes it pushes to count it down. |
-| `alert_order` | node ids | `[]` | The nodes that alert for outages other nodes report, in order: a node alerts only while every node ahead of it is down. None retired, none listed twice. |
+| `alert_order` | node ids | `[]` | The nodes that alert for outages other nodes report, in order: a node alerts only while every node ahead of it is down. A node left out of a non-empty list that pushes to one of them leaves its own checks and configured heartbeats to them. None retired, none listed twice. |
 
 ## `[subscribers]`
 

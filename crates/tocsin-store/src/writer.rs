@@ -111,8 +111,8 @@ impl Writer {
         self.queued.load(Ordering::Relaxed)
     }
 
-    /// How many callers are waiting on the writer right now: for a queue
-    /// with room, those waiting to hear their write committed.
+    /// How many callers are waiting on the writer right now, for room in
+    /// a full queue or to hear their write committed.
     pub(crate) fn waiting(&self) -> u64 {
         self.waiting.load(Ordering::Relaxed)
     }
@@ -132,6 +132,7 @@ impl Writer {
     /// the database refuses is logged, and counted in
     /// [`crate::CheckpointStats::rejected`].
     pub(crate) async fn queue(&self, insert: Insert) -> Result<()> {
+        let _waiting = Waiting::start(&self.waiting);
         self.send(insert, None).await
     }
 

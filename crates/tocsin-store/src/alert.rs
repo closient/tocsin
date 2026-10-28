@@ -29,7 +29,7 @@ use crate::{NewCheckResult, NewOutage, OutageChange};
 /// What a result, an outage or an alert is about: the second half of an
 /// alert's identity, after the node. Rollups weigh the two kinds' results
 /// differently (see `docs/storage.md`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SubjectKind {
     /// A probe check: rolled up by counting results.
     Check,
@@ -256,6 +256,11 @@ pub struct StoredAlert {
     pub labels: BTreeMap<String, String>,
     /// The subject's configured annotations when it opened.
     pub annotations: BTreeMap<String, String>,
+    /// When this node heard of another node's outage it fires for, if that
+    /// was late (unix milliseconds): the node detected it longer before
+    /// than its pushes allow, so its messages say so. `None` for every
+    /// other alert, this node's own included.
+    pub arrived_late_at_ms: Option<i64>,
 }
 
 /// A pending delivery that may be sent now: the oldest pending message of
@@ -353,10 +358,11 @@ pub struct DeliveryPrune {
 }
 
 /// An alert's identity: the node, and the check or heartbeat it saw.
-struct Identity {
-    node_id: String,
-    subject_kind: SubjectKind,
-    subject_id: String,
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Identity {
+    pub(crate) node_id: String,
+    pub(crate) subject_kind: SubjectKind,
+    pub(crate) subject_id: String,
 }
 
 /// Applies `change` and queues the deliveries it causes, in one
@@ -417,6 +423,7 @@ fn apply_alerting_change(
                     id,
                     open,
                     identity: &identity,
+                    arrived_late_at_ms: None,
                 },
                 &open_alerts,
                 routing,
@@ -444,7 +451,11 @@ fn apply_alerting_change(
 
 /// The identity outage `id` alerts for; with `open_only`, only while the
 /// outage is open.
-fn outage_identity(conn: &Connection, id: i64, open_only: bool) -> Result<Option<Identity>> {
+pub(crate) fn outage_identity(
+    conn: &Connection,
+    id: i64,
+    open_only: bool,
+) -> Result<Option<Identity>> {
     Ok(conn
         .prepare_cached(
             "SELECT node_id, subject_kind, check_id FROM outage
@@ -519,17 +530,19 @@ pub(crate) fn end_alerts_without_notifier(
 }
 
 /// The outage an alerting change opened, and the identity it fires for.
-struct FiringOutage<'a> {
-    id: i64,
-    open: &'a NewOutage,
-    identity: &'a Identity,
+pub(crate) struct FiringOutage<'a> {
+    pub(crate) id: i64,
+    pub(crate) open: &'a NewOutage,
+    pub(crate) identity: &'a Identity,
+    /// When this node heard of it, if another node's outage arrived late.
+    pub(crate) arrived_late_at_ms: Option<i64>,
 }
 
 /// The engine decided this change alerts: every alert already firing
 /// re-fires with the new health, and every target without one starts
 /// firing. An alert that rang and no longer rings at the new health gets a
 /// cancel first. Returns the deliveries queued.
-fn fire_alerts(
+pub(crate) fn fire_alerts(
     transaction: &Connection,
     outage: &FiringOutage<'_>,
     open_alerts: &[OpenAlert],
@@ -558,7 +571,8 @@ fn fire_alerts(
                 // that holds it strands the alert; `attempted` stays, as the
                 // earlier fire's resolve is still owed.
                 "UPDATE alert SET outage_id = ?2, health = ?3, component_id = ?4,
-                     next_repeat_at = ?5 + repeat_ms, ringing = ?6, notified = 0
+                     next_repeat_at = ?5 + repeat_ms, ringing = ?6, notified = 0,
+                     arrived_late_at = ?7
                  WHERE id = ?1",
             )?
             .execute(params![
@@ -568,6 +582,7 @@ fn fire_alerts(
                 outage.open.component_id,
                 now_ms,
                 ringing,
+                outage.arrived_late_at_ms,
             ])?;
         drop_pending_repeats(transaction, alert.id)?;
         queue(
@@ -595,8 +610,10 @@ fn fire_alerts(
             .prepare_cached(
                 "INSERT INTO alert (node_id, subject_kind, subject_id, component_id,
                      notifier_id, route_id, outage_id, health, started_at, ringing,
-                     repeat_ms, next_repeat_at, notified, attempted, labels, annotations)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12 + ?11, 0, 0, ?13, ?14)",
+                     repeat_ms, next_repeat_at, notified, attempted, labels, annotations,
+                     arrived_late_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12 + ?11, 0, 0, ?13, ?14,
+                     ?15)",
             )?
             .execute(params![
                 outage.identity.node_id,
@@ -613,6 +630,7 @@ fn fire_alerts(
                 now_ms,
                 labels,
                 annotations,
+                outage.arrived_late_at_ms,
             ])?;
         let alert_id = transaction.last_insert_rowid();
         queue(
@@ -634,7 +652,7 @@ fn fire_alerts(
 /// follow one that alerted (the engine keeps an alerted episode alerted
 /// until it recovers), but if it ever did, its alerts end here too rather
 /// than fire forever. Returns the deliveries queued.
-fn end_alerts(
+pub(crate) fn end_alerts(
     transaction: &Connection,
     open_alerts: &[OpenAlert],
     ended_at_ms: i64,
@@ -673,14 +691,14 @@ fn end_alerts(
     Ok(queued)
 }
 
-struct OpenAlert {
+pub(crate) struct OpenAlert {
     id: i64,
-    notifier_id: String,
+    pub(crate) notifier_id: String,
     health: Health,
     ringing: bool,
 }
 
-fn open_alerts(conn: &Connection, identity: &Identity) -> Result<Vec<OpenAlert>> {
+pub(crate) fn open_alerts(conn: &Connection, identity: &Identity) -> Result<Vec<OpenAlert>> {
     let mut statement = conn.prepare_cached(
         "SELECT id, notifier_id, health, ringing FROM alert
          WHERE node_id = ?1 AND subject_kind = ?2 AND subject_id = ?3 AND ended_at IS NULL
@@ -755,7 +773,7 @@ fn drop_pending_repeats(conn: &Connection, alert_id: i64) -> Result<()> {
 
 const ALERT_COLUMNS: &str = "a.id, a.node_id, a.subject_kind, a.subject_id, a.component_id,
     a.notifier_id, a.route_id, a.health, a.started_at, a.ended_at, a.ringing, a.outage_id,
-    a.notified, a.attempted, a.labels, a.annotations, a.ended_by";
+    a.notified, a.attempted, a.labels, a.annotations, a.ended_by, a.arrived_late_at";
 
 fn stored_alert(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<StoredAlert> {
     Ok(StoredAlert {
@@ -779,6 +797,7 @@ fn stored_alert(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<Store
             .get::<_, Option<String>>(first + 16)?
             .map(|ended_by| parse_column(first + 16, &ended_by))
             .transpose()?,
+        arrived_late_at_ms: row.get(first + 17)?,
     })
 }
 

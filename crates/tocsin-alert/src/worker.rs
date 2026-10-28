@@ -716,6 +716,7 @@ impl Worker {
                 .then(|| stored.ended_by.unwrap_or(EndedBy::Recovery)),
             sent_at_ms: now,
             delivery_id: Some(delivery.id),
+            arrived_late_at_ms: stored.arrived_late_at_ms,
             test: false,
         }
     }

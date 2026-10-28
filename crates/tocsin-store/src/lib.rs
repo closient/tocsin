@@ -57,7 +57,9 @@ pub use crate::alert::{
 use crate::checkpoint::Checkpointer;
 pub use crate::day::Day;
 pub use crate::error::{Error, Result};
-pub use crate::federation::{BatchReport, RemoteBatch, RemoteOutageChange, RemoteResult};
+pub use crate::federation::{
+    BatchReport, RemoteAlerting, RemoteBatch, RemoteOutageChange, RemoteResult,
+};
 pub use crate::history::{Checks, HistoryPage, Newest, ResultFilter, ResultSlice};
 pub use crate::incident::{Drafts, OpenIncident, Opened};
 pub use crate::node::RemoteStore;
@@ -1321,6 +1323,12 @@ impl Store {
     /// push moved to `now_ms` in the same transaction.
     /// Applying the same batch twice changes nothing the second time.
     ///
+    /// Once every outage change is applied, each alert identity they
+    /// touched fires or resolves in the same transaction: an outage that
+    /// is open and alerted fires where `alerting` (keyed by the opening
+    /// change's `origin_id`) routes it, and an identity with nothing open
+    /// resolves. So an outage that arrived already ended never fires.
+    ///
     /// # Errors
     ///
     /// Nothing is written on any error. [`Error::Invalid`] if the batch is
@@ -1332,10 +1340,13 @@ impl Store {
         &self,
         batch: RemoteBatch,
         local_node_id: String,
+        alerting: BTreeMap<i64, RemoteAlerting>,
         now_ms: i64,
     ) -> Result<BatchReport> {
         self.writer
-            .run(move |conn| federation::apply_batch(conn, &batch, &local_node_id, now_ms))
+            .run(move |conn| {
+                federation::apply_batch(conn, &batch, &local_node_id, &alerting, now_ms)
+            })
             .await
     }
 

@@ -94,6 +94,7 @@ async fn receive_remote_rows(fixture: &Fixture) {
                 rollups: vec![],
             },
             LOCAL.into(),
+            BTreeMap::default(),
             2_000,
         )
         .await

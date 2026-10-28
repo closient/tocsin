@@ -316,7 +316,9 @@ end before its start) refuses the batch with the field named.
   arrives still open alerts, and the message says when the origin
   detected it and that it arrived late.
 - **No stale "up".** A check run only on a node the hub has not heard from
-  within its staleness window shows `unknown`, not its last state.
+  within its staleness window shows `unknown`, not its last state. The
+  window is the node's liveness heartbeat (`push_interval` plus `grace`),
+  the same signal that decides who pages under `alert_order`.
 
 ### A node that is decommissioned
 
@@ -461,7 +463,9 @@ cuts the hub off from two of three locations yields "quorum lost", not
 **Who pages.** With two hubs, both see every outage.
 `[federation] alert_order = ["central", "backup"]` lists the nodes that
 alert for remote outages. A node alerts for a remote outage only while
-every node ahead of it in the list is down by its own liveness view.
+every node ahead of it in the list is down by its own liveness view; a
+node it has never heard from, or not within `push_interval` plus `grace`,
+counts as down.
 Spokes not in the list never alert for their own checks (the hub does),
 so nobody is paged twice. A partition between the two hubs makes both
 alert: **a duplicate page beats a silent one.** A node keeps every alert

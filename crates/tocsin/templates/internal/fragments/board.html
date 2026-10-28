@@ -21,3 +21,33 @@
   </ul>
 </section>
 {%- endfor %}
+{%- if !nodes.is_empty() %}
+<section class="surface group" aria-labelledby="group-nodes">
+  <div class="group-head">
+    <h2 id="group-nodes">Nodes</h2>
+    <p class="muted">The federation as this node hears it. A node is up while its pushes arrive in time; its checks read unknown while it is not.</p>
+  </div>
+  <ul class="components checks">
+    {%- for node in nodes %}
+    <li>
+      <div class="component-line">
+        <h3>{{ node.id }}</h3>
+        {%- if let Some(note) = node.note %}
+        <span class="muted">{{ note }}</span>
+        {%- else %}
+        {% let label = node.status -%}
+        {%- include "status/label.html" %}
+        {%- endif %}
+      </div>
+      {%- if !node.checks.is_empty() %}
+      <div class="meta">
+        {%- for (check, label) in node.checks %}
+        <span>{{ check }}: {{ label.text }}</span>
+        {%- endfor %}
+      </div>
+      {%- endif %}
+    </li>
+    {%- endfor %}
+  </ul>
+</section>
+{%- endif %}

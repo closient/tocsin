@@ -7,11 +7,13 @@ use std::time::Duration;
 
 use rusqlite::Connection;
 use rusqlite::types::Value;
+use std::collections::BTreeMap;
 use tocsin_core::Health;
 use tocsin_core::status::OutageEnding;
+
 use tocsin_store::{
-    DailyRollup, Day, Error, NewCheckResult, NewOutage, RemoteBatch, RemoteOutageChange,
-    RemoteResult, Store, SubjectKind,
+    AlertRouting, AlertTarget, DailyRollup, Day, Error, NewCheckResult, NewOutage, RemoteAlerting,
+    RemoteBatch, RemoteOutageChange, RemoteResult, Store, SubjectKind,
 };
 
 const LOCAL: &str = "node-local";
@@ -155,7 +157,10 @@ async fn apply(
     fixture: &Fixture,
     batch: RemoteBatch,
 ) -> tocsin_store::Result<tocsin_store::BatchReport> {
-    fixture.store.apply_batch(batch, LOCAL.into(), noon()).await
+    fixture
+        .store
+        .apply_batch(batch, LOCAL.into(), BTreeMap::default(), noon())
+        .await
 }
 
 fn invalid(outcome: tocsin_store::Result<tocsin_store::BatchReport>) -> String {
@@ -194,7 +199,7 @@ async fn applying_a_batch_twice_changes_nothing() {
 
     let second = fixture
         .store
-        .apply_batch(pushed(), LOCAL.into(), noon() + 60_000)
+        .apply_batch(pushed(), LOCAL.into(), BTreeMap::default(), noon() + 60_000)
         .await
         .unwrap();
     assert_eq!(second.results_applied, 0);
@@ -625,4 +630,132 @@ async fn the_hourly_rollup_resumes_from_this_nodes_own_days() {
     .unwrap();
     let report = fixture.store.rollup_recent().await.unwrap();
     assert_eq!(report.since, Some(day("2026-01-02")));
+}
+
+/// How this node alerts for the outage pushed as `origin_id`: to Slack,
+/// opening alerts when `opens`.
+fn alerting(
+    origin_id: i64,
+    opens: bool,
+    arrived_late_at_ms: Option<i64>,
+) -> BTreeMap<i64, RemoteAlerting> {
+    let routing = AlertRouting {
+        targets: vec![AlertTarget {
+            notifier_id: "slack".into(),
+            route_id: "ops".into(),
+            repeat_ms: None,
+        }],
+        ..AlertRouting::default()
+    };
+    BTreeMap::from([(
+        origin_id,
+        RemoteAlerting {
+            routing,
+            opens,
+            arrived_late_at_ms,
+        },
+    )])
+}
+
+async fn apply_alerting(
+    fixture: &Fixture,
+    outages: Vec<RemoteOutageChange>,
+    alerting: BTreeMap<i64, RemoteAlerting>,
+    now_ms: i64,
+) -> tocsin_store::BatchReport {
+    fixture
+        .store
+        .apply_batch(
+            batch(vec![], outages, vec![]),
+            LOCAL.into(),
+            alerting,
+            now_ms,
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_pushed_outage_fires_and_its_end_resolves_the_same_alert() {
+    let fixture = open();
+    let started = noon() - 120_000;
+    let report = apply_alerting(
+        &fixture,
+        vec![open_change(1, 1, started)],
+        alerting(1, true, None),
+        noon(),
+    )
+    .await;
+    assert_eq!(report.alerts_queued, 1);
+    let fired = fixture.store.alerts().await.unwrap();
+    assert_eq!(fired.len(), 1);
+    assert_eq!(
+        (fired[0].node_id.as_str(), fired[0].subject_id.as_str()),
+        (REMOTE, "web")
+    );
+    assert_eq!(fired[0].notifier_id, "slack");
+    assert_eq!(fired[0].started_at_ms, started);
+    assert_eq!(fired[0].ended_at_ms, None);
+    assert_eq!(fired[0].arrived_late_at_ms, None);
+
+    let ended = noon() + 30_000;
+    let report = apply_alerting(
+        &fixture,
+        vec![end_change(2, 1, ended)],
+        BTreeMap::new(),
+        noon() + 60_000,
+    )
+    .await;
+    assert_eq!(report.alerts_queued, 1);
+    let resolved = fixture.store.alerts().await.unwrap();
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].id, fired[0].id);
+    assert_eq!(resolved[0].ended_at_ms, Some(ended));
+}
+
+#[tokio::test]
+async fn an_outage_received_already_ended_alerts_no_one() {
+    let fixture = open();
+    let report = apply_alerting(
+        &fixture,
+        vec![
+            open_change(1, 1, noon() - 120_000),
+            end_change(2, 1, noon() - 60_000),
+        ],
+        alerting(1, true, None),
+        noon(),
+    )
+    .await;
+    assert_eq!(report.outage_changes_applied, 2);
+    assert_eq!(report.alerts_queued, 0);
+    assert_eq!(fixture.store.alerts().await.unwrap(), []);
+}
+
+#[tokio::test]
+async fn behind_a_node_that_is_up_a_pushed_outage_opens_no_alert() {
+    let fixture = open();
+    let report = apply_alerting(
+        &fixture,
+        vec![open_change(1, 1, noon() - 120_000)],
+        alerting(1, false, None),
+        noon(),
+    )
+    .await;
+    assert_eq!(report.alerts_queued, 0);
+    assert_eq!(fixture.store.alerts().await.unwrap(), []);
+}
+
+#[tokio::test]
+async fn an_outage_that_arrived_late_says_when() {
+    let fixture = open();
+    apply_alerting(
+        &fixture,
+        vec![open_change(1, 1, noon() - 3_600_000)],
+        alerting(1, true, Some(noon())),
+        noon(),
+    )
+    .await;
+    let fired = fixture.store.alerts().await.unwrap();
+    assert_eq!(fired.len(), 1);
+    assert_eq!(fired[0].arrived_late_at_ms, Some(noon()));
 }

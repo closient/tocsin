@@ -74,6 +74,10 @@ pub struct Alert {
     pub sent_at_ms: i64,
     /// The outbox row this message came from; `None` for a test message.
     pub delivery_id: Option<i64>,
+    /// When this node first heard of the outage, if another node saw it
+    /// and its push reached this node late (unix milliseconds): the
+    /// message then says the outage is older than the page.
+    pub arrived_late_at_ms: Option<i64>,
     /// Whether `tocsin notify test` sent it.
     pub test: bool,
 }
@@ -174,6 +178,16 @@ impl Alert {
             }
             _ => {
                 let _ = write!(body, "{name} is {} since {since}.", self.health);
+                if let Some(arrived) = self.arrived_late_at_ms {
+                    let _ = write!(
+                        body,
+                        "\nReported late: {} saw it at {since}, and word reached this node \
+                         at {} ({} later).",
+                        self.node_id,
+                        timestamp(arrived),
+                        human_duration(arrived.saturating_sub(self.started_at_ms))
+                    );
+                }
             }
         }
         if let Some(component) = &self.component_id {
@@ -270,6 +284,7 @@ mod tests {
             ended_by: (event == AlertEvent::Resolve).then_some(EndedBy::Recovery),
             sent_at_ms: 1_800_000_090_000,
             delivery_id: Some(7),
+            arrived_late_at_ms: None,
             test: false,
         }
     }
@@ -297,6 +312,23 @@ mod tests {
         let body = alert(AlertEvent::Resolve).body();
         assert!(body.contains("after 1m 30s"), "{body}");
         assert!(body.contains("Alert: node-a/check/api"), "{body}");
+    }
+
+    #[test]
+    fn a_fire_that_arrived_late_says_when_the_node_saw_it() {
+        let late = Alert {
+            arrived_late_at_ms: Some(1_800_000_600_000),
+            ..alert(AlertEvent::Fire)
+        };
+        let body = late.body();
+        assert!(
+            body.contains(
+                "Reported late: node-a saw it at 2027-01-15 08:00:00 UTC, and word reached \
+                 this node at 2027-01-15 08:10:00 UTC (10m later)."
+            ),
+            "{body}"
+        );
+        assert!(!alert(AlertEvent::Fire).body().contains("Reported late"));
     }
 
     #[test]

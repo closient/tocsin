@@ -223,6 +223,18 @@ struct BoardPage {
     drafts: Vec<Draft>,
     summary: Summary,
     sections: Vec<Section>,
+    nodes: Vec<NodeRow>,
+}
+
+/// A `[[node]]` of the federation, as this node hears it.
+struct NodeRow {
+    id: String,
+    /// Its liveness; unknown for this node itself, which says so in `note`.
+    status: StatusLabel,
+    note: Option<&'static str>,
+    /// Each of its checks this node has rows for, read `unknown` while the
+    /// node is not heard from.
+    checks: Vec<(String, StatusLabel)>,
 }
 
 /// An incident nobody has published yet, newest first at the top of the
@@ -242,6 +254,7 @@ struct Draft {
 struct BoardFragment {
     summary: Summary,
     sections: Vec<Section>,
+    nodes: Vec<NodeRow>,
 }
 
 #[derive(Template)]
@@ -275,6 +288,7 @@ struct Detail {
 async fn board(State(state): State<AppState>, operator: Operator) -> Result<Response, HtmlError> {
     let config = &state.config;
     let (summary, sections) = sections(&state).await?;
+    let nodes = nodes(&state).await?;
     let drafts = state
         .store
         .draft_incidents()
@@ -301,6 +315,7 @@ async fn board(State(state): State<AppState>, operator: Operator) -> Result<Resp
         drafts,
         summary,
         sections,
+        nodes,
     };
     Ok(page::render(StatusCode::OK, &page))
 }
@@ -316,10 +331,42 @@ async fn board_fragment(
     _operator: Operator,
 ) -> Result<Response, HtmlError> {
     let (summary, sections) = sections(&state).await?;
+    let nodes = nodes(&state).await?;
     Ok(page::render(
         StatusCode::OK,
-        &BoardFragment { summary, sections },
+        &BoardFragment {
+            summary,
+            sections,
+            nodes,
+        },
     ))
+}
+
+/// Every `[[node]]`, with its liveness and its checks' state as this node
+/// has them (docs/design/federation.md, "No stale up").
+async fn nodes(state: &AppState) -> Result<Vec<NodeRow>, HtmlError> {
+    let nodes = crate::http::federation::nodes(state)
+        .await
+        .map_err(|error| HtmlError::internal(&error))?;
+    Ok(nodes
+        .into_iter()
+        .map(|node| NodeRow {
+            status: StatusLabel::check(node.liveness),
+            note: if node.local {
+                Some("this node")
+            } else if node.retired {
+                Some("retired")
+            } else {
+                None
+            },
+            checks: node
+                .checks
+                .into_iter()
+                .map(|check| (check.id, StatusLabel::check(check.health)))
+                .collect(),
+            id: node.id,
+        })
+        .collect())
 }
 
 async fn check(

@@ -211,6 +211,27 @@ verifying against the system's root certificates. On a system without any,
 `serve` keeps running: it logs an error at startup, and each HTTPS delivery
 fails and is recorded as failed.
 
+## Other nodes' outages
+
+In a [federation](design/federation.md), outages another node pushes
+alert on the nodes listed in `[federation] alert_order`
+([config.md](config.md)), and on no other. A node opens an alert for a
+pushed outage only while every node ahead of it in the list is down as it
+sees them: its `node:<id>` liveness heartbeat is not confirmed up, which
+includes a node it has never heard from. Behind a node that is up, it
+re-fires only alerts it already fired, so a hub that comes back does not
+page twice for what its backup already sent. The alert's identity names
+the node that reported the outage, whichever node fires it.
+
+Routes and silences apply as for a local outage. An outage that reaches
+this node already ended pages nobody. One that reaches it still open but
+late (more than the origin's check confirmation, `push_interval` and
+`grace` after the origin detected it, as after a partition) fires, and
+every message for it adds *Reported late* with when the origin detected
+it. Heartbeats tocsin keeps itself (ids with a colon: `node:<id>`,
+`upstream:<id>`) never alert from a push: each node watches those on its
+own.
+
 ## Silences
 
 A silence holds back the messages for the alerts it matches until it

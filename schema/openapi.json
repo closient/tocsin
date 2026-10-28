@@ -4164,6 +4164,13 @@
           "stores"
         ],
         "properties": {
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RemoteCheck"
+            },
+            "description": "Each configured check it has pushed results or outages for, in\nconfiguration order; empty for the receiver itself."
+          },
           "id": {
             "type": "string",
             "description": "The node's id."
@@ -4173,6 +4180,17 @@
               {
                 "$ref": "#/components/schemas/LastPush",
                 "description": "Its last push since the receiver started, if any."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "liveness": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Health",
+                "description": "Its liveness heartbeat (`node:<id>`) as the receiver has confirmed\nit: `up` while its pushes arrive within `push_interval + grace`;\n`null` until confirmed, and for the receiver itself."
               },
               {
                 "type": "null"
@@ -4513,6 +4531,52 @@
           "truncated": {
             "type": "boolean",
             "description": "Whether more matched than `limit`."
+          }
+        }
+      },
+      "RemoteCheck": {
+        "type": "object",
+        "description": "One of a node's checks, as the receiver last heard of it.",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "health": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Health",
+                "description": "Its confirmed health on that node: from its open outage, else `up`\nonce it has an `up` result. `null` until then, and whenever the\nnode's liveness is not `up`, since its last word may be stale."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "type": "string",
+            "description": "The check's id."
+          },
+          "last_result_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "When its latest result received here started."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "since": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp",
+                "description": "Since when it has had that health."
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },

@@ -329,6 +329,16 @@ mod tests {
     }
 
     #[test]
+    fn a_quorum_alert_is_placed_on_a_quorum_of_nodes() {
+        let mut quorum = alert(AlertEvent::Fire);
+        quorum.node_id = QUORUM_NODE.into();
+        assert_eq!(
+            quorum.title(),
+            "[DOWN] API  Bcc: x@example.com (check api on a quorum of nodes)"
+        );
+    }
+
+    #[test]
     fn a_resolve_says_how_long_it_lasted() {
         let body = alert(AlertEvent::Resolve).body();
         assert!(body.contains("after 1m 30s"), "{body}");

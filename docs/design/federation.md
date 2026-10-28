@@ -438,14 +438,16 @@ cuts the hub off from two of three locations yields "quorum lost", not
 
 - **A push is a heartbeat.** Each node pushes at least every
   `push_interval` (default 15 seconds), empty if it has nothing new. The
-  receiver records, at most once a minute, a ping of a synthetic
-  heartbeat `node:<id>`. A colon cannot appear in a config id, so the
-  name never collides. Its deadline, outage, alert and resolve are the
-  existing heartbeat machinery ([heartbeats.md](../heartbeats.md)), with
+  receiver records, once the push commits and at most twice a
+  `push_interval`, a ping of a synthetic heartbeat `node:<id>`. A colon
+  cannot appear in a config id, so the name never collides. Its deadline,
+  outage, alert and resolve are the existing heartbeat machinery
+  ([heartbeats.md](../heartbeats.md#node-liveness)), with `interval` and
   `grace` from `[federation]`.
-- **A pusher watches its upstream.** Pushes failing for longer than
-  `grace` open `upstream:<id>` on the pusher, alerting through its own
-  notifiers, and resolve when a push succeeds.
+- **A pusher watches its upstream.** Each push that succeeds pings
+  `upstream:<id>` on the pusher, the same way. With no push succeeding
+  for `push_interval + grace` it opens, alerting through the pusher's own
+  notifiers, and the next push that succeeds resolves it.
 - **Who reports the hub's death.** Any node that pushes to it and can
   reach a notifier on its own path. A DMZ spoke usually cannot: the point
   of the hub was that the spoke has no way out but to it.

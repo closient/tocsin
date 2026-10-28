@@ -18,6 +18,7 @@ mod export;
 mod heartbeat;
 mod http;
 mod incident;
+mod liveness;
 mod lock;
 mod mcp;
 mod metrics;

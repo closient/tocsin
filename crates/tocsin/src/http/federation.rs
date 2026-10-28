@@ -9,12 +9,13 @@
 //! So every refusal before the signature checks out is the same 401, and
 //! only a node that proves who it is learns that it is retired (403) or
 //! conflicted (409). The receipt is sent only once the batch committed,
-//! so a pusher that sees a 2xx can move its cursor.
+//! so a pusher that sees a 2xx can move its cursor, and only then does
+//! the push ping the sender's `node:<id>` heartbeat ([`crate::liveness`]).
 
 use axum::Json;
 use axum::extract::{Request, State};
 use axum::http::HeaderMap;
-use tocsin_core::config::Node;
+use tocsin_core::config::{Id, Node};
 use tocsin_core::federation::verify;
 use tocsin_core::federation::wire::{
     self, Batch, BatchReceipt, LastPush, NodeList, NodeStatus, NodeStore,
@@ -27,6 +28,7 @@ use utoipa_axum::routes;
 use super::auth::{Authorized, scope};
 use super::error::{self, ApiError, ErrorBody};
 use super::{AppState, now};
+use crate::liveness;
 use crate::metrics::NodePush;
 
 /// The OpenAPI tag for these routes.
@@ -120,6 +122,17 @@ pub async fn push_batch(
             config_digest,
         },
     );
+    if let Some(federation) = &state.config.federation {
+        state
+            .liveness
+            .beat(
+                &state.heartbeats,
+                &state.metrics.checks,
+                Id::synthetic(liveness::NODE, &node.id).as_str(),
+                federation.push_interval.get(),
+            )
+            .await;
+    }
     Ok(Json(receipt))
 }
 

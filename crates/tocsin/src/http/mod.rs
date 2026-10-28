@@ -76,6 +76,8 @@ pub struct AppState {
     pub admin: Option<Arc<AdminAuth>>,
     /// Takes heartbeat pings to the running engine.
     pub heartbeats: HeartbeatHandle,
+    /// When each node pushing here last pinged its `node:<id>` heartbeat.
+    pub liveness: crate::liveness::Pulse,
     /// Wakes the alert delivery worker, for a change it would otherwise
     /// only see on its next idle tick, such as a silence ended early.
     pub alert_wake: Arc<Notify>,

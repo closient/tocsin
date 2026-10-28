@@ -29,7 +29,9 @@ use tower::ServiceExt;
 use super::{Pacing, PushSettings, Pushers, Upstreams};
 use crate::http::events::EventBus;
 use crate::http::{self, AppState};
+use crate::liveness;
 use crate::metrics::Metrics;
+use crate::serve::Monitor;
 
 const KEY_VARIABLE: &str = "TOCSIN_TEST_NODE_KEY";
 
@@ -161,23 +163,42 @@ async fn gated(State((gate, hub)): State<(SharedGate, Router)>, request: Request
 struct Hub {
     _dir: tempfile::TempDir,
     path: PathBuf,
+    store: Arc<Store>,
     url: String,
     gate: SharedGate,
 }
 
 async fn hub() -> Hub {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(tocsin_store::DB_FILE);
+    let (dir, store) = open();
     let config = load("hub", "http://hub.invalid", &hub_key());
+    serve_hub(dir, store, config, HeartbeatHandle::default()).await
+}
+
+fn open() -> (tempfile::TempDir, Arc<Store>) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join(tocsin_store::DB_FILE)).unwrap();
+    (dir, Arc::new(store))
+}
+
+/// The federation routes for `config` on `store`, served on loopback
+/// behind the gate, pinging heartbeats through `heartbeats`.
+async fn serve_hub(
+    dir: tempfile::TempDir,
+    store: Arc<Store>,
+    config: Config,
+    heartbeats: HeartbeatHandle,
+) -> Hub {
+    let path = dir.path().join(tocsin_store::DB_FILE);
     let metrics = Metrics::new();
     metrics.configured(&config);
     let state = AppState {
-        store: Arc::new(Store::open(&path).unwrap()),
+        store: Arc::clone(&store),
         config: Arc::new(config),
         events: EventBus::new(),
         admin: None,
         live: Arc::new(Snapshot::default()),
-        heartbeats: HeartbeatHandle::default(),
+        heartbeats,
+        liveness: crate::liveness::Pulse::default(),
         alert_wake: Arc::default(),
         config_status: crate::reload::steady_status(),
         metrics: Arc::new(metrics),
@@ -194,6 +215,7 @@ async fn hub() -> Hub {
     Hub {
         _dir: dir,
         path,
+        store,
         url,
         gate,
     }
@@ -292,7 +314,8 @@ impl Spoke {
     }
 
     fn start(&self, batch_rows: u32) -> Pushers {
-        self.upstreams(batch_rows).start(&self.store)
+        self.upstreams(batch_rows)
+            .start(&self.store, &HeartbeatHandle::default())
     }
 
     /// `count` results, a second apart and ending a minute ago, with their
@@ -386,7 +409,7 @@ async fn a_backlog_reaches_the_hub_in_batches_in_order_and_the_cursor_follows() 
     spoke.store.rollup_recent().await.unwrap();
     assert!(spoke.cursor().await.rollups_from.is_some());
 
-    let pushers = upstreams.start(&spoke.store);
+    let pushers = upstreams.start(&spoke.store, &HeartbeatHandle::default());
     eventually("the hub has every row and every rollup", || async {
         hub.results() == ids && spoke.cursor().await.rollups_from.is_none()
     })
@@ -420,7 +443,7 @@ async fn rollups_rewritten_after_the_hub_had_them_go_again() {
     let rewritten = spoke.store.rollup_recent().await.unwrap().since;
     assert!(rewritten.is_some());
     let upstreams = spoke.upstreams(10);
-    let pushers = upstreams.start(&spoke.store);
+    let pushers = upstreams.start(&spoke.store, &HeartbeatHandle::default());
     eventually("the hub has everything", || async {
         let cursor = spoke.cursor().await;
         cursor.results_through == *ids.last().unwrap() && cursor.rollups_from.is_none()
@@ -433,7 +456,7 @@ async fn rollups_rewritten_after_the_hub_had_them_go_again() {
     // to it, and the next push carries its rollups again.
     spoke.store.rollup_since(rewritten.unwrap()).await.unwrap();
     assert_eq!(spoke.cursor().await.rollups_from, rewritten);
-    let pushers = upstreams.start(&spoke.store);
+    let pushers = upstreams.start(&spoke.store, &HeartbeatHandle::default());
     eventually("the rewritten day is pushed again", || async {
         spoke.cursor().await.rollups_from.is_none()
     })
@@ -646,4 +669,149 @@ fn a_reload_tells_whether_the_push_settings_moved() {
     let text = config_text("spoke", "http://hub.invalid").replace("push_to = [\"hub\"]\n", "");
     let nowhere = load_text("spoke", text, Some(&spoke_key()));
     assert_ne!(PushSettings::of(&running), PushSettings::of(&nowhere));
+}
+
+/// `text` with pushes 200ms apart, 300ms of grace and every outage routed
+/// to a pager, and without its check, which would probe the network.
+fn watched(text: &str) -> String {
+    let (text, _check) = text.split_once("[[check]]").unwrap();
+    let text = text.replace(
+        "[federation]\n",
+        "[federation]\npush_interval = \"200ms\"\ngrace = \"300ms\"\n",
+    );
+    format!(
+        "{text}[[notifier]]\nid = \"pager\"\ntype = \"ntfy\"\n\n\
+         [notifier.ntfy]\nurl = \"http://127.0.0.1:9/pager\"\n\n\
+         [[route]]\nid = \"all\"\nnotifiers = [\"pager\"]\n"
+    )
+}
+
+/// `config` with the liveness heartbeats `tocsin serve` adds to it.
+fn watching(mut config: Config) -> Config {
+    let push = PushSettings::of(&config);
+    liveness::watch(&mut config, push.upstreams());
+    config
+}
+
+/// Pushes as often as [`watched`] expects them.
+fn watched_pacing() -> Pacing {
+    Pacing {
+        interval: Duration::from_millis(200),
+        ..pacing(10)
+    }
+}
+
+/// Whether heartbeat `id`'s latest result in `monitor` is up.
+fn up(monitor: &Monitor, id: &str) -> bool {
+    monitor
+        .snapshot()
+        .checks
+        .iter()
+        .find(|check| check.id == id)
+        .and_then(|check| check.last)
+        .is_some_and(|last| last.health == Health::Up)
+}
+
+/// Whether heartbeat `id` has an outage open on `node` that alerted, and
+/// an alert open for it.
+async fn alerting(store: &Store, node: &str, id: &str) -> bool {
+    let open = store.open_outages(node).await.unwrap();
+    let alerts = store.alerts().await.unwrap();
+    open.iter()
+        .any(|outage| outage.check_id == id && outage.alerted)
+        && alerts
+            .iter()
+            .any(|alert| alert.subject_id == id && alert.ended_at_ms.is_none())
+}
+
+/// Whether heartbeat `id` alerted on `node` and is resolved: no outage
+/// and no alert for it still open.
+async fn resolved(store: &Store, node: &str, id: &str) -> bool {
+    let open = store.open_outages(node).await.unwrap();
+    let alerts: Vec<_> = store
+        .alerts()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|alert| alert.subject_id == id)
+        .collect();
+    !open.iter().any(|outage| outage.check_id == id)
+        && !alerts.is_empty()
+        && alerts.iter().all(|alert| alert.ended_at_ms.is_some())
+}
+
+#[tokio::test]
+async fn a_node_that_stops_pushing_goes_down_on_the_hub_until_it_pushes_again() {
+    let (dir, store) = open();
+    let config = watching(load_text(
+        "hub",
+        watched(&config_text("hub", "http://hub.invalid")),
+        Some(&hub_key()),
+    ));
+    let monitor = Monitor::start(&config, &store, &EventBus::new(), &Metrics::new())
+        .await
+        .unwrap();
+    let hub = serve_hub(dir, Arc::clone(&store), config, monitor.heartbeats()).await;
+    let spoke = spoke(&hub);
+    let start = || {
+        Upstreams::from_config(&spoke.config, &spoke.metrics)
+            .unwrap()
+            .paced(watched_pacing())
+            .start(&spoke.store, &HeartbeatHandle::default())
+    };
+
+    let pushers = start();
+    eventually("the hub hears the spoke", || async {
+        up(&monitor, "node:spoke")
+    })
+    .await;
+    pushers.stop().await;
+    eventually("the silent spoke is down and alerting", || {
+        alerting(&hub.store, "hub", "node:spoke")
+    })
+    .await;
+
+    let pushers = start();
+    eventually("its next push resolves it", || {
+        resolved(&hub.store, "hub", "node:spoke")
+    })
+    .await;
+    pushers.stop().await;
+    monitor.stop().await;
+}
+
+#[tokio::test]
+async fn an_upstream_that_refuses_pushes_goes_down_on_the_spoke_until_it_takes_them() {
+    let hub = hub().await;
+    let spoke = spoke(&hub);
+    let config = watching(load_text(
+        "spoke",
+        watched(&config_text("spoke", &hub.url)),
+        Some(&spoke_key()),
+    ));
+    let monitor = Monitor::start(&config, &spoke.store, &EventBus::new(), &Metrics::new())
+        .await
+        .unwrap();
+    let pushers = Upstreams::from_config(&config, &spoke.metrics)
+        .unwrap()
+        .paced(watched_pacing())
+        .start(&spoke.store, &monitor.heartbeats());
+
+    eventually("the spoke reaches the hub", || async {
+        up(&monitor, "upstream:hub")
+    })
+    .await;
+    hub.turns(&vec![Turn::Refuse(StatusCode::SERVICE_UNAVAILABLE); 10_000]);
+    eventually("the refusing hub is down and alerting", || {
+        alerting(&spoke.store, "spoke", "upstream:hub")
+    })
+    .await;
+
+    lock(&hub.gate).turns.clear();
+    eventually("the next push it takes resolves it", || {
+        resolved(&spoke.store, "spoke", "upstream:hub")
+    })
+    .await;
+    pushers.stop().await;
+    monitor.stop().await;
 }

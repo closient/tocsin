@@ -18,6 +18,7 @@ use axum::response::IntoResponse;
 use axum::routing::head;
 use serde::{Deserialize, Serialize};
 use tocsin_core::Health;
+use tocsin_core::config::Id;
 use tocsin_core::incident::{FieldError, Timestamp};
 use tocsin_engine::{PING_MESSAGE_LIMIT, Ping, PingError};
 use utoipa::{IntoParams, ToSchema};
@@ -192,7 +193,9 @@ async fn ping(
     Path(id): Path<String>,
     query: Result<Query<PingQuery>, QueryRejection>,
 ) -> Result<(StatusCode, Json<PingReceipt>), ApiError> {
-    if !state.heartbeats.knows(&id) {
+    // Only a configured heartbeat takes pings: a node's liveness heartbeat,
+    // whose id no configured one can hold, is pinged by its pushes alone.
+    if Id::parse(&id).is_err() || !state.heartbeats.knows(&id) {
         return Err(missing(&id));
     }
     let Query(query) = query

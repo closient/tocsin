@@ -92,6 +92,7 @@ fn api() -> Api {
         admin: None,
         live: Arc::new(tocsin_engine::Snapshot::default()),
         heartbeats: HeartbeatHandle::default(),
+        liveness: crate::liveness::Pulse::default(),
         alert_wake: Arc::default(),
         config_status: crate::reload::steady_status(),
         metrics: Arc::new(crate::metrics::Metrics::new()),
@@ -847,6 +848,38 @@ async fn a_ping_for_an_unknown_id_is_404() {
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(error["error"], "not_found");
+    monitor.stop().await;
+}
+
+/// A node's liveness heartbeat is pinged by its pushes alone, even though
+/// the engine running it would take a ping.
+#[tokio::test]
+async fn a_ping_for_a_liveness_heartbeat_is_404() {
+    let mut api = api();
+    let mut config = (*api.state.config).clone();
+    let mut watched = config.heartbeats[0].clone();
+    watched.id = tocsin_core::config::Id::synthetic("node", &watched.id);
+    config.heartbeats.push(watched);
+    api.state.config = Arc::new(config);
+    let monitor = Monitor::start(
+        &api.state.config,
+        &api.state.store,
+        &api.state.events,
+        &api.state.metrics,
+    )
+    .await
+    .unwrap();
+    api.state.heartbeats = monitor.heartbeats();
+    api.router = router(api.state.clone());
+    assert!(api.state.heartbeats.knows("node:backup"));
+
+    for method in [Method::POST, Method::GET] {
+        let (status, error, _) = api
+            .send(method, "/api/v1/heartbeat/node:backup", Some(DEPLOYS), None)
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(error["error"], "not_found");
+    }
     monitor.stop().await;
 }
 

@@ -283,6 +283,7 @@ impl Running {
                  only at startup, so the running pushers keep going until tocsin restarts"
             );
         }
+        crate::liveness::watch(&mut config, self.reloading.push.upstreams());
 
         let unfinished = match self.monitor.reload(&config).await {
             Ok(()) => None,
@@ -640,6 +641,7 @@ scopes = ["release"]
                 admin: None,
                 live: Arc::new(monitor.status_handle()),
                 heartbeats: monitor.heartbeats(),
+                liveness: crate::liveness::Pulse::default(),
                 alert_wake: monitor.alert_waker(),
                 config_status: status.clone(),
                 metrics: Arc::clone(&metrics),

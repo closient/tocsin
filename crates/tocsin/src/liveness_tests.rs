@@ -58,6 +58,7 @@ retired = true
 [[heartbeat]]
 id = "backup"
 interval = "1h"
+nodes = ["hub"]
 {federation}"#,
         hub = key(1).public_key(),
         spoke = key(2).public_key(),

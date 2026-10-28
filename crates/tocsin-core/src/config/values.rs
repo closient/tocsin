@@ -183,6 +183,12 @@ impl Duration {
         Duration(std::time::Duration::from_secs(seconds))
     }
 
+    /// The same length of time as `duration`.
+    #[must_use]
+    pub const fn from_std(duration: std::time::Duration) -> Self {
+        Duration(duration)
+    }
+
     /// Parses `"1h30m"` and the like.
     ///
     /// # Errors

@@ -45,6 +45,7 @@ pub use colour::{AA_TEXT, COLOUR_PATTERN, Colour, DARK, LIGHT, Scheme};
 pub use diagnostic::Diagnostic;
 pub use load::{Environment, Source, closest, host_and_port, load};
 pub use node::{Federation, Node, NodeIdSource};
+pub use placement::{LIVENESS_HEARTBEAT, QUORUM_HEARTBEAT, QUORUM_NODE};
 pub use notifier::{
     AlertmanagerSettings, DiscordSettings, EmailSettings, Notifier, NotifierSettings, NotifierType,
     NtfySettings, PushoverSettings, SlackSettings, TelegramSettings, WebhookSettings,

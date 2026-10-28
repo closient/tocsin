@@ -4,8 +4,20 @@
 //! are quorum checks: `docs/design/federation.md`, "Placement" and
 //! "Multi-location checks with a quorum".
 
-use super::values::Id;
+use super::values::{Duration, Id};
 use super::{Check, Config, Heartbeat};
+
+/// The kind of the heartbeat a node keeps for each node that pushes to it,
+/// `node:<id>`, pinged by its pushes.
+pub const LIVENESS_HEARTBEAT: &str = "node";
+
+/// The node a quorum check's evaluated results and outages are recorded
+/// under, since no one node saw them. No node id holds `*`.
+pub const QUORUM_NODE: &str = "*";
+
+/// The kind of the heartbeat a node keeps for each quorum check it
+/// evaluates, `quorum:<check>`: see [`Config::quorum_heartbeats`].
+pub const QUORUM_HEARTBEAT: &str = "quorum";
 
 impl Config {
     /// The nodes `check` runs on: its own `nodes`, else `[federation]
@@ -98,6 +110,62 @@ impl Config {
             .filter(|node| !node.retired && self.evaluates_quorum(check, node.id.as_str()))
             .map(|node| &node.id)
             .collect()
+    }
+
+    /// How long a node's latest result for the quorum check `check` counts
+    /// as evidence of its health: two intervals, so one late run does not
+    /// lose it, plus the time a pushed result can take to arrive,
+    /// `[federation] push_interval` and `grace`.
+    #[must_use]
+    pub fn quorum_window(&self, check: &Check) -> std::time::Duration {
+        let interval = check.interval.get();
+        let travel = self.federation.as_ref().map_or(std::time::Duration::ZERO, |federation| {
+            federation
+                .push_interval
+                .get()
+                .saturating_add(federation.grace.get())
+        });
+        interval.saturating_mul(2).saturating_add(travel)
+    }
+
+    /// The heartbeats the node `node_id` keeps for the quorum checks it
+    /// evaluates, `quorum:<check>`: each is pinged up while the check's
+    /// nodes give enough fresh evidence to decide its health, down while
+    /// they do not, and missed if the evaluation stops. It carries the
+    /// check's labels, annotations and class, so its alerts look like the
+    /// check's, and no component, so it is on the internal page only.
+    #[must_use]
+    pub fn quorum_heartbeats(&self, node_id: &str) -> Vec<Heartbeat> {
+        self.checks
+            .iter()
+            .filter(|check| self.evaluates_quorum(check, node_id))
+            .map(|check| Heartbeat {
+                id: Id::synthetic(QUORUM_HEARTBEAT, &check.id),
+                name: Some(format!(
+                    "Quorum for {}",
+                    check.name.as_deref().unwrap_or(check.id.as_str())
+                )),
+                component: None,
+                interval: check.interval,
+                grace: Duration::from_std(self.quorum_window(check)),
+                nodes: Vec::new(),
+                links: check.links.clone(),
+                class: check.class,
+                topology_node: check.topology_node.clone(),
+                labels: check.labels.clone(),
+                annotations: check.annotations.clone(),
+            })
+            .collect()
+    }
+
+    /// The check a `quorum:<check>` heartbeat id stands for, if
+    /// `heartbeat_id` is one and the check exists.
+    #[must_use]
+    pub fn quorum_check_of(&self, heartbeat_id: &str) -> Option<&Check> {
+        let check_id = heartbeat_id
+            .strip_prefix(QUORUM_HEARTBEAT)?
+            .strip_prefix(':')?;
+        self.checks.iter().find(|check| check.id.as_str() == check_id)
     }
 
     /// The nodes that must all be down before the node `node_id` opens an

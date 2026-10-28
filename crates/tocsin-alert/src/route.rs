@@ -69,6 +69,10 @@ pub struct Router {
     /// Each check and heartbeat by kind and id, as an alert's identity
     /// names its subject.
     subjects: HashMap<(SubjectKind, String), Subject>,
+    /// Each `quorum:<check>` heartbeat's check and its component: routes
+    /// match the heartbeat as they would the check, so a route for the
+    /// check also carries the alert that its quorum was lost.
+    quorum: HashMap<String, (String, Option<String>)>,
     components: HashMap<String, (String, Option<String>)>,
     notifier_types: HashMap<String, NotifierType>,
     /// Each Pushover notifier's priorities, which say what keeps ringing.
@@ -105,6 +109,7 @@ impl Router {
     #[must_use]
     pub fn new(config: &config::Config) -> Self {
         let mut subjects = HashMap::new();
+        let mut quorum = HashMap::new();
         for heartbeat in &config.heartbeats {
             let id = heartbeat.id.as_str().to_owned();
             let subject = Subject {
@@ -116,6 +121,15 @@ impl Router {
                 ),
                 annotations: heartbeat.annotations.clone(),
             };
+            if let Some(check) = config.quorum_check_of(&id) {
+                quorum.insert(
+                    id.clone(),
+                    (
+                        check.id.as_str().to_owned(),
+                        check.component.as_ref().map(|id| id.as_str().to_owned()),
+                    ),
+                );
+            }
             subjects.insert((SubjectKind::Heartbeat, id), subject);
         }
         for check in &config.checks {
@@ -190,6 +204,7 @@ impl Router {
             .collect();
         Router {
             subjects,
+            quorum,
             components,
             notifier_types,
             pushover,
@@ -236,6 +251,13 @@ impl Router {
         component_id: Option<&str>,
         health: Health,
     ) -> AlertRouting {
+        let subject = self.subjects.get(&(kind, subject_id.to_owned()));
+        let (kind, subject_id, component_id) = match self.quorum.get(subject_id) {
+            Some((check, component)) if kind == SubjectKind::Heartbeat => {
+                (SubjectKind::Check, check.as_str(), component.as_deref())
+            }
+            _ => (kind, subject_id, component_id),
+        };
         let group = component_id
             .and_then(|component| self.components.get(component))
             .and_then(|(_, group)| group.as_deref());
@@ -275,7 +297,6 @@ impl Router {
             .map(|(id, _)| id.clone())
             .collect();
         ringing.sort();
-        let subject = self.subjects.get(&(kind, subject_id.to_owned()));
         AlertRouting {
             targets,
             ringing,

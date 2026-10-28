@@ -74,19 +74,14 @@ pub(crate) fn watch<'a>(config: &mut Config, upstreams: impl IntoIterator<Item =
     config.heartbeats.extend(watches);
 }
 
-/// When each liveness heartbeat was last pinged. Cheap to clone; clones
-/// share it.
+/// When each liveness heartbeat was last pinged, and with what health.
+/// Cheap to clone; clones share it.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Pulse(Arc<Mutex<HashMap<String, Instant>>>);
+pub(crate) struct Pulse(Arc<Mutex<HashMap<String, (Health, Instant)>>>);
 
 impl Pulse {
-    /// Pings heartbeat `id` for a push that went through, unless it was
-    /// pinged in the last half `push_interval`. Each ping is a stored
-    /// result, and a backlog sends pushes back to back, so this keeps it to
-    /// two a `push_interval` while a push every `push_interval` still pings
-    /// every time. A ping that is not stored is logged and tried again at
-    /// the next push; a heartbeat no watch is kept for, such as one from a
-    /// node whose `push_to` does not name this one, is ignored.
+    /// Pings heartbeat `id` up for a push that went through: see
+    /// [`Pulse::pulse`].
     pub(crate) async fn beat(
         &self,
         heartbeats: &HeartbeatHandle,
@@ -94,21 +89,41 @@ impl Pulse {
         id: &str,
         push_interval: Duration,
     ) {
-        let now = Instant::now();
-        let due = self
-            .lock()
-            .get(id)
-            .is_none_or(|last| now.duration_since(*last) >= push_interval / 2);
-        if !due {
-            return;
-        }
         let ping = Ping {
             health: Health::Up,
             message: None,
         };
+        self.pulse(heartbeats, metrics, id, ping, push_interval)
+            .await;
+    }
+
+    /// Pings heartbeat `id` with `ping`, unless it was pinged with the same
+    /// health in the last half `push_interval`. Each ping is a stored
+    /// result, and a backlog sends pushes back to back, so this keeps it to
+    /// two a `push_interval` while a push every `push_interval` still pings
+    /// every time; a change of health always pings. A ping that is not
+    /// stored is logged and tried again at the next push; a heartbeat no
+    /// watch is kept for, such as one from a node whose `push_to` does not
+    /// name this one, is ignored.
+    pub(crate) async fn pulse(
+        &self,
+        heartbeats: &HeartbeatHandle,
+        metrics: &CheckMetrics,
+        id: &str,
+        ping: Ping,
+        push_interval: Duration,
+    ) {
+        let now = Instant::now();
+        let health = ping.health;
+        let due = self.lock().get(id).is_none_or(|(last_health, last)| {
+            *last_health != health || now.duration_since(*last) >= push_interval / 2
+        });
+        if !due {
+            return;
+        }
         match heartbeats.ping(id, ping).await {
             Ok(at_ms) => {
-                self.lock().insert(id.to_owned(), now);
+                self.lock().insert(id.to_owned(), (health, now));
                 metrics.pinged(id, at_ms);
             }
             Err(PingError::Unknown | PingError::Stopped) => {}
@@ -118,7 +133,7 @@ impl Pulse {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Instant>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, (Health, Instant)>> {
         // Nothing done under the lock panics.
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }

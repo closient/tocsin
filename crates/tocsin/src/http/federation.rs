@@ -25,7 +25,7 @@ use tocsin_core::federation::wire::{
     self, Batch, BatchReceipt, LastPush, NodeList, NodeStatus, NodeStore, RemoteCheck,
 };
 use tocsin_core::incident::{FieldError, Timestamp};
-use tocsin_engine::Snapshot;
+use tocsin_engine::{Ping, Snapshot};
 use tocsin_store::{RemoteAlerting, RemoteBatch, RemoteOutageChange, RemoteStore, SubjectKind};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -62,7 +62,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         (status = 400, description = "The body is not JSON", body = ErrorBody),
         (status = 401, description = "A header is missing, the node is unknown, or the signature does not verify", body = ErrorBody),
         (status = 403, description = "The node, or the store it pushed from, is retired", body = ErrorBody),
-        (status = 409, description = "The node is conflicted, or the batch conflicts with what its store sent before, as two machines pushing as one node do", body = ErrorBody),
+        (status = 409, description = "The node is conflicted, this store was replaced by a newer one and pushed again, or the batch conflicts with what its store sent before, as two machines pushing as one node do", body = ErrorBody),
         (status = 413, description = "The body is too large", body = ErrorBody),
         (status = 422, description = "A row is another node's, out of order, or holds a bad value", body = ErrorBody),
     ),
@@ -113,10 +113,26 @@ pub async fn push_batch(
     let received_at = now();
     let local = state.config.server.node_id.clone().unwrap_or_default();
     let alerting = remote_alerting(&state, &local, &remote_batch, received_at.as_millis());
-    let report = state
+    let applied = state
         .store
         .apply_batch(remote_batch, local, alerting, received_at.as_millis())
-        .await?;
+        .await;
+    let report = match applied {
+        Ok(report) => report,
+        Err(conflict @ tocsin_store::Error::Conflict(_)) => {
+            return Err(conflicted(&state, node, conflict).await);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    for replaced in &report.replaced {
+        tracing::warn!(
+            node = %node_id,
+            store = %store,
+            replaced = %replaced,
+            "a new store replaced the node's old one, as a rebuilt node's fresh database does: \
+             the old store's open outages are withdrawn and its pushes are refused from now on"
+        );
+    }
     if report.alerts_queued > 0 {
         state.alert_wake.notify_one();
     }
@@ -143,6 +159,29 @@ pub async fn push_batch(
             .await;
     }
     Ok(Json(receipt))
+}
+
+/// Two machines are pushing as `node`: its liveness goes down with the
+/// reason, so it alerts now rather than when the refused pushes let it go
+/// stale.
+async fn conflicted(state: &AppState, node: &Node, conflict: tocsin_store::Error) -> ApiError {
+    if let Some(federation) = &state.config.federation {
+        let ping = Ping {
+            health: Health::Down,
+            message: Some(conflict.to_string()),
+        };
+        state
+            .liveness
+            .pulse(
+                &state.heartbeats,
+                &state.metrics.checks,
+                Id::synthetic(liveness::NODE, &node.id).as_str(),
+                ping,
+                federation.push_interval.get(),
+            )
+            .await;
+    }
+    conflict.into()
 }
 
 /// How this node alerts for each outage `batch` opens that alerts, keyed by

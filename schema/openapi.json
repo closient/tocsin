@@ -480,7 +480,7 @@
             }
           },
           "409": {
-            "description": "The node is conflicted, or the batch conflicts with what its store sent before, as two machines pushing as one node do",
+            "description": "The node is conflicted, this store was replaced by a newer one and pushed again, or the batch conflicts with what its store sent before, as two machines pushing as one node do",
             "content": {
               "application/json": {
                 "schema": {

@@ -554,13 +554,26 @@ one; a partial unique index (`node_store_local`) allows only one such row.
 | `state` | text | `active`, `retired` or `conflicted`. |
 | `first_seen_at`, `last_push_at` | integer | When the row was made, and when the last push from that store was applied, both by this server's clock. Every applied push, empty or not, moves `last_push_at`. |
 | `next_seq` | integer | The next sequence number this store will stamp; set on the local row only, and at least 1. Each outage open and end takes one. |
+| `superseded_at` | integer | When a newer store of the same node replaced this one, as a rebuilt node's fresh database does; the row is then `retired`. Null otherwise. Added by 0022. |
 
 A row with `local = 0` is made the first time a batch from that store is
 applied. Applying a batch is idempotent: results and outages already stored
 under their origin key are skipped, an outage change that matches what is
 stored is a no-op, and one that differs is refused as a conflict with
 nothing written. Outage changes must arrive in seq order, after any already
-applied from that store. A result dated before `purged_before` is skipped and
+applied from that store.
+
+A node has one active store. A batch from a store the node has not pushed
+from before, while another is active, replaces it: the old row is retired
+with `superseded_at` set and its open outages are withdrawn (`ending =
+withdrawn`, each ended straight after its open in its store's sequence, and
+their alerts end as ended by the configuration) in the same transaction
+that applies the batch. A replaced store that pushes again, or a batch that
+differs from what its store sent before, means two machines are pushing as
+one node: every store of the node is marked `conflicted`, which refuses
+all of them until the node is retired. Retiring a node in the configuration
+retires its stores and withdraws their open outages the same way, at
+startup and at every reload. A result dated before `purged_before` is skipped and
 counted; a result or outage change dated past `FUTURE_TOLERANCE` stops
 that kind of row for the batch, keeping the ones before it, and a rollup
 for a day that far ahead is left out on its own. Rollups another node pushed are stored as

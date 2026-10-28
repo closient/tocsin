@@ -1329,13 +1329,22 @@ impl Store {
     /// change's `origin_id`) routes it, and an identity with nothing open
     /// resolves. So an outage that arrived already ended never fires.
     ///
+    /// A store pushing for the first time while another of its node's is
+    /// active replaces it, as a rebuilt node's fresh database does: the old
+    /// store is retired and its open outages withdrawn, and the report
+    /// names it in `replaced`.
+    ///
     /// # Errors
     ///
-    /// Nothing is written on any error. [`Error::Invalid`] if the batch is
-    /// this node's or this store's own, holds another node's row, or is out
-    /// of order; [`Error::Conflict`] if it ends or opens an outage
-    /// differently from how the same store did before; otherwise the write
-    /// fails.
+    /// Nothing is written on any error but [`Error::Conflict`].
+    /// [`Error::Invalid`] if the batch is this node's or this store's own,
+    /// holds another node's row, or is out of order; [`Error::Conflict`]
+    /// if the node is conflicted, or the batch comes from a store a newer
+    /// one replaced, or it ends or opens an outage differently from how the
+    /// same store did before: each of the last two marks every store of
+    /// the node conflicted, so its pushes are refused until it is retired;
+    /// [`Error::Retired`] if its store was retired with its node; otherwise
+    /// the write fails.
     pub async fn apply_batch(
         &self,
         batch: RemoteBatch,
@@ -1347,6 +1356,21 @@ impl Store {
             .run(move |conn| {
                 federation::apply_batch(conn, &batch, &local_node_id, &alerting, now_ms)
             })
+            .await
+    }
+
+    /// Retires every store of `node_ids`, the nodes the configuration
+    /// marks retired, at `now_ms`: each outage they have open here is
+    /// withdrawn and its alerts end as [`EndedBy::Config`], queueing their
+    /// resolves. A store already retired with nothing open is unchanged.
+    /// Returns how many deliveries it queued.
+    ///
+    /// # Errors
+    ///
+    /// The write fails; nothing is changed.
+    pub async fn retire_nodes(&self, node_ids: Vec<String>, now_ms: i64) -> Result<usize> {
+        self.writer
+            .run(move |conn| federation::retire_nodes(conn, &node_ids, now_ms))
             .await
     }
 

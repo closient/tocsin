@@ -7,8 +7,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tocsin_core::Health;
 use tocsin_core::config::{Config, Environment, Id, Source};
 use tocsin_core::federation::NodeKey;
+use tocsin_engine::Ping;
 use tocsin_store::Store;
 
 use super::{NODE, Pulse, UPSTREAM, watch};
@@ -193,6 +195,35 @@ async fn pushes_back_to_back_ping_once_per_half_interval() {
         .beat(&heartbeats, &metrics.checks, "backup", interval)
         .await;
     assert_eq!(pings(), 2, "half an interval later it pings again");
+
+    // A change of health is never held back: a conflict reported straight
+    // after a push still lands, and so does the next good push. An hour's
+    // interval keeps the same health held back however slow the run.
+    let hour = Duration::from_secs(3600);
+    let down = || Ping {
+        health: Health::Down,
+        message: Some("conflicted".into()),
+    };
+    pulse
+        .pulse(&heartbeats, &metrics.checks, "backup", down(), hour)
+        .await;
+    assert_eq!(
+        pings(),
+        3,
+        "a down ping straight after an up one was held back"
+    );
+    pulse
+        .pulse(&heartbeats, &metrics.checks, "backup", down(), hour)
+        .await;
+    assert_eq!(pings(), 3, "a second down ping came too soon");
+    pulse
+        .beat(&heartbeats, &metrics.checks, "backup", hour)
+        .await;
+    assert_eq!(
+        pings(),
+        4,
+        "an up ping straight after a down one was held back"
+    );
 
     pulse
         .beat(&heartbeats, &metrics.checks, "nonesuch", interval)

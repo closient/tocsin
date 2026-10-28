@@ -12,8 +12,8 @@ use tocsin_core::Health;
 use tocsin_core::status::OutageEnding;
 
 use tocsin_store::{
-    AlertRouting, AlertTarget, DailyRollup, Day, Error, NewCheckResult, NewOutage, RemoteAlerting,
-    RemoteBatch, RemoteOutageChange, RemoteResult, Store, SubjectKind,
+    AlertRouting, AlertTarget, DailyRollup, Day, EndedBy, Error, NewCheckResult, NewOutage,
+    RemoteAlerting, RemoteBatch, RemoteOutageChange, RemoteResult, Store, SubjectKind,
 };
 
 const LOCAL: &str = "node-local";
@@ -332,8 +332,27 @@ async fn a_differing_end_is_a_conflict_and_writes_nothing() {
     )
     .await;
     assert!(matches!(outcome, Err(Error::Conflict(_))), "{outcome:?}");
+    assert_eq!(
+        states(&fixture.path),
+        [(STORE.to_owned(), "conflicted".to_owned())]
+    );
+    // Marking the node conflicted is the one thing it wrote.
+    raw(&fixture.path)
+        .execute("UPDATE node_store SET state = 'active'", [])
+        .unwrap();
     assert_eq!(dump(&fixture.path), before, "a conflicting batch wrote");
 
+    let fixture = open();
+    apply(
+        &fixture,
+        batch(
+            vec![],
+            vec![open_change(1, 3, base), end_change(2, 3, base + 5_000)],
+            vec![],
+        ),
+    )
+    .await
+    .unwrap();
     let reopened = apply(
         &fixture,
         batch(
@@ -354,6 +373,23 @@ async fn a_differing_end_is_a_conflict_and_writes_nothing() {
     )
     .await;
     assert!(matches!(reopened, Err(Error::Conflict(_))), "{reopened:?}");
+    assert_eq!(
+        states(&fixture.path),
+        [(STORE.to_owned(), "conflicted".to_owned())]
+    );
+}
+
+/// Each store of the node, as (store id, state), oldest first.
+fn states(path: &Path) -> Vec<(String, String)> {
+    let conn = raw(path);
+    let mut statement = conn
+        .prepare("SELECT store_id, state FROM node_store WHERE local = 0 ORDER BY id")
+        .unwrap();
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
 }
 
 #[tokio::test]
@@ -759,4 +795,276 @@ async fn an_outage_that_arrived_late_says_when() {
     assert_eq!(fired.len(), 1);
     assert_eq!(fired[0].arrived_late_at_ms, Some(noon()));
     assert_eq!(fired[0].outage_started_at_ms, Some(noon() - 3_600_000));
+}
+
+/// The store a rebuilt node pushes from: its database is new.
+const REBUILT: &str = "fedcba9876543210fedcba9876543210";
+
+fn from(store_id: &str, outages: Vec<RemoteOutageChange>) -> RemoteBatch {
+    RemoteBatch {
+        store_id: store_id.into(),
+        ..batch(vec![], outages, vec![])
+    }
+}
+
+async fn apply_from(
+    fixture: &Fixture,
+    batch: RemoteBatch,
+    alerting: BTreeMap<i64, RemoteAlerting>,
+    now_ms: i64,
+) -> tocsin_store::Result<tocsin_store::BatchReport> {
+    fixture
+        .store
+        .apply_batch(batch, LOCAL.into(), alerting, now_ms)
+        .await
+}
+
+/// One outage, as (origin store id, origin id, ending, ended at, opened
+/// seq, ended seq).
+type OutageRow = (String, i64, Option<String>, Option<i64>, i64, Option<i64>);
+
+/// The node's outages, oldest first.
+fn outages(path: &Path) -> Vec<OutageRow> {
+    let conn = raw(path);
+    let mut statement = conn
+        .prepare(
+            "SELECT s.store_id, o.origin_id, o.ending, o.ended_at, o.opened_seq, o.ended_seq
+             FROM outage o JOIN node_store s ON s.id = o.origin_store
+             WHERE o.node_id = ?1 ORDER BY o.id",
+        )
+        .unwrap();
+    statement
+        .query_map([REMOTE], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+fn superseded_at(path: &Path, store_id: &str) -> Option<i64> {
+    raw(path)
+        .query_row(
+            "SELECT superseded_at FROM node_store WHERE store_id = ?1",
+            [store_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// A rebuilt node pushes from a new store with an outage of the same check
+/// open: the old store is retired, its outage withdrawn with the seq after
+/// its own open (here past anything this node numbered), its alert ended
+/// by config, and the new store's outage opens and fires.
+#[tokio::test]
+async fn a_new_store_for_a_known_node_replaces_the_old_and_withdraws_its_outages() {
+    let fixture = open();
+    let started = noon() - 120_000;
+    apply_from(
+        &fixture,
+        from(STORE, vec![open_change(1_000, 1, started)]),
+        alerting(1, true, None),
+        noon(),
+    )
+    .await
+    .unwrap();
+    let fired = fixture.store.alerts().await.unwrap();
+    assert_eq!(fired.len(), 1);
+
+    let replaced_at = noon() + 60_000;
+    let report = apply_from(
+        &fixture,
+        from(REBUILT, vec![open_change(1, 1, noon() + 30_000)]),
+        alerting(1, true, None),
+        replaced_at,
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.replaced, [STORE]);
+    assert_eq!(report.outage_changes_applied, 1);
+    assert_eq!(
+        report.alerts_queued, 2,
+        "the old alert's resolve and the new one's fire"
+    );
+
+    assert_eq!(
+        outages(&fixture.path),
+        [
+            (
+                STORE.to_owned(),
+                1,
+                Some("withdrawn".to_owned()),
+                Some(replaced_at),
+                1_000,
+                Some(1_001)
+            ),
+            (REBUILT.to_owned(), 1, None, None, 1, None),
+        ]
+    );
+    let alerts = fixture.store.alerts().await.unwrap();
+    let old = alerts.iter().find(|alert| alert.id == fired[0].id).unwrap();
+    assert_eq!(old.ended_at_ms, Some(replaced_at));
+    assert_eq!(old.ended_by, Some(EndedBy::Config));
+    assert!(
+        alerts
+            .iter()
+            .any(|alert| alert.id != old.id && alert.ended_at_ms.is_none()),
+        "{alerts:?}"
+    );
+    assert_eq!(
+        states(&fixture.path),
+        [
+            (STORE.to_owned(), "retired".to_owned()),
+            (REBUILT.to_owned(), "active".to_owned()),
+        ]
+    );
+    assert_eq!(superseded_at(&fixture.path, STORE), Some(replaced_at));
+    assert_eq!(superseded_at(&fixture.path, REBUILT), None);
+
+    // Accepted once: its next push replaces nothing.
+    let again = apply_from(
+        &fixture,
+        from(REBUILT, vec![]),
+        BTreeMap::new(),
+        replaced_at,
+    )
+    .await
+    .unwrap();
+    assert_eq!(again.replaced, Vec::<String>::new());
+}
+
+/// The replaced store pushing again means two machines are pushing as one
+/// node: both stores are marked conflicted and refused, the marking
+/// survives a restart, and only retiring the node clears it, to retired.
+#[tokio::test]
+async fn a_replaced_store_pushing_again_conflicts_the_node_across_a_restart() {
+    let fixture = open();
+    let started = noon() - 120_000;
+    for store in [STORE, REBUILT] {
+        apply_from(
+            &fixture,
+            from(store, vec![open_change(1, 1, started)]),
+            BTreeMap::new(),
+            noon(),
+        )
+        .await
+        .unwrap();
+    }
+    let before = outages(&fixture.path);
+
+    let outcome = apply_from(&fixture, from(STORE, vec![]), BTreeMap::new(), noon()).await;
+    assert!(matches!(outcome, Err(Error::Conflict(_))), "{outcome:?}");
+    let conflicted = [
+        (STORE.to_owned(), "conflicted".to_owned()),
+        (REBUILT.to_owned(), "conflicted".to_owned()),
+    ];
+    assert_eq!(states(&fixture.path), conflicted);
+    assert_eq!(
+        outages(&fixture.path),
+        before,
+        "a refused push changed an outage"
+    );
+
+    let Fixture {
+        _dir: dir,
+        path,
+        store,
+    } = fixture;
+    drop(store);
+    let fixture = Fixture {
+        store: Store::open(&path).unwrap(),
+        _dir: dir,
+        path,
+    };
+    for store in [STORE, REBUILT] {
+        let outcome = apply_from(&fixture, from(store, vec![]), BTreeMap::new(), noon()).await;
+        assert!(
+            matches!(outcome, Err(Error::Conflict(_))),
+            "{store}: {outcome:?}"
+        );
+    }
+    assert_eq!(states(&fixture.path), conflicted);
+
+    fixture
+        .store
+        .retire_nodes(vec![REMOTE.into()], noon() + 60_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        states(&fixture.path),
+        [
+            (STORE.to_owned(), "retired".to_owned()),
+            (REBUILT.to_owned(), "retired".to_owned()),
+        ]
+    );
+    for store in [STORE, REBUILT] {
+        let outcome = apply_from(&fixture, from(store, vec![]), BTreeMap::new(), noon()).await;
+        assert!(
+            matches!(outcome, Err(Error::Retired(_))),
+            "{store}: {outcome:?}"
+        );
+    }
+    assert_eq!(
+        states(&fixture.path)[0].1,
+        "retired",
+        "a push to a retired node conflicted it again"
+    );
+}
+
+/// Retiring a node in the configuration withdraws what it has open and
+/// ends its alerts by config; running it again changes nothing.
+#[tokio::test]
+async fn retiring_a_node_withdraws_its_open_outages_and_refuses_its_store() {
+    let fixture = open();
+    apply_from(
+        &fixture,
+        from(STORE, vec![open_change(1, 1, noon() - 120_000)]),
+        alerting(1, true, None),
+        noon(),
+    )
+    .await
+    .unwrap();
+
+    let retired_at = noon() + 60_000;
+    let queued = fixture
+        .store
+        .retire_nodes(vec![REMOTE.into(), "never-pushed".into()], retired_at)
+        .await
+        .unwrap();
+    assert_eq!(queued, 1);
+    assert_eq!(
+        outages(&fixture.path),
+        [(
+            STORE.to_owned(),
+            1,
+            Some("withdrawn".to_owned()),
+            Some(retired_at),
+            1,
+            Some(2)
+        )]
+    );
+    let alerts = fixture.store.alerts().await.unwrap();
+    assert_eq!(alerts[0].ended_at_ms, Some(retired_at));
+    assert_eq!(alerts[0].ended_by, Some(EndedBy::Config));
+    assert_eq!(
+        states(&fixture.path),
+        [(STORE.to_owned(), "retired".to_owned())]
+    );
+    assert_eq!(superseded_at(&fixture.path, STORE), None);
+
+    let outcome = apply_from(&fixture, from(STORE, vec![]), BTreeMap::new(), retired_at).await;
+    assert!(matches!(outcome, Err(Error::Retired(_))), "{outcome:?}");
+    let again = fixture
+        .store
+        .retire_nodes(vec![REMOTE.into()], retired_at + 1)
+        .await
+        .unwrap();
+    assert_eq!(again, 0);
 }

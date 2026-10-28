@@ -118,6 +118,11 @@ pub struct BatchReport {
     /// until the clocks agree, while the rows before it are applied; such a
     /// rollup waits alone.
     pub skewed_at_ms: Option<i64>,
+    /// The stores of the same node this batch's store replaced, as a
+    /// rebuilt node's fresh database does: each is retired and its open
+    /// outages withdrawn. Empty unless the store pushed here for the first
+    /// time while another of its node's was active.
+    pub replaced: Vec<String>,
 }
 
 impl RemoteBatch {
@@ -268,18 +273,25 @@ impl BatchReport {
 ///
 /// The batch's `node_store` row is made on first sight, and its last push
 /// set to `now_ms`, in the same transaction, which first refuses the batch
-/// if its node or store may no longer push.
+/// if its node or store may no longer push. A node has one active store: a
+/// store pushing for the first time while another is active replaces it,
+/// as a rebuilt node's fresh database does, and the old one is retired and
+/// its open outages withdrawn before the batch's own changes apply, so the
+/// new store can open what the old one had open.
 ///
 /// # Errors
 ///
-/// Nothing is written when any of these fail. [`Error::Invalid`] if the
-/// batch is from this node or this store, holds another node's row or a
-/// value the schema refuses, is out of order, opens an outage while the
-/// same check's last one is still open, or ends one it never opened or
-/// before it started; [`Error::Conflict`] if any of the node's stores is
-/// conflicted, or the batch differs from what the same store already sent
-/// for an outage, which means two machines are writing as one node;
-/// [`Error::Retired`] if its store was retired; otherwise the write fails.
+/// Nothing is written when any of these fail, but for marking the node
+/// conflicted. [`Error::Invalid`] if the batch is from this node or this
+/// store, holds another node's row or a value the schema refuses, is out
+/// of order, opens an outage while the same check's last one is still
+/// open, or ends one it never opened or before it started;
+/// [`Error::Conflict`] if any of the node's stores is conflicted, or the
+/// batch comes from a store a newer one replaced, or it differs from what
+/// the same store already sent for an outage: each of the last two means
+/// two machines are writing as one node, and marks every store of the node
+/// conflicted, so all of them are refused from then on; [`Error::Retired`]
+/// if its store was retired with its node; otherwise the write fails.
 pub(crate) fn apply_batch(
     conn: &mut Connection,
     batch: &RemoteBatch,
@@ -288,19 +300,44 @@ pub(crate) fn apply_batch(
     now_ms: i64,
 ) -> Result<BatchReport> {
     let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    validate(&transaction, batch, local_node_id)?;
-    refuse_unless_active(&transaction, batch)?;
+    match apply_admitted(&transaction, batch, local_node_id, alerting, now_ms) {
+        Ok(report) => {
+            transaction.commit()?;
+            Ok(report)
+        }
+        Err(conflict @ Error::Conflict(_)) => {
+            transaction.rollback()?;
+            mark_conflicted(conn, &batch.node_id)?;
+            Err(conflict)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// [`apply_batch`] inside its transaction, which commits only on `Ok`.
+fn apply_admitted(
+    conn: &Connection,
+    batch: &RemoteBatch,
+    local_node_id: &str,
+    alerting: &BTreeMap<i64, RemoteAlerting>,
+    now_ms: i64,
+) -> Result<BatchReport> {
+    validate(conn, batch, local_node_id)?;
+    let replaces = admit(conn, batch)?;
     let origin = Origin {
-        row: remote_store(&transaction, batch, now_ms)?,
+        row: remote_store(conn, batch, now_ms)?,
         batch,
     };
     let horizon_ms = future_horizon_ms(now_ms);
     let mut report = BatchReport::default();
-    apply_results(&transaction, &origin, horizon_ms, &mut report)?;
-    let touched = apply_outages(&transaction, &origin, horizon_ms, &mut report)?;
-    report.alerts_queued = alert_touched(&transaction, &touched, alerting, now_ms)?;
-    apply_rollups(&transaction, &batch.rollups, horizon_ms, &mut report)?;
-    transaction.commit()?;
+    for old in replaces {
+        report.alerts_queued += replace_store(conn, old.row, now_ms)?;
+        report.replaced.push(old.store_id);
+    }
+    apply_results(conn, &origin, horizon_ms, &mut report)?;
+    let touched = apply_outages(conn, &origin, horizon_ms, &mut report)?;
+    report.alerts_queued += alert_touched(conn, &touched, alerting, now_ms)?;
+    apply_rollups(conn, &batch.rollups, horizon_ms, &mut report)?;
     Ok(report)
 }
 
@@ -436,37 +473,137 @@ fn not_own(path: String, batch: &RemoteBatch) -> FieldError {
     )
 }
 
+/// One of a node's stores, as [`admit`] reads it.
+struct KnownStore {
+    row: i64,
+    store_id: String,
+    state: Option<wire::StoreState>,
+    superseded: bool,
+}
+
 /// Refuses a batch whose node has a conflicted store, as two machines
-/// pushing as one leave it, or whose own store was retired. Read under the
-/// write lock, so a store marked between the read and the write cannot
-/// slip a batch through.
-fn refuse_unless_active(conn: &Connection, batch: &RemoteBatch) -> Result<()> {
-    let mut statement =
-        conn.prepare_cached("SELECT store_id, state FROM node_store WHERE node_id = ?1")?;
+/// pushing as one leave it, whose own store a newer one replaced (so two
+/// machines are pushing as one), or whose own store was retired with its
+/// node: once the node is retired, every store of it is just retired. Otherwise returns the active stores the batch's store replaces:
+/// none unless it is pushing here for the first time. Read under the write
+/// lock, so a store marked between the read and the write cannot slip a
+/// batch through.
+fn admit(conn: &Connection, batch: &RemoteBatch) -> Result<Vec<KnownStore>> {
+    let mut statement = conn.prepare_cached(
+        "SELECT id, store_id, state, superseded_at IS NOT NULL FROM node_store
+         WHERE node_id = ?1 AND local = 0 ORDER BY id",
+    )?;
     let stores = statement
         .query_map(params![batch.node_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok(KnownStore {
+                row: row.get(0)?,
+                store_id: row.get(1)?,
+                state: row.get::<_, String>(2)?.parse().ok(),
+                superseded: row.get(3)?,
+            })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let state = |text: &str| text.parse::<wire::StoreState>().ok();
-    if let Some((store, _)) = stores
+    if let Some(conflicted) = stores
         .iter()
-        .find(|(_, text)| state(text) == Some(wire::StoreState::Conflicted))
+        .find(|store| store.state == Some(wire::StoreState::Conflicted))
     {
         return Err(Error::Conflict(format!(
-            "node {} is conflicted: store {store} pushed as it too; retire one machine",
-            batch.node_id
+            "node {} is conflicted: store {} pushed as it too; retire one machine",
+            batch.node_id, conflicted.store_id
         )));
     }
-    if stores.iter().any(|(store, text)| {
-        *store == batch.store_id && state(text) == Some(wire::StoreState::Retired)
-    }) {
-        return Err(Error::Retired(format!(
+    // Only retiring the node retires a store without superseding it.
+    let node_retired = stores
+        .iter()
+        .any(|store| store.state == Some(wire::StoreState::Retired) && !store.superseded);
+    match stores.iter().find(|store| store.store_id == batch.store_id) {
+        Some(own) if own.superseded && !node_retired => Err(Error::Conflict(format!(
+            "store {} of node {} was replaced by a newer store and pushed again: two machines \
+             are pushing as node {}; retire one",
+            batch.store_id, batch.node_id, batch.node_id
+        ))),
+        Some(own) if own.state == Some(wire::StoreState::Retired) => Err(Error::Retired(format!(
             "store {} of node {} is retired: its pushes are refused",
             batch.store_id, batch.node_id
-        )));
+        ))),
+        Some(_) => Ok(Vec::new()),
+        None => Ok(stores
+            .into_iter()
+            .filter(|store| store.state == Some(wire::StoreState::Active))
+            .collect()),
     }
+}
+
+/// Retires store `row`, which a newer store of its node replaced, and
+/// withdraws its open outages. Returns the alert deliveries queued.
+fn replace_store(conn: &Connection, row: i64, now_ms: i64) -> Result<usize> {
+    conn.prepare_cached("UPDATE node_store SET state = ?2, superseded_at = ?3 WHERE id = ?1")?
+        .execute(params![row, wire::StoreState::Retired.as_str(), now_ms])?;
+    withdraw_store_outages(conn, row, now_ms)
+}
+
+/// Withdraws every outage store `row` has open here at `now_ms` (or its
+/// start, if that is later), as for a check removed from the
+/// configuration: `ending = withdrawn`, and its alerts end as
+/// [`EndedBy::Config`], queueing their resolves. Each end takes the seq
+/// straight after its open: the store's own numbering, never this node's,
+/// and no later change from it is taken. Returns the deliveries queued.
+fn withdraw_store_outages(conn: &Connection, row: i64, now_ms: i64) -> Result<usize> {
+    let open = conn
+        .prepare_cached("SELECT id FROM outage WHERE origin_store = ?1 AND ended_at IS NULL")?
+        .query_map(params![row], |row| row.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut queued = 0;
+    for id in open {
+        let identity = alert::outage_identity(conn, id, true)?
+            .ok_or(Error::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+        conn.prepare_cached(
+            "UPDATE outage SET ended_at = max(?2, started_at), ending = ?3,
+                 ended_seq = opened_seq + 1
+             WHERE id = ?1",
+        )?
+        .execute(params![id, now_ms, OutageEnding::Withdrawn.as_str()])?;
+        let open_alerts = alert::open_alerts(conn, &identity)?;
+        queued += alert::end_alerts(conn, &open_alerts, now_ms, now_ms, EndedBy::Config)?;
+    }
+    Ok(queued)
+}
+
+/// Marks every store of `node_id` conflicted, in a transaction of its own
+/// since the batch that found the conflict writes nothing.
+fn mark_conflicted(conn: &mut Connection, node_id: &str) -> Result<()> {
+    conn.prepare_cached("UPDATE node_store SET state = ?2 WHERE node_id = ?1 AND local = 0")?
+        .execute(params![node_id, wire::StoreState::Conflicted.as_str()])?;
     Ok(())
+}
+
+/// Retires every store of `node_ids`, nodes the configuration marks
+/// retired, and withdraws their open outages, in one transaction. Nothing
+/// changes for a store already retired with nothing open, so running it at
+/// every start and reload is cheap. Returns the alert deliveries queued.
+pub(crate) fn retire_nodes(
+    conn: &mut Connection,
+    node_ids: &[String],
+    now_ms: i64,
+) -> Result<usize> {
+    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut queued = 0;
+    for node_id in node_ids {
+        transaction
+            .prepare_cached(
+                "UPDATE node_store SET state = ?2 WHERE node_id = ?1 AND local = 0 AND state <> ?2",
+            )?
+            .execute(params![node_id, wire::StoreState::Retired.as_str()])?;
+        let rows = transaction
+            .prepare_cached("SELECT id FROM node_store WHERE node_id = ?1 AND local = 0")?
+            .query_map(params![node_id], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for row in rows {
+            queued += withdraw_store_outages(&transaction, row, now_ms)?;
+        }
+    }
+    transaction.commit()?;
+    Ok(queued)
 }
 
 /// The `node_store` row for the batch's store, made on first sight, its

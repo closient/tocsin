@@ -758,4 +758,5 @@ async fn an_outage_that_arrived_late_says_when() {
     let fired = fixture.store.alerts().await.unwrap();
     assert_eq!(fired.len(), 1);
     assert_eq!(fired[0].arrived_late_at_ms, Some(noon()));
+    assert_eq!(fired[0].outage_started_at_ms, Some(noon() - 3_600_000));
 }

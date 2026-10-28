@@ -261,6 +261,10 @@ pub struct StoredAlert {
     /// than its pushes allow, so its messages say so. `None` for every
     /// other alert, this node's own included.
     pub arrived_late_at_ms: Option<i64>,
+    /// When the outage it last fired for started (unix milliseconds): for
+    /// another node's outage, when that node detected it. A re-fire keeps
+    /// the alert's own `started_at_ms`. `None` once that outage is gone.
+    pub outage_started_at_ms: Option<i64>,
 }
 
 /// A pending delivery that may be sent now: the oldest pending message of
@@ -773,7 +777,8 @@ fn drop_pending_repeats(conn: &Connection, alert_id: i64) -> Result<()> {
 
 const ALERT_COLUMNS: &str = "a.id, a.node_id, a.subject_kind, a.subject_id, a.component_id,
     a.notifier_id, a.route_id, a.health, a.started_at, a.ended_at, a.ringing, a.outage_id,
-    a.notified, a.attempted, a.labels, a.annotations, a.ended_by, a.arrived_late_at";
+    a.notified, a.attempted, a.labels, a.annotations, a.ended_by, a.arrived_late_at,
+    (SELECT o.started_at FROM outage o WHERE o.id = a.outage_id)";
 
 fn stored_alert(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<StoredAlert> {
     Ok(StoredAlert {
@@ -798,6 +803,7 @@ fn stored_alert(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<Store
             .map(|ended_by| parse_column(first + 16, &ended_by))
             .transpose()?,
         arrived_late_at_ms: row.get(first + 17)?,
+        outage_started_at_ms: row.get(first + 18)?,
     })
 }
 

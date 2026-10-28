@@ -777,6 +777,23 @@ async fn a_pushed_outage_pages_only_while_every_node_ahead_is_down() {
 }
 
 #[tokio::test]
+async fn the_node_that_pushed_counts_as_up_before_its_heartbeat_is_heard() {
+    // `spoke` is ahead of the hub and unheard: its push is the first word
+    // from it, recorded only after the batch. It pages for itself.
+    let text = alerting_config_text().replace(
+        "alert_order = [\"first\", \"hub\"]",
+        "alert_order = [\"spoke\", \"hub\"]",
+    );
+    let api = api_with(text, heard("spoke", None));
+    let mut sent = batch();
+    sent.outages = vec![open(1, 7, ago(5))];
+    let (status, receipt) = api.push(&sent).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(receipt["outage_changes_applied"], 1);
+    assert_eq!(api.state.store.alerts().await.unwrap(), []);
+}
+
+#[tokio::test]
 async fn a_pushed_outage_that_already_ended_pages_no_one() {
     let api = api_with(alerting_config_text(), first_node(Some(Health::Down)));
     let mut sent = batch();

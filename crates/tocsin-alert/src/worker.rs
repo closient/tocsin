@@ -60,7 +60,7 @@ use tocsin_store::{
 use tokio::sync::{Notify, watch};
 use tokio::task::{self, JoinHandle, JoinSet};
 
-use crate::alert::{Alert, AlertEvent};
+use crate::alert::{Alert, AlertEvent, Late};
 use crate::metrics::AlertMetrics;
 use crate::notifier::SendError;
 use crate::notifiers::Notifiers;
@@ -716,7 +716,10 @@ impl Worker {
                 .then(|| stored.ended_by.unwrap_or(EndedBy::Recovery)),
             sent_at_ms: now,
             delivery_id: Some(delivery.id),
-            arrived_late_at_ms: stored.arrived_late_at_ms,
+            late: stored.arrived_late_at_ms.map(|arrived_at_ms| Late {
+                detected_at_ms: stored.outage_started_at_ms.unwrap_or(stored.started_at_ms),
+                arrived_at_ms,
+            }),
             test: false,
         }
     }

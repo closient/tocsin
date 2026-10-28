@@ -218,10 +218,13 @@ alert on the nodes listed in `[federation] alert_order`
 ([config.md](config.md)), and on no other. A node opens an alert for a
 pushed outage only while every node ahead of it in the list is down as it
 sees them: its `node:<id>` liveness heartbeat is not confirmed up, which
-includes a node it has never heard from. Behind a node that is up, it
-re-fires only alerts it already fired, so a hub that comes back does not
-page twice for what its backup already sent. The alert's identity names
-the node that reported the outage, whichever node fires it.
+includes a node it has never heard from. The node that pushed the outage
+counts as up, as the push is word from it. Behind a node that is up, it
+opens no new alerts and re-fires only the ones it already has, so a backup
+stops paging for new outages once the node ahead of it is back. Nodes do
+not tell each other what they sent: a hub that comes back while an outage
+its backup paged for is still open pages for it too. The alert's identity
+names the node that reported the outage, whichever node fires it.
 
 Routes and silences apply as for a local outage. An outage that reaches
 this node already ended pages nobody. One that reaches it still open but

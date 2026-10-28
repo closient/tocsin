@@ -171,7 +171,11 @@ fn remote_alerting(
     else {
         return alerting;
     };
-    let opens_new = alert_order_ahead_is_down(state, &federation.alert_order[..position]);
+    let opens_new = alert_order_ahead_is_down(
+        state,
+        &federation.alert_order[..position],
+        batch.node_id.as_str(),
+    );
     let mut router: Option<Router> = None;
     for change in &batch.outages {
         let RemoteOutageChange::Open {
@@ -219,12 +223,14 @@ fn remote_alerting(
 }
 
 /// Whether every node in `ahead` is down as this node sees it: its
-/// `node:<id>` heartbeat unheard, or confirmed anything but up.
-fn alert_order_ahead_is_down(state: &AppState, ahead: &[Id]) -> bool {
+/// `node:<id>` heartbeat unheard, or confirmed anything but up. The node
+/// that sent the batch is up whatever its heartbeat says yet: the push is
+/// itself word from it, and its beat is recorded only after the batch.
+fn alert_order_ahead_is_down(state: &AppState, ahead: &[Id], pusher: &str) -> bool {
     let snapshot = state.live.snapshot();
     ahead
         .iter()
-        .all(|node| node_liveness(&snapshot, node) != Some(Health::Up))
+        .all(|node| node.as_str() != pusher && node_liveness(&snapshot, node) != Some(Health::Up))
 }
 
 /// The confirmed health of `node`'s `node:<id>` heartbeat in `snapshot`;

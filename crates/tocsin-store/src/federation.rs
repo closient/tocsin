@@ -713,16 +713,12 @@ fn alert_touched(
             (Some((open_id, true)), Some((id, origin_id, outage))) if open_id == id => {
                 let remote = alerting.get(&origin_id);
                 // Behind a node that is up, only the alerts this node
-                // already fired re-fire: it keeps every alert until it
-                // resolves, and opens none.
+                // already fired re-fire: `fire_alerts` re-fires every open
+                // alert whatever the targets, and with none opens nothing.
                 let routing = remote.map(|remote| {
                     let mut routing = remote.routing.clone();
                     if !remote.opens {
-                        routing.targets.retain(|target| {
-                            open_alerts
-                                .iter()
-                                .any(|alert| alert.notifier_id == target.notifier_id)
-                        });
+                        routing.targets.clear();
                     }
                     routing
                 });

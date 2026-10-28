@@ -455,7 +455,7 @@ fn alert(event: AlertEvent) -> Alert {
         ended_by: (event == AlertEvent::Resolve).then_some(tocsin_store::EndedBy::Recovery),
         sent_at_ms: now,
         delivery_id: None,
-        arrived_late_at_ms: None,
+        late: None,
         test: false,
     }
 }

@@ -87,7 +87,8 @@ pub struct RemoteAlerting {
     /// Where it goes.
     pub routing: AlertRouting,
     /// Whether it may open alerts: false while a node ahead of this one in
-    /// `alert_order` is up, when only the alerts it already fired re-fire.
+    /// `alert_order` is up, when only the alerts it already fired re-fire
+    /// until [`Store::take_over`](crate::Store::take_over) opens them.
     pub opens: bool,
     /// When this node heard of it, if that was late (unix milliseconds).
     pub arrived_late_at_ms: Option<i64>,
@@ -880,6 +881,73 @@ fn alert_touched(
             }
         }
     }
+    Ok(queued)
+}
+
+/// Opens alerts for the other nodes' outages this node holds open and
+/// alerted with no alert open yet, wherever `decide` says it now opens
+/// them: a node in `alert_order` taking over when the nodes ahead of it go
+/// down after the push arrived. A tocsin-kept heartbeat's outage is never
+/// taken over, as it never pages from a push. Returns the deliveries
+/// queued.
+pub(crate) fn take_over(
+    conn: &mut Connection,
+    local_node_id: &str,
+    decide: &dyn Fn(&NewOutage) -> RemoteAlerting,
+    now_ms: i64,
+) -> Result<usize> {
+    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let held: Vec<(i64, NewOutage)> = transaction
+        .prepare_cached(
+            "SELECT id, node_id, subject_kind, check_id, component_id, health, started_at
+             FROM outage
+             WHERE origin_store IS NOT NULL AND alerted AND ended_at IS NULL
+               AND node_id != ?1 AND instr(check_id, ':') = 0
+             ORDER BY id",
+        )?
+        .query_map([local_node_id], |row| {
+            Ok((
+                row.get(0)?,
+                NewOutage {
+                    node_id: row.get(1)?,
+                    subject_kind: rollup::parse_column(2, &row.get::<_, String>(2)?)?,
+                    check_id: row.get(3)?,
+                    component_id: row.get(4)?,
+                    health: rollup::parse_column(5, &row.get::<_, String>(5)?)?,
+                    started_at_ms: row.get(6)?,
+                    alerted: true,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut queued = 0;
+    for (id, outage) in &held {
+        let identity = Identity {
+            node_id: outage.node_id.clone(),
+            subject_kind: outage.subject_kind,
+            subject_id: outage.check_id.clone(),
+        };
+        if !alert::open_alerts(&transaction, &identity)?.is_empty() {
+            continue;
+        }
+        let remote = decide(outage);
+        if !remote.opens {
+            continue;
+        }
+        queued += alert::fire_alerts(
+            &transaction,
+            &FiringOutage {
+                id: *id,
+                open: outage,
+                identity: &identity,
+                arrived_late_at_ms: remote.arrived_late_at_ms,
+            },
+            &[],
+            Some(&remote.routing),
+            now_ms,
+        )?;
+    }
+    transaction.commit()?;
     Ok(queued)
 }
 

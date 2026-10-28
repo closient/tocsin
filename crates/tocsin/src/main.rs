@@ -36,6 +36,7 @@ mod serve;
 mod silence;
 mod slack;
 mod subscribers;
+mod takeover;
 #[cfg(test)]
 mod testing;
 mod web;

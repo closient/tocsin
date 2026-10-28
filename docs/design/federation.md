@@ -483,7 +483,12 @@ cuts the hub off from two of three locations yields "quorum lost", not
 alert for remote outages. A node alerts for a remote outage only while
 every node ahead of it in the list is down by its own liveness view; a
 node it has never heard from, or not within `push_interval` plus `grace`,
-counts as down.
+counts as down. The decision is taken again whenever a node ahead goes
+down: once every node ahead is down and at least one is confirmed so, the
+node opens alerts for the remote outages it holds open without one, so an
+outage pushed while the node ahead was up does not go unpaged when that
+node then dies. A node merely unheard cannot start this alone, or every
+restart would page for everything open.
 Spokes not in the list that push to a node in it never alert for their
 own checks and configured heartbeats (the hub does),
 so nobody is paged twice. A partition between the two hubs makes both

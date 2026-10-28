@@ -797,6 +797,83 @@ async fn an_outage_that_arrived_late_says_when() {
     assert_eq!(fired[0].outage_started_at_ms, Some(noon() - 3_600_000));
 }
 
+/// A node that took an outage while a node ahead was paging for it pages
+/// for it once asked to take over, once only, and only for another node's
+/// outage still open and alerted, on a subject that is not tocsin's own.
+#[tokio::test]
+async fn taking_over_opens_alerts_for_the_open_outages_left_to_a_node_ahead_once() {
+    let fixture = open();
+    let heartbeat = RemoteOutageChange::Open {
+        seq: 2,
+        origin_id: 2,
+        outage: NewOutage {
+            node_id: REMOTE.into(),
+            subject_kind: SubjectKind::Heartbeat,
+            check_id: "upstream:node-c".into(),
+            component_id: None,
+            health: Health::Down,
+            started_at_ms: noon() - 120_000,
+            alerted: true,
+        },
+    };
+    let mut ended = open_change(3, 3, noon() - 120_000);
+    if let RemoteOutageChange::Open { outage, .. } = &mut ended {
+        outage.check_id = "api".into();
+    }
+    let report = apply_alerting(
+        &fixture,
+        vec![
+            open_change(1, 1, noon() - 3_600_000),
+            heartbeat,
+            ended,
+            end_change(4, 3, noon() - 60_000),
+        ],
+        alerting(1, false, None),
+        noon(),
+    )
+    .await;
+    assert_eq!(report.alerts_queued, 0);
+
+    let take_over = |local: &str, opens: bool| {
+        fixture.store.take_over(
+            local.into(),
+            move |_: &NewOutage| RemoteAlerting {
+                opens,
+                ..alerting(1, true, Some(noon())).remove(&1).unwrap()
+            },
+            noon(),
+        )
+    };
+    assert_eq!(take_over(LOCAL, false).await.unwrap(), 0);
+    assert_eq!(take_over(REMOTE, true).await.unwrap(), 0);
+    assert_eq!(fixture.store.alerts().await.unwrap(), []);
+
+    assert_eq!(take_over(LOCAL, true).await.unwrap(), 1);
+    let fired = fixture.store.alerts().await.unwrap();
+    assert_eq!(fired.len(), 1);
+    assert_eq!(
+        (fired[0].node_id.as_str(), fired[0].subject_id.as_str()),
+        (REMOTE, "web")
+    );
+    assert_eq!(fired[0].notifier_id, "slack");
+    assert_eq!(fired[0].arrived_late_at_ms, Some(noon()));
+    assert_eq!(fired[0].outage_started_at_ms, Some(noon() - 3_600_000));
+
+    assert_eq!(take_over(LOCAL, true).await.unwrap(), 0);
+    assert_eq!(fixture.store.alerts().await.unwrap().len(), 1);
+
+    let report = apply_alerting(
+        &fixture,
+        vec![end_change(5, 1, noon() + 30_000)],
+        BTreeMap::new(),
+        noon() + 60_000,
+    )
+    .await;
+    assert_eq!(report.alerts_queued, 1);
+    let resolved = fixture.store.alerts().await.unwrap();
+    assert_eq!(resolved[0].ended_at_ms, Some(noon() + 30_000));
+}
+
 /// The store a rebuilt node pushes from: its database is new.
 const REBUILT: &str = "fedcba9876543210fedcba9876543210";
 

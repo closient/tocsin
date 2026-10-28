@@ -39,6 +39,7 @@ fn test_alert(configuration: &Config, started: i64) -> Alert {
         ended_by: None,
         sent_at_ms: started,
         delivery_id: None,
+        late: None,
         test: true,
     }
 }

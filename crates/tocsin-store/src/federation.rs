@@ -6,12 +6,15 @@
 //! origin, so a batch merges by set union plus one monotone step (an outage
 //! ending), and applying one twice changes nothing.
 
+use std::collections::BTreeMap;
+
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use tocsin_core::Health;
 use tocsin_core::federation::wire;
 use tocsin_core::incident::{FieldError, Timestamp};
 use tocsin_core::status::OutageEnding;
 
+use crate::alert::{self, AlertRouting, EndedBy, FiringOutage, Identity};
 use crate::day::Day;
 use crate::error::{Error, Result};
 use crate::rollup::{self, DailyRollup};
@@ -76,6 +79,20 @@ impl RemoteOutageChange {
     }
 }
 
+/// How this node alerts for an outage a batch opens, decided by the
+/// receiver before the batch is applied (`docs/design/federation.md`, "Who
+/// pages"). An open outage with none fires nothing new.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoteAlerting {
+    /// Where it goes.
+    pub routing: AlertRouting,
+    /// Whether it may open alerts: false while a node ahead of this one in
+    /// `alert_order` is up, when only the alerts it already fired re-fire.
+    pub opens: bool,
+    /// When this node heard of it, if that was late (unix milliseconds).
+    pub arrived_late_at_ms: Option<i64>,
+}
+
 /// What applying a batch did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BatchReport {
@@ -93,6 +110,8 @@ pub struct BatchReport {
     pub outages_through: Option<i64>,
     /// Rollups written.
     pub rollups_applied: usize,
+    /// Alert deliveries queued: fires, resolves and cancels.
+    pub alerts_queued: usize,
     /// The earliest time a row more than [`FUTURE_TOLERANCE`](crate::FUTURE_TOLERANCE) ahead of
     /// this node's clock says it happened (unix milliseconds), if any. Such
     /// a result or outage change and the rest of its kind wait, unapplied,
@@ -265,6 +284,7 @@ pub(crate) fn apply_batch(
     conn: &mut Connection,
     batch: &RemoteBatch,
     local_node_id: &str,
+    alerting: &BTreeMap<i64, RemoteAlerting>,
     now_ms: i64,
 ) -> Result<BatchReport> {
     let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -277,7 +297,8 @@ pub(crate) fn apply_batch(
     let horizon_ms = future_horizon_ms(now_ms);
     let mut report = BatchReport::default();
     apply_results(&transaction, &origin, horizon_ms, &mut report)?;
-    apply_outages(&transaction, &origin, horizon_ms, &mut report)?;
+    let touched = apply_outages(&transaction, &origin, horizon_ms, &mut report)?;
+    report.alerts_queued = alert_touched(&transaction, &touched, alerting, now_ms)?;
     apply_rollups(&transaction, &batch.rollups, horizon_ms, &mut report)?;
     transaction.commit()?;
     Ok(report)
@@ -569,12 +590,25 @@ fn stored_outage(conn: &Connection, store: i64, origin_id: i64) -> Result<Option
         .optional()?)
 }
 
-fn apply_outages(
+/// An alert identity a batch's outage changes touched.
+struct Touched<'a> {
+    identity: Identity,
+    /// The last outage the batch opened for it: its row here, its
+    /// `origin_id`, and the outage.
+    opened: Option<(i64, i64, &'a NewOutage)>,
+    /// When the last outage the batch ended for it ended.
+    ended_at_ms: Option<i64>,
+}
+
+/// Applies the batch's outage changes in order, and returns the alert
+/// identities they touched.
+fn apply_outages<'a>(
     conn: &Connection,
-    origin: &Origin<'_>,
+    origin: &Origin<'a>,
     horizon_ms: i64,
     report: &mut BatchReport,
-) -> Result<()> {
+) -> Result<Vec<Touched<'a>>> {
+    let mut touched: BTreeMap<Identity, Touched<'a>> = BTreeMap::new();
     // The highest seq of this store's already here: a new change below it
     // arrived out of order.
     let mut high_seq: i64 = conn.query_row(
@@ -597,7 +631,14 @@ fn apply_outages(
                 seq,
                 origin_id,
                 outage,
-            } => open_outage(conn, origin, index, *seq, *origin_id, outage, high_seq)?,
+            } => open_outage(conn, origin, index, *seq, *origin_id, outage, high_seq)?.map(|id| {
+                let identity = Identity {
+                    node_id: outage.node_id.clone(),
+                    subject_kind: outage.subject_kind,
+                    subject_id: outage.check_id.clone(),
+                };
+                touch(&mut touched, identity).opened = Some((id, *origin_id, outage));
+            }),
             RemoteOutageChange::End {
                 seq,
                 origin_id,
@@ -605,16 +646,104 @@ fn apply_outages(
                 ending,
             } => {
                 let end = (*seq, *ended_at_ms, *ending);
-                end_outage(conn, origin, index, *origin_id, end, high_seq)?
+                match end_outage(conn, origin, index, *origin_id, end, high_seq)? {
+                    Some(id) => {
+                        let identity = alert::outage_identity(conn, id, false)?
+                            .ok_or(Error::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+                        touch(&mut touched, identity).ended_at_ms = Some(*ended_at_ms);
+                        Some(())
+                    }
+                    None => None,
+                }
             }
         };
-        if applied {
+        if applied.is_some() {
             report.outage_changes_applied += 1;
             high_seq = change.seq();
         }
         report.outages_through = Some(change.seq());
     }
-    Ok(())
+    Ok(touched.into_values().collect())
+}
+
+/// The entry for `identity` in `touched`, made if it is not there yet.
+fn touch<'m, 'a>(
+    touched: &'m mut BTreeMap<Identity, Touched<'a>>,
+    identity: Identity,
+) -> &'m mut Touched<'a> {
+    touched.entry(identity.clone()).or_insert_with(|| Touched {
+        identity,
+        opened: None,
+        ended_at_ms: None,
+    })
+}
+
+/// Fires or resolves the alerts of every identity the batch's outage
+/// changes touched, now that all of them are applied: an identity whose
+/// open outage the batch opened, and which alerts, fires as `alerting`
+/// routes it; one with nothing open, or nothing that alerts, resolves. So
+/// an outage that opened and ended in the same batch, one that arrived
+/// already ended, never fires, and an alert that fired for one ended in a
+/// later batch resolves with the same identity. Returns the deliveries
+/// queued.
+fn alert_touched(
+    conn: &Connection,
+    touched: &[Touched<'_>],
+    alerting: &BTreeMap<i64, RemoteAlerting>,
+    now_ms: i64,
+) -> Result<usize> {
+    let mut queued = 0;
+    for entry in touched {
+        let open_alerts = alert::open_alerts(conn, &entry.identity)?;
+        let open: Option<(i64, bool)> = conn
+            .prepare_cached(
+                "SELECT id, alerted FROM outage
+                 WHERE subject_kind = ?1 AND check_id = ?2 AND node_id = ?3 AND ended_at IS NULL",
+            )?
+            .query_row(
+                params![
+                    entry.identity.subject_kind.as_str(),
+                    entry.identity.subject_id,
+                    entry.identity.node_id
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match (open, entry.opened) {
+            (Some((open_id, true)), Some((id, origin_id, outage))) if open_id == id => {
+                let remote = alerting.get(&origin_id);
+                // Behind a node that is up, only the alerts this node
+                // already fired re-fire: `fire_alerts` re-fires every open
+                // alert whatever the targets, and with none opens nothing.
+                let routing = remote.map(|remote| {
+                    let mut routing = remote.routing.clone();
+                    if !remote.opens {
+                        routing.targets.clear();
+                    }
+                    routing
+                });
+                queued += alert::fire_alerts(
+                    conn,
+                    &FiringOutage {
+                        id,
+                        open: outage,
+                        identity: &entry.identity,
+                        arrived_late_at_ms: remote.and_then(|remote| remote.arrived_late_at_ms),
+                    },
+                    &open_alerts,
+                    routing.as_ref(),
+                    now_ms,
+                )?;
+            }
+            (Some((_, true)), _) => {}
+            _ => {
+                let ended_at_ms = entry.ended_at_ms.unwrap_or(now_ms);
+                queued +=
+                    alert::end_alerts(conn, &open_alerts, ended_at_ms, now_ms, EndedBy::Recovery)?;
+            }
+        }
+    }
+    Ok(queued)
 }
 
 fn out_of_order(index: usize, seq: i64, high_seq: i64) -> Error {
@@ -624,8 +753,8 @@ fn out_of_order(index: usize, seq: i64, high_seq: i64) -> Error {
     )])
 }
 
-/// Stores an opened outage unless the store already sent it. Returns
-/// whether it was stored.
+/// Stores an opened outage unless the store already sent it. Returns its
+/// row if it was stored now.
 fn open_outage(
     conn: &Connection,
     origin: &Origin<'_>,
@@ -634,7 +763,7 @@ fn open_outage(
     origin_id: i64,
     outage: &NewOutage,
     high_seq: i64,
-) -> Result<bool> {
+) -> Result<Option<i64>> {
     if let Some(stored) = stored_outage(conn, origin.row, origin_id)? {
         let same = stored.node_id == outage.node_id
             && stored.subject_kind == outage.subject_kind.as_str()
@@ -645,7 +774,7 @@ fn open_outage(
             && stored.alerted == outage.alerted
             && stored.opened_seq == Some(seq);
         return if same {
-            Ok(false)
+            Ok(None)
         } else {
             Err(origin.conflict(origin_id, "was opened differently before"))
         };
@@ -690,11 +819,11 @@ fn open_outage(
         origin.row,
         origin_id,
     ])?;
-    Ok(true)
+    Ok(Some(conn.last_insert_rowid()))
 }
 
 /// Ends an outage the store opened, unless it already ended the same way.
-/// Returns whether it was ended now.
+/// Returns its row if it was ended now.
 fn end_outage(
     conn: &Connection,
     origin: &Origin<'_>,
@@ -702,7 +831,7 @@ fn end_outage(
     origin_id: i64,
     (seq, ended_at_ms, ending): (i64, i64, OutageEnding),
     high_seq: i64,
-) -> Result<bool> {
+) -> Result<Option<i64>> {
     let Some(stored) = stored_outage(conn, origin.row, origin_id)? else {
         return Err(Error::Invalid(vec![FieldError::new(
             format!("outages[{index}].origin_id"),
@@ -714,7 +843,7 @@ fn end_outage(
             && stored.ending.as_deref() == Some(ending.as_str())
             && stored.ended_seq == Some(seq);
         return if same {
-            Ok(false)
+            Ok(None)
         } else {
             Err(origin.conflict(origin_id, "already ended differently"))
         };
@@ -735,7 +864,7 @@ fn end_outage(
         "UPDATE outage SET ended_at = ?2, ending = ?3, ended_seq = ?4 WHERE id = ?1",
     )?
     .execute(params![stored.id, ended_at_ms, ending.as_str(), seq])?;
-    Ok(true)
+    Ok(Some(stored.id))
 }
 
 /// Upserts the origin's rollups, days before the watermark included. A

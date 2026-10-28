@@ -52,6 +52,7 @@ fn alert(event: AlertEvent) -> Alert {
         ended_by: resolve.then_some(EndedBy::Recovery),
         sent_at_ms: if resolve { ENDED } else { STARTED },
         delivery_id: Some(if resolve { 2 } else { 1 }),
+        late: None,
         test: false,
     }
 }

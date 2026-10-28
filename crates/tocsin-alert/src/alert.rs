@@ -74,8 +74,21 @@ pub struct Alert {
     pub sent_at_ms: i64,
     /// The outbox row this message came from; `None` for a test message.
     pub delivery_id: Option<i64>,
+    /// When another node saw the outage and when word of it reached this
+    /// node, if that was late: every message then says the outage is older
+    /// than the page.
+    pub late: Option<Late>,
     /// Whether `tocsin notify test` sent it.
     pub test: bool,
+}
+
+/// Another node's outage that reached this node late.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Late {
+    /// When the node that saw it detected it (unix milliseconds).
+    pub detected_at_ms: i64,
+    /// When word of it reached this node (unix milliseconds).
+    pub arrived_at_ms: i64,
 }
 
 impl Alert {
@@ -176,6 +189,16 @@ impl Alert {
                 let _ = write!(body, "{name} is {} since {since}.", self.health);
             }
         }
+        if let Some(late) = self.late {
+            let _ = write!(
+                body,
+                "\nReported late: {} saw it at {}, and word reached this node at {} ({} later).",
+                self.node_id,
+                timestamp(late.detected_at_ms),
+                timestamp(late.arrived_at_ms),
+                human_duration(late.arrived_at_ms.saturating_sub(late.detected_at_ms))
+            );
+        }
         if let Some(component) = &self.component_id {
             let label = self.component_name.as_deref().unwrap_or(component);
             let _ = write!(body, "\nComponent: {}", one_line(label));
@@ -270,6 +293,7 @@ mod tests {
             ended_by: (event == AlertEvent::Resolve).then_some(EndedBy::Recovery),
             sent_at_ms: 1_800_000_090_000,
             delivery_id: Some(7),
+            late: None,
             test: false,
         }
     }
@@ -297,6 +321,31 @@ mod tests {
         let body = alert(AlertEvent::Resolve).body();
         assert!(body.contains("after 1m 30s"), "{body}");
         assert!(body.contains("Alert: node-a/check/api"), "{body}");
+    }
+
+    #[test]
+    fn every_message_of_an_outage_that_arrived_late_says_when_the_node_saw_it() {
+        // The node saw it a minute before this alert's own start: a re-fire
+        // keeps the alert's start, and the notice names the outage's.
+        let late = Some(Late {
+            detected_at_ms: 1_799_999_940_000,
+            arrived_at_ms: 1_800_000_600_000,
+        });
+        for event in [AlertEvent::Fire, AlertEvent::Repeat, AlertEvent::Resolve] {
+            let body = Alert {
+                late,
+                ..alert(event)
+            }
+            .body();
+            assert!(
+                body.contains(
+                    "Reported late: node-a saw it at 2027-01-15 07:59:00 UTC, and word reached \
+                     this node at 2027-01-15 08:10:00 UTC (11m later)."
+                ),
+                "{event:?}: {body}"
+            );
+            assert!(!alert(event).body().contains("Reported late"), "{event:?}");
+        }
     }
 
     #[test]

@@ -217,6 +217,29 @@ pub struct NodeStatus {
     /// Its last push since the receiver started, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_push: Option<LastPush>,
+    /// Its liveness heartbeat (`node:<id>`) as the receiver has confirmed
+    /// it: `up` while its pushes arrive within `push_interval + grace`;
+    /// `null` until confirmed, and for the receiver itself.
+    pub liveness: Option<Health>,
+    /// Each configured check it has pushed results or outages for, in
+    /// configuration order; empty for the receiver itself.
+    #[serde(default)]
+    pub checks: Vec<RemoteCheck>,
+}
+
+/// One of a node's checks, as the receiver last heard of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RemoteCheck {
+    /// The check's id.
+    pub id: String,
+    /// Its confirmed health on that node: from its open outage, else `up`
+    /// once it has an `up` result. `null` until then, and whenever the
+    /// node's liveness is not `up`, since its last word may be stale.
+    pub health: Option<Health>,
+    /// Since when it has had that health.
+    pub since: Option<Timestamp>,
+    /// When its latest result received here started.
+    pub last_result_at: Option<Timestamp>,
 }
 
 /// One of a node's stores, as the receiver keeps it.

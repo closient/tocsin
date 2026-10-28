@@ -18,7 +18,7 @@ pub mod notifiers;
 pub mod route;
 pub mod worker;
 
-pub use alert::{Alert, AlertEvent};
+pub use alert::{Alert, AlertEvent, Late};
 pub use history::AlertingHistory;
 pub use mail::{Mailer, Outgoing};
 pub use metrics::AlertMetrics;

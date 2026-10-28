@@ -441,6 +441,7 @@ partial unique index (`alert_open`) allows at most one open alert
 | `attempted` | integer | 1 once a fire or repeat send was started, set before the request goes out, whatever its outcome; never less than `notified`. While it is 0 a silence holds back the resolve and a pending cancel is deleted. Added by 0014; older rows are 1. |
 | `labels`, `annotations` | text | JSON objects of strings: the subject's configured labels and annotations when the alert opened. Every message of the alert sends these, so a reload never changes its Alertmanager identity mid-episode. Added by 0015; older rows are `{}`. |
 | `ended_by` | text | Null while it fires, else `recovery` (its outage recovered) or `config` (its check, heartbeat or notifier was removed from the configuration); set with `ended_at`. Its resolve says which. Added by 0016; alerts that ended before it are null and read as `recovery`. |
+| `arrived_late_at` | integer | When this node heard of another node's outage, if it heard late: more than that node's `push_interval` and `grace` (plus the time a check takes to confirm) after the node detected it. Its messages say when the node detected it and that it arrived late. Null otherwise, and for every alert on this node's own checks. Added by 0021. |
 
 An `alert_delivery` is one message to send: `kind` (`fire`, `repeat`,
 `resolve` or `cancel`), the `health` it reports, `status` (`pending`,

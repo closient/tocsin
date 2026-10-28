@@ -301,7 +301,13 @@ heard from, and what its latest push said (`last_push`: when it was sent
 and taken, the clock offset between them, the rows it had yet to push, and
 its configuration digest). `last_push` is kept in memory, so it is absent
 after a restart until the node pushes again; the stores are in the
-database. The same offset and backlog are on `/metrics` as
+database. For every node but this server, `liveness` is its liveness
+heartbeat (`up` while its pushes arrive within `push_interval` plus
+`grace`; `null` until confirmed), and `checks` lists each check it has
+reported, with the `health` and `since` its outages and results give and
+when its latest result was taken (`last_result_at`). While the node is
+not `up`, every check's `health` and `since` are `null`: unknown, never
+its last state. The internal board shows the same list. The same offset and backlog are on `/metrics` as
 `tocsin_node_clock_offset_seconds` and `tocsin_node_backlog_rows`.
 
 ## `/llms.txt`

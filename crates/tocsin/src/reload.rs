@@ -1034,6 +1034,25 @@ values = ["false", "true"]
     }
 
     #[tokio::test]
+    async fn a_reload_keeps_watching_the_nodes_that_push_here() {
+        let (target, _accepting) = target().await;
+        let mut served = Served::start(&target).await;
+        let federated = format!(
+            "[server]\nnode_id = \"{node}\"\n\n[[node]]\nid = \"{node}\"\nurl = \"https://hub.example.com\"\n\
+             public_keys = [\"{key}\"]\n\n[[node]]\nid = \"spoke\"\npublic_keys = [\"{spoke}\"]\npush_to = [\"{node}\"]\n\n\
+             [federation]\ndefault_nodes = [\"{node}\"]\n",
+            node = served.node,
+            key = tocsin_core::federation::NodeKey::from_seed([2; 32]).public_key(),
+            spoke = tocsin_core::federation::NodeKey::from_seed([3; 32]).public_key(),
+        );
+        let status = served.change("push.toml", Some(&federated)).await;
+        assert!(status.ok, "{status:?}");
+        let monitor = served.reloader.into_monitor().await;
+        assert!(monitor.heartbeats().knows("node:spoke"));
+        monitor.stop().await;
+    }
+
+    #[tokio::test]
     async fn the_status_page_follows_a_reload() {
         let (target, _accepting) = target().await;
         let mut served = Served::start(&target).await;

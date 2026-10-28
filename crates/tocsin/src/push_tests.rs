@@ -812,6 +812,20 @@ async fn an_upstream_that_refuses_pushes_goes_down_on_the_spoke_until_it_takes_t
         resolved(&spoke.store, "spoke", "upstream:hub")
     })
     .await;
+    // The hub takes the spoke's liveness rows like any other: an ingest
+    // that refused a colon in an id would refuse every push after one.
+    eventually("the hub holds the spoke's ended outage of it", || async {
+        hub.read()
+            .query_row(
+                "SELECT count(*) FROM outage WHERE node_id = 'spoke'
+                 AND check_id = 'upstream:hub' AND ended_at IS NOT NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0
+    })
+    .await;
     pushers.stop().await;
     monitor.stop().await;
 }

@@ -11,7 +11,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use serde_json::{Value, json};
 use tocsin_core::Health;
-use tocsin_core::config::{Environment, Source};
+use tocsin_core::config::{Config, Environment, Id, Source};
 use tocsin_core::incident::Timestamp;
 use tocsin_engine::HeartbeatHandle;
 use tocsin_store::{NewOutage, Store, SubjectKind};
@@ -63,12 +63,17 @@ struct Api {
 }
 
 fn api() -> Api {
+    api_with(|_| ())
+}
+
+/// [`api`], its configuration changed by `change` first.
+fn api_with(change: impl FnOnce(&mut Config)) -> Api {
     let variable = |name: &str| match name {
         "PAGER_TOKEN" => Some(PAGER.to_owned()),
         "READER_TOKEN" => Some(READER.to_owned()),
         _ => None,
     };
-    let config = tocsin_core::config::load(
+    let mut config = tocsin_core::config::load(
         &[Source {
             name: "tocsin.toml".into(),
             text: Ok(CONFIG.into()),
@@ -80,6 +85,7 @@ fn api() -> Api {
         },
     )
     .unwrap();
+    change(&mut config);
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join(tocsin_store::DB_FILE)).unwrap();
     let state = AppState {
@@ -240,6 +246,29 @@ async fn a_silence_records_the_token_that_made_it() {
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(read, silence);
+}
+
+/// A node taken down on purpose: its liveness heartbeat, which no file
+/// names, can still be silenced, and one this node keeps no watch for
+/// cannot.
+#[tokio::test]
+async fn a_silence_can_name_a_liveness_heartbeat() {
+    let api = api_with(|config| {
+        let mut watch = config.heartbeats[0].clone();
+        watch.id = Id::synthetic("node", &Id::parse("spoke").unwrap());
+        config.heartbeats.push(watch);
+    });
+    let silence = |subject: &str| {
+        json!({
+            "matchers": {"subject": subject},
+            "expires_at": from_now(30),
+            "reason": "moving the spoke",
+        })
+    };
+    let (status, body) = api.create(silence("node:spoke")).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = api.create(silence("node:elsewhere")).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
 }
 
 #[tokio::test]

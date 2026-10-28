@@ -15,6 +15,7 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Method, Request, StatusCode, header};
 use serde_json::Value;
+use tocsin_alert::{AlertingHistory, Router as AlertRouter};
 use tocsin_core::Health;
 use tocsin_core::config::{Environment, Source};
 use tocsin_core::federation::NodeKey;
@@ -24,8 +25,9 @@ use tocsin_core::federation::wire::{
 use tocsin_core::incident::Timestamp;
 use tocsin_core::state::Confirmed;
 use tocsin_core::status::{CheckKind, OutageEnding};
+use tocsin_engine::ports::{History, SystemClock};
 use tocsin_engine::{CheckSnapshot, HeartbeatHandle, MemberKind, Ping, Snapshot};
-use tocsin_store::{RemoteStore, Store};
+use tocsin_store::{NewCheckResult, NewOutage, OutageChange, RemoteStore, Store, SubjectKind};
 use tower::ServiceExt;
 
 use super::events::EventBus;
@@ -989,6 +991,11 @@ async fn the_public_reads_a_quorum_checks_outages_under_the_quorum_alone() {
 /// engine confirms that heartbeat, and the hub takes over when it goes
 /// down.
 async fn api_watching_first() -> (Api, Monitor) {
+    api_watching_first_in(tempfile::tempdir().unwrap()).await
+}
+
+/// [`api_watching_first`] over the database in `dir`.
+async fn api_watching_first_in(dir: tempfile::TempDir) -> (Api, Monitor) {
     let text = alerting_config_text().replace(
         "url = \"https://first.example.com\"\n",
         &format!(
@@ -998,7 +1005,6 @@ async fn api_watching_first() -> (Api, Monitor) {
     );
     let mut config = load(text);
     crate::liveness::watch(&mut config, []);
-    let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(&dir.path().join(tocsin_store::DB_FILE)).unwrap());
     let events = EventBus::new();
     let metrics = Arc::new(crate::metrics::Metrics::new());
@@ -1150,5 +1156,62 @@ async fn the_node_ahead_going_down_again_does_not_page_twice() {
     api.first_goes(Health::Down).await;
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert_eq!(api.spokes_alerts().await.len(), 1);
+    monitor.stop().await;
+}
+
+#[tokio::test]
+async fn a_node_restarted_while_the_node_ahead_is_down_takes_over_at_start() {
+    let (api, monitor) = api_watching_first().await;
+    api.first_goes(Health::Up).await;
+    let mut sent = batch();
+    sent.outages = vec![open(1, 7, ago(5))];
+    let (status, receipt) = api.push(&sent).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(api.spokes_alerts().await, []);
+    monitor.stop().await;
+
+    // `first` goes down while the hub is stopped: the restarted engine
+    // resumes `node:first` down without a change to react to.
+    let Api { dir, state, router } = api;
+    drop(router);
+    let history = AlertingHistory::new(
+        Arc::clone(&state.store),
+        Arc::new(AlertRouter::new(&state.config)),
+        Arc::default(),
+        Arc::new(SystemClock),
+    );
+    let down_at_ms = tocsin_store::now_ms();
+    let down = NewCheckResult {
+        node_id: "hub".into(),
+        check_id: "node:first".into(),
+        started_at_ms: down_at_ms,
+        duration_ms: 0,
+        health: Health::Down,
+        detail: None,
+        error: None,
+        status_code: None,
+    };
+    let opened = OutageChange {
+        end: None,
+        open: Some(NewOutage {
+            node_id: "hub".into(),
+            subject_kind: SubjectKind::Heartbeat,
+            check_id: "node:first".into(),
+            component_id: None,
+            health: Health::Down,
+            started_at_ms: down_at_ms,
+            alerted: true,
+        }),
+    };
+    history
+        .record(down, SubjectKind::Heartbeat, Some(opened))
+        .await
+        .unwrap();
+    drop((history, state));
+
+    let (api, monitor) = api_watching_first_in(dir).await;
+    let fired = api.taken_over().await;
+    assert_eq!(fired.len(), 1);
+    assert_eq!(fired[0].subject_id, "api-port");
     monitor.stop().await;
 }

@@ -68,11 +68,11 @@ struct Subject {
 pub struct Router {
     /// Each check and heartbeat by kind and id, as an alert's identity
     /// names its subject.
-    subjects: HashMap<(SubjectKind, String), Subject>,
+    subjects: Subjects,
     /// Each `quorum:<check>` heartbeat's check and its component: routes
     /// match the heartbeat as they would the check, so a route for the
     /// check also carries the alert that its quorum was lost.
-    quorum: HashMap<String, (String, Option<String>)>,
+    quorum: QuorumChecks,
     components: HashMap<String, (String, Option<String>)>,
     notifier_types: HashMap<String, NotifierType>,
     /// Each Pushover notifier's priorities, which say what keeps ringing.
@@ -104,43 +104,56 @@ fn millis(duration: Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
+/// Each check and heartbeat by kind and id, with the name and labels its
+/// alerts carry.
+type Subjects = HashMap<(SubjectKind, String), Subject>;
+
+/// Each `quorum:<check>` heartbeat's check and that check's component.
+type QuorumChecks = HashMap<String, (String, Option<String>)>;
+
+/// The [`Subjects`] and [`QuorumChecks`] of `config`.
+fn subjects(config: &config::Config) -> (Subjects, QuorumChecks) {
+    let mut subjects = HashMap::new();
+    let mut quorum = HashMap::new();
+    for heartbeat in &config.heartbeats {
+        let id = heartbeat.id.as_str().to_owned();
+        let subject = Subject {
+            name: heartbeat.name.clone().unwrap_or_else(|| id.clone()),
+            labels: pinned_labels(
+                &heartbeat.labels,
+                heartbeat.class,
+                heartbeat.topology_node.as_ref(),
+            ),
+            annotations: heartbeat.annotations.clone(),
+        };
+        if let Some(check) = config.quorum_check_of(&id) {
+            quorum.insert(
+                id.clone(),
+                (
+                    check.id.as_str().to_owned(),
+                    check.component.as_ref().map(|id| id.as_str().to_owned()),
+                ),
+            );
+        }
+        subjects.insert((SubjectKind::Heartbeat, id), subject);
+    }
+    for check in &config.checks {
+        let id = check.id.as_str().to_owned();
+        let subject = Subject {
+            name: check.name.clone().unwrap_or_else(|| id.clone()),
+            labels: pinned_labels(&check.labels, check.class, check.topology_node.as_ref()),
+            annotations: check.annotations.clone(),
+        };
+        subjects.insert((SubjectKind::Check, id), subject);
+    }
+    (subjects, quorum)
+}
+
 impl Router {
     /// The router for a loaded configuration.
     #[must_use]
     pub fn new(config: &config::Config) -> Self {
-        let mut subjects = HashMap::new();
-        let mut quorum = HashMap::new();
-        for heartbeat in &config.heartbeats {
-            let id = heartbeat.id.as_str().to_owned();
-            let subject = Subject {
-                name: heartbeat.name.clone().unwrap_or_else(|| id.clone()),
-                labels: pinned_labels(
-                    &heartbeat.labels,
-                    heartbeat.class,
-                    heartbeat.topology_node.as_ref(),
-                ),
-                annotations: heartbeat.annotations.clone(),
-            };
-            if let Some(check) = config.quorum_check_of(&id) {
-                quorum.insert(
-                    id.clone(),
-                    (
-                        check.id.as_str().to_owned(),
-                        check.component.as_ref().map(|id| id.as_str().to_owned()),
-                    ),
-                );
-            }
-            subjects.insert((SubjectKind::Heartbeat, id), subject);
-        }
-        for check in &config.checks {
-            let id = check.id.as_str().to_owned();
-            let subject = Subject {
-                name: check.name.clone().unwrap_or_else(|| id.clone()),
-                labels: pinned_labels(&check.labels, check.class, check.topology_node.as_ref()),
-                annotations: check.annotations.clone(),
-            };
-            subjects.insert((SubjectKind::Check, id), subject);
-        }
+        let (subjects, quorum) = subjects(config);
         let components = config
             .components
             .iter()

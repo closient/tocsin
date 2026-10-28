@@ -112,7 +112,7 @@ fn push(history: &Arc<FakeHistory>, runner: &Arc<FakeRunner>, spokes: Vec<Spoke>
     let clock = Arc::clone(&runner.clock);
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(10));
-        for round in 0.. {
+        for round in 0..usize::MAX {
             tick.tick().await;
             let now = clock.now_ms();
             for &(node, health, rounds) in &spokes {

@@ -496,7 +496,7 @@ enum Spec {
     Check(Arc<CompiledCheck>, Role),
     /// A heartbeat, and when it may open an alert: a `quorum:<check>`
     /// heartbeat alerts when its evaluation would.
-    Heartbeat(Heartbeat, Gate),
+    Heartbeat(Box<Heartbeat>, Gate),
     /// A quorum check's state, derived from its nodes' results.
     Quorum(Arc<QuorumPlan>),
 }
@@ -566,7 +566,7 @@ impl Spec {
                     .get(heartbeat.id.as_str())
                     .cloned()
                     .unwrap_or(Gate::Open);
-                Spec::Heartbeat(heartbeat.clone(), gate)
+                Spec::Heartbeat(Box::new(heartbeat.clone()), gate)
             }))
             .chain(plan.quorums.iter().cloned().map(Spec::Quorum))
             .collect()
@@ -722,12 +722,27 @@ impl Run {
                 run.allowance_ms = allowance_ms(heartbeat);
                 run.deadline_ms = anchor_ms.saturating_add(run.allowance_ms);
                 run.retry = None;
-                run.heartbeat = Box::new(heartbeat.clone());
+                run.heartbeat.clone_from(heartbeat);
                 Run::Heartbeat(run)
             }
             (run, _) => run,
         }
     }
+}
+
+/// What `specs` run, as `(node, kind, id)`: the outages left open under
+/// anything else are orphans.
+fn running(specs: &[Spec], node_id: &str) -> HashSet<(String, SubjectKind, String)> {
+    specs
+        .iter()
+        .map(|spec| {
+            (
+                spec.node(node_id).to_owned(),
+                subject_kind(spec.kind()),
+                spec.id(),
+            )
+        })
+        .collect()
 }
 
 /// Moves `members` to `plan`; see [`Engine::reconcile`].
@@ -800,17 +815,7 @@ async fn reconcile(
     }
     let mut handed_back = stop(members, removed.iter().chain(&changed_keys)).await;
 
-    let running: HashSet<(String, SubjectKind, String)> = specs
-        .iter()
-        .map(|spec| {
-            (
-                spec.node(&shared.node_id).to_owned(),
-                subject_kind(spec.kind()),
-                spec.id(),
-            )
-        })
-        .collect();
-    withdraw_orphans(shared, &running).await;
+    withdraw_orphans(shared, &running(&specs, &shared.node_id)).await;
 
     let start_ms = shared.parts.clock.now_ms();
     let mut runs = Vec::with_capacity(added.len() + changed.len());
@@ -1131,7 +1136,7 @@ fn new_run(
             let anchor = anchors.get(&tracker.id).copied();
             let anchor_ms = anchor.unwrap_or(start_ms);
             let run = HeartbeatRun {
-                heartbeat: Box::new(heartbeat.clone()),
+                heartbeat: heartbeat.clone(),
                 tracker,
                 allowance_ms,
                 deadline_ms: anchor_ms.saturating_add(allowance_ms),

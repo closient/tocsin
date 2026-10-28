@@ -589,6 +589,11 @@ impl<'a> Loader<'a> {
                 references.push(("component", component, heartbeat.origin.key("component")));
             }
         }
+        for (_, nodes, _, origin) in placed(items) {
+            for (index, node) in nodes.iter().enumerate() {
+                references.push(("node", node, origin.key("nodes").index(index)));
+            }
+        }
         for project in &items.projects {
             for (index, component) in project.value.components.iter().enumerate() {
                 references.push((
@@ -646,6 +651,7 @@ impl<'a> Loader<'a> {
             self.validate_server(server);
         }
         self.validate_federation(items);
+        self.validate_placement(items);
         self.validate_email_senders(items);
         if let Some(subscribers) = &items.subscribers {
             self.validate_subscribers(subscribers, items.server.as_ref());
@@ -1011,6 +1017,164 @@ impl<'a> Loader<'a> {
                     keys.insert(*key, (&value.id, at));
                 }
             }
+        }
+    }
+
+    /// Each check's and heartbeat's `nodes`, and each check's `quorum`
+    /// (docs/design/federation.md, "Placement" and "Multi-location checks
+    /// with a quorum").
+    fn validate_placement(&mut self, items: &Items) {
+        let Some(federation) = &items.federation else {
+            for (kind, item_nodes, quorum, origin) in placed(items) {
+                if !item_nodes.is_empty() {
+                    self.report(
+                        &origin.key("nodes"),
+                        format!("`nodes` places a {kind} in a federation, and no `[[node]]` is listed"),
+                        Some("list each server as a `[[node]]`, or remove `nodes`".to_owned()),
+                    );
+                }
+                if quorum.is_some() {
+                    self.report(
+                        &origin.key("quorum"),
+                        "`quorum` needs a check run on two or more `[[node]]`s",
+                        Some("list each server as a `[[node]]`, or remove `quorum`".to_owned()),
+                    );
+                }
+            }
+            return;
+        };
+        let default_nodes = &federation.value.default_nodes;
+        let retired: HashSet<&str> = items
+            .nodes
+            .iter()
+            .filter(|node| node.value.retired)
+            .map(|node| node.value.id.as_str())
+            .collect();
+        for (_, item_nodes, _, origin) in placed(items) {
+            let mut seen = HashSet::new();
+            for (index, id) in item_nodes.iter().enumerate() {
+                let at = origin.key("nodes").index(index);
+                if !seen.insert(id.as_str()) {
+                    self.report(&at, format!("`{id}` is listed twice"), None);
+                } else if retired.contains(id.as_str()) {
+                    self.report(&at, format!("node `{id}` is retired"), None);
+                }
+            }
+        }
+        for heartbeat in &items.heartbeats {
+            let named = &heartbeat.value.nodes;
+            let count = if named.is_empty() { default_nodes.len() } else { named.len() };
+            if count > 1 {
+                let origin = if named.is_empty() {
+                    heartbeat.origin.clone()
+                } else {
+                    heartbeat.origin.key("nodes")
+                };
+                self.report(
+                    &origin,
+                    format!(
+                        "heartbeat `{}` would be watched on {count} nodes, and a heartbeat is watched on exactly one",
+                        heartbeat.value.id
+                    ),
+                    Some(
+                        "name the node its job pings with `nodes = [\"<node>\"]`: two nodes watching one deadline would record two misses"
+                            .to_owned(),
+                    ),
+                );
+            }
+        }
+        for check in &items.checks {
+            self.validate_quorum(items, check);
+        }
+    }
+
+    /// A check's `quorum`, and that a quorum check's results converge on a
+    /// node that may alert for it, and on only one unless `alert_order`
+    /// says which pages.
+    fn validate_quorum(&mut self, items: &Items, check: &Item<Check>) {
+        let Some(federation) = &items.federation else {
+            return;
+        };
+        let value = &check.value;
+        let nodes = if value.nodes.is_empty() {
+            &federation.value.default_nodes
+        } else {
+            &value.nodes
+        };
+        if nodes.len() < 2 {
+            if value.quorum.is_some() {
+                self.report(
+                    &check.origin.key("quorum"),
+                    format!("`quorum` needs a check run on two or more nodes, and `{}` runs on one", value.id),
+                    Some("list the nodes it runs on in `nodes`, or remove `quorum`".to_owned()),
+                );
+            }
+            return;
+        }
+        if let Some(quorum) = value.quorum
+            && (quorum == 0 || usize::try_from(quorum).map_or(true, |quorum| quorum > nodes.len()))
+        {
+            self.report(
+                &check.origin.key("quorum"),
+                format!("`quorum` must be between 1 and the check's {} nodes", nodes.len()),
+                None,
+            );
+        }
+        let known = |id: &Id| items.nodes.iter().any(|node| node.value.id == *id);
+        if self.incomplete || !nodes.iter().all(known) {
+            return;
+        }
+        let evaluators: Vec<&Id> = items
+            .nodes
+            .iter()
+            .filter(|candidate| !candidate.value.retired)
+            .map(|candidate| &candidate.value.id)
+            .filter(|candidate| {
+                nodes.iter().all(|node| {
+                    node == *candidate
+                        || items.nodes.iter().any(|listed| {
+                            listed.value.id == *node && listed.value.push_to.contains(candidate)
+                        })
+                })
+            })
+            .collect();
+        let alert_order = &federation.value.alert_order;
+        let problem = if evaluators.is_empty() {
+            Some((
+                format!("no node receives the results of every node check `{}` runs on", value.id),
+                format!(
+                    "a quorum check's state is derived where its results converge: have {} push to one node",
+                    list(nodes)
+                ),
+            ))
+        } else if alert_order.is_empty() && evaluators.len() > 1 {
+            Some((
+                format!(
+                    "check `{}` is derived on {}, and each would alert for it",
+                    value.id,
+                    list(&evaluators)
+                ),
+                "list them in `[federation] alert_order`, which says which one pages".to_owned(),
+            ))
+        } else if !alert_order.is_empty() && !evaluators.iter().any(|node| alert_order.contains(node)) {
+            Some((
+                format!(
+                    "check `{}` is derived on {}, and none is in `alert_order`, so it would never alert",
+                    value.id,
+                    list(&evaluators)
+                ),
+                "add one of them to `[federation] alert_order`".to_owned(),
+            ))
+        } else {
+            None
+        };
+        if let Some((message, hint)) = problem {
+            let origin = if value.nodes.is_empty() {
+                check.origin.clone()
+            } else {
+                check.origin.key("nodes")
+            };
+            self.report(&origin, message, Some(hint));
         }
     }
 
@@ -2691,6 +2855,18 @@ fn edit_distance(left: &str, right: &str) -> usize {
         previous = current;
     }
     previous[right.len()]
+}
+
+/// Each check and heartbeat with what places it: its kind, its `nodes`, a
+/// check's `quorum` and where it was written.
+fn placed(items: &Items) -> impl Iterator<Item = (&'static str, &[Id], Option<u32>, &Origin)> {
+    let checks = items.checks.iter().map(|check| {
+        ("check", check.value.nodes.as_slice(), check.value.quorum, &check.origin)
+    });
+    let heartbeats = items.heartbeats.iter().map(|heartbeat| {
+        ("heartbeat", heartbeat.value.nodes.as_slice(), None, &heartbeat.origin)
+    });
+    checks.chain(heartbeats)
 }
 
 fn list<T: fmt::Display>(names: impl IntoIterator<Item = T>) -> String {

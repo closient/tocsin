@@ -14,6 +14,7 @@ mod colour;
 mod diagnostic;
 mod load;
 mod node;
+mod placement;
 mod notifier;
 mod slack;
 mod subscribers;
@@ -513,6 +514,11 @@ pub struct Heartbeat {
     /// `interval + grace` passes without one.
     #[serde(default = "default_grace")]
     pub grace: Duration,
+    /// The one `[[node]]` that watches this heartbeat's deadline, the one
+    /// its job pings; without it, `[federation] default_nodes`, which must
+    /// then name exactly one node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<Id>,
     /// Links shown with the heartbeat, such as the job's logs or runbook,
     /// each a `[[heartbeat.link]]` table.
     #[serde(default, rename = "link", skip_serializing_if = "Vec::is_empty")]

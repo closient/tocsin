@@ -189,19 +189,26 @@ impl Config {
     }
 
     /// Whether `[federation] alert_order` names other nodes but not
-    /// `node_id`. Such a node leaves paging for its own checks and
-    /// heartbeats to the nodes in the list, which page for them from its
-    /// pushes; it still pages for those tocsin keeps (`node:<id>`,
-    /// `upstream:<id>`, `quorum:<check>`), which each node watches itself.
-    /// False without a federation.
+    /// `node_id`, and `node_id` pushes to one of them. Such a node leaves
+    /// paging for its own checks and heartbeats to the nodes in the list,
+    /// which page for them from its pushes; it still pages for those tocsin
+    /// keeps (`node:<id>`, `upstream:<id>`, `quorum:<check>`), which each
+    /// node watches itself. A node outside the list that pushes to none of
+    /// them keeps paging for its own: nobody else would. False without a
+    /// federation.
     #[must_use]
     pub fn outside_alert_order(&self, node_id: &str) -> bool {
         self.federation.as_ref().is_some_and(|federation| {
-            !federation.alert_order.is_empty()
-                && !federation
-                    .alert_order
+            let listed = |id: &Id| federation.alert_order.contains(id);
+            !federation
+                .alert_order
+                .iter()
+                .any(|node| node.as_str() == node_id)
+                && self
+                    .nodes
                     .iter()
-                    .any(|node| node.as_str() == node_id)
+                    .find(|node| node.id.as_str() == node_id)
+                    .is_some_and(|node| node.push_to.iter().any(listed))
         })
     }
 }

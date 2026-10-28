@@ -984,6 +984,11 @@ fn ordered(text: &str, order: Option<&str>) -> String {
     }
 }
 
+/// `text` with a `backup` heartbeat the spoke watches.
+fn with_backup(text: &str) -> String {
+    format!("{text}\n[[heartbeat]]\nid = \"backup\"\ninterval = \"1h\"\nnodes = [\"spoke\"]\n")
+}
+
 /// `text` routing every outage to a pager.
 fn paged(text: &str) -> String {
     format!(
@@ -1036,9 +1041,9 @@ async fn deliveries(store: &Store) -> Vec<String> {
     subjects
 }
 
-/// A spoke outside `alert_order` with a route: its check's outage is
-/// stored and pushed without an alert on the spoke, and the hub, first in
-/// the list, fires the one alert. Its `upstream:hub` heartbeat still
+/// A spoke outside `alert_order` with a route: its check's and its
+/// configured heartbeat's outages are stored and pushed without an alert on
+/// the spoke, and the hub, first in the list, fires the one alert for each. Its `upstream:hub` heartbeat still
 /// alerts on the spoke, which alone watches it.
 #[tokio::test]
 async fn a_spoke_outside_alert_order_leaves_its_own_outages_to_the_hub() {
@@ -1046,18 +1051,25 @@ async fn a_spoke_outside_alert_order_leaves_its_own_outages_to_the_hub() {
     let (dir, store) = open();
     let config = load_text(
         "hub",
-        paged(&ordered(&config_text("hub", "http://hub.invalid"), order)),
+        paged(&with_backup(&ordered(
+            &config_text("hub", "http://hub.invalid"),
+            order,
+        ))),
         Some(&hub_key()),
     );
     let hub = serve_hub(dir, store, config, HeartbeatHandle::default()).await;
     let spoke = spoke(&hub);
     let quiet = load_text(
         "spoke",
-        paged(&ordered(&config_text("spoke", &hub.url), order)),
+        paged(&with_backup(&ordered(
+            &config_text("spoke", &hub.url),
+            order,
+        ))),
         Some(&spoke_key()),
     );
 
     goes_down(&spoke.store, &quiet, SubjectKind::Check, "api-port").await;
+    goes_down(&spoke.store, &quiet, SubjectKind::Heartbeat, "backup").await;
     goes_down(&spoke.store, &quiet, SubjectKind::Heartbeat, "upstream:hub").await;
     let open = spoke.store.open_outages("spoke").await.unwrap();
     assert!(
@@ -1068,29 +1080,41 @@ async fn a_spoke_outside_alert_order_leaves_its_own_outages_to_the_hub() {
     assert_eq!(deliveries(&spoke.store).await, ["upstream:hub"]);
 
     let pushers = spoke.start(10);
-    eventually("the hub fires for the spoke's check", || async {
-        !hub.store.alerts().await.unwrap().is_empty()
-    })
+    eventually(
+        "the hub fires for the spoke's check and heartbeat",
+        || async { hub.store.alerts().await.unwrap().len() >= 2 },
+    )
     .await;
     pushers.stop().await;
     let fired = hub.store.alerts().await.unwrap();
-    assert_eq!(fired.len(), 1, "{fired:?}");
-    assert_eq!(fired[0].node_id, "spoke");
-    assert_eq!(fired[0].subject_id, "api-port");
-    assert_eq!(deliveries(&hub.store).await, ["api-port"]);
+    let mut subjects: Vec<_> = fired
+        .iter()
+        .map(|alert| (alert.node_id.as_str(), alert.subject_id.as_str()))
+        .collect();
+    subjects.sort_unstable();
+    assert_eq!(subjects, [("spoke", "api-port"), ("spoke", "backup")]);
+    assert_eq!(deliveries(&hub.store).await, ["api-port", "backup"]);
 }
 
 /// A node in `alert_order`, or any node when the list is empty or there
-/// is none, pages for its own check as it always did.
+/// is none, pages for its own check as it always did; so does a node left
+/// out of the list that pushes to none of the nodes in it, as nobody else
+/// would.
 #[tokio::test]
 async fn a_node_in_alert_order_or_without_one_pages_for_its_own_checks() {
-    for order in [Some("[\"spoke\", \"hub\"]"), None] {
+    let pushing = config_text("spoke", "http://hub.invalid");
+    let alone = pushing
+        .replace("push_to = [\"hub\"]\n", "")
+        .replace("type = \"tcp\"", "nodes = [\"spoke\"]\ntype = \"tcp\"");
+    assert_ne!(alone, pushing);
+    let cases = [
+        (&pushing, Some("[\"spoke\", \"hub\"]")),
+        (&pushing, None),
+        (&alone, Some("[\"hub\"]")),
+    ];
+    for (text, order) in cases {
         let (_dir, store) = open();
-        let config = load_text(
-            "spoke",
-            paged(&ordered(&config_text("spoke", "http://hub.invalid"), order)),
-            Some(&spoke_key()),
-        );
+        let config = load_text("spoke", paged(&ordered(text, order)), Some(&spoke_key()));
         goes_down(&store, &config, SubjectKind::Check, "api-port").await;
         assert_eq!(deliveries(&store).await, ["api-port"], "{order:?}");
     }

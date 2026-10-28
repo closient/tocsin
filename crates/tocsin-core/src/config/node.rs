@@ -59,8 +59,8 @@ pub struct Federation {
     pub grace: Duration,
     /// The nodes that alert for outages other nodes report, in order: a
     /// node alerts only while every node ahead of it is down. A node left
-    /// out of a non-empty list leaves its own checks and configured
-    /// heartbeats to them.
+    /// out of a non-empty list that pushes to one of them leaves its own
+    /// checks and configured heartbeats to them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alert_order: Vec<Id>,
 }

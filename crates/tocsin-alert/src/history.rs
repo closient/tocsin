@@ -19,7 +19,8 @@ use crate::route::Router;
 /// It takes the engine's decision as given: an opened outage marked
 /// `alerted` fires on every notifier its routes name, and a recovery
 /// resolves whatever its predecessor fired, with one exception: a node
-/// outside `[federation] alert_order` fires nothing for its own checks and
+/// outside `[federation] alert_order` that pushes to a node in it fires
+/// nothing for its own checks and
 /// configured heartbeats, which the nodes in the list page for from its
 /// pushes. It never looks at maintenance windows; the engine already did.
 ///

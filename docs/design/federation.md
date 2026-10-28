@@ -484,7 +484,8 @@ alert for remote outages. A node alerts for a remote outage only while
 every node ahead of it in the list is down by its own liveness view; a
 node it has never heard from, or not within `push_interval` plus `grace`,
 counts as down.
-Spokes not in the list never alert for their own checks (the hub does),
+Spokes not in the list that push to a node in it never alert for their
+own checks and configured heartbeats (the hub does),
 so nobody is paged twice. A partition between the two hubs makes both
 alert: **a duplicate page beats a silent one.** A node keeps every alert
 it fired until that alert resolves, even after an earlier node returns.

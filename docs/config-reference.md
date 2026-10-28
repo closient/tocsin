@@ -250,7 +250,7 @@ A `[[check.link]]` or `[[heartbeat.link]]`: a named link to somewhere an operato
 
 | Key | Type | Required | Default | Description |
 |-----|------|----------|---------|-------------|
-| `alert_order` | array of [`Id`](#type-id) |  |  | The nodes that alert for outages other nodes report, in order: a node alerts only while every node ahead of it is down. A node left out of a non-empty list leaves its own checks and configured heartbeats to them. |
+| `alert_order` | array of [`Id`](#type-id) |  |  | The nodes that alert for outages other nodes report, in order: a node alerts only while every node ahead of it is down. A node left out of a non-empty list that pushes to one of them leaves its own checks and configured heartbeats to them. |
 | `default_nodes` | array of [`Id`](#type-id) | yes |  | The nodes a check with no `nodes` of its own runs on. |
 | `grace` | [`Duration`](#type-duration) |  | `"1m"` | How long past `push_interval` a node may go unheard before the nodes it pushes to count it down. |
 | `push_interval` | [`Duration`](#type-duration) |  | `"15s"` | How often each node pushes to the nodes in its `push_to`, with nothing new if need be, so the push doubles as a heartbeat. |

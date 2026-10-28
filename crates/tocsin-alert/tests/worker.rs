@@ -1000,6 +1000,7 @@ fn a_notifier_removed_across_a_restart_abandons_its_alert_and_counts_it() {
         // before that and the fire stays queued and goes again after the
         // restart. Wait until both are recorded.
         while !fixture.store.outbox().await.unwrap().pending.is_empty() {
+            settle(&fixture).await;
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         let Running { alerter, history } = running;
@@ -1309,11 +1310,9 @@ fn an_idle_worker_writes_nothing_until_a_repeat_is_due() {
         // The worker's last write after the fire runs on the store's writer
         // thread, which the paused clock cannot see: left alone, the clock
         // would race through both sleeps while the worker waits on it, and
-        // no idle wake would land inside the window. A blocking task holds
-        // the clock while the worker finishes and goes back to sleep.
-        tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(50)))
-            .await
-            .unwrap();
+        // no idle wake would land inside the window. Hold it while the
+        // worker finishes and goes back to sleep.
+        settle(&fixture).await;
         let settled = fixture.store.writes_queued();
         // Ten idle wakes, an hour apart, with an alert open but no repeat
         // due: reads only.
@@ -1374,7 +1373,11 @@ async fn silence(fixture: &Fixture, episode: Option<i64>, at: i64, expires_at: i
 
 /// What silence `id` has held back, oldest first, as (kind, ms after T0),
 /// once it has held `count`. Waits on the paused clock, a second at a time,
-/// for the worker to get there.
+/// for the worker to get there, starting each second only once the worker
+/// is not waiting on a write: otherwise the clock would run on through the
+/// write, and the worker's next pass would stamp a later time than it
+/// should. A write the worker starts during that second can still run the
+/// clock to its end, but no further.
 async fn held(fixture: &Fixture, id: i64, count: usize) -> Vec<(HeldKind, i64)> {
     loop {
         let silence = fixture
@@ -1391,7 +1394,30 @@ async fn held(fixture: &Fixture, id: i64, count: usize) -> Vec<(HeldKind, i64)> 
                 .map(|held| (held.kind, held.at.as_millis() - T0))
                 .collect();
         }
+        settle(fixture).await;
         tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// Holds the paused clock until no one has waited on the store's writer
+/// thread for two blocking yields in a row. The runtime can't see that
+/// thread, so it takes a worker waiting on a write for idle and moves the
+/// clock on; a blocking task in flight holds it, and the worker runs
+/// meanwhile, so a write it goes on to make shows up in the next look.
+/// Gives up loudly after ten seconds of real time.
+async fn settle(fixture: &Fixture) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut quiet = 0;
+    while quiet < 2 {
+        tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(1)))
+            .await
+            .unwrap();
+        let waiting = fixture.store.writes_waiting();
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{waiting} still waiting on the store's writer after 10s"
+        );
+        quiet = if waiting == 0 { quiet + 1 } else { 0 };
     }
 }
 
@@ -1603,10 +1629,9 @@ fn a_fire_whose_answer_timed_out_before_a_silence_still_gets_its_resolve() {
             (AlertEvent::Fire, Answer::Hang)
         );
         let id = silence(&fixture, None, T0, T0 + 24 * HOUR_MS).await;
-        // Timed out at 10s, the retry is held back. When exactly the worker
-        // recorded it depends on how far the paused clock ran meanwhile,
-        // but it is after the timeout and no later than the 15s backoff: a
-        // pass at the retry's due time looks for a silence before it sends.
+        // Timed out at 10s, the retry is held back instead of sent: after
+        // the timeout and no later than the 15s backoff, since a pass at the
+        // retry's due time looks for a silence before it sends.
         let seen = held(&fixture, id, 1).await;
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].0, HeldKind::Fire);
@@ -1647,6 +1672,7 @@ fn an_emergency_that_never_rang_is_never_cancelled() {
         // The resolve is held and the cancel dropped in one pass; wait for
         // the outbox to drain.
         while !fixture.store.outbox().await.unwrap().pending.is_empty() {
+            settle(&fixture).await;
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         running.alerter.stop().await;

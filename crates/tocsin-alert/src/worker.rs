@@ -362,7 +362,12 @@ impl Worker {
                     now.saturating_add(millis(self.settings.store_retry))
                 }
             };
-            let pause = Duration::from_millis(u64::try_from(wake_at - now).unwrap_or_default());
+            // From the clock as the pass ends, not as it began: the pass
+            // waits on store writes, and a sleep measured from its start
+            // would wake that much late.
+            let pause = Duration::from_millis(
+                u64::try_from(wake_at - self.clock.now_ms()).unwrap_or_default(),
+            );
             tokio::select! {
                 _ = stopped.changed() => break,
                 () = self.wake.notified() => {}

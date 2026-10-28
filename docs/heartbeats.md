@@ -162,6 +162,28 @@ A heartbeat confirms on a single result: there is no `confirm` setting.
   deadline.
 - A missed deadline is down.
 
+## Node liveness
+
+With `[federation]`, `tocsin serve` keeps a heartbeat for each node that
+pushes to it, `node:<id>` ("Pushes from <id>"), and one for each node it
+pushes to, `upstream:<id>` ("Pushes to <id>"). A push pings the first on
+the node that takes it, once the push is committed, and the second on the
+node that sent it, once the answer comes back. Each expects a ping every
+`[federation] push_interval` and is down once `[federation] grace` passes
+on top without one, so a node that stops pushing, or an upstream that
+stops taking pushes, opens an outage that alerts like any other, and the
+next push resolves it. A backlog sends pushes back to back; a ping is
+recorded at most twice a `push_interval`.
+
+A retired node, and a node whose `push_to` does not name this one, has no
+`node:` heartbeat. Neither kind is in the configuration file, so `tocsin
+config check` and `config show` do not list them; they are on the
+internal page, never the public one, as they have no component. Their ids
+hold a colon, which no configured id may, so the ping API answers 404 for
+them and a `[[route]]` cannot name them; a route with no `checks`,
+`heartbeats`, `components` or `groups` filter does match them. A silence can name one, to quiet a node taken down on
+purpose.
+
 ## Uptime
 
 A heartbeat's daily rollup weighs each result by how long it held, not by

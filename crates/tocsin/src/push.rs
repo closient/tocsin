@@ -18,6 +18,11 @@
 //! moves every cursor back to the first day it rewrote
 //! ([`Upstreams::rewrote`]) and those days go again.
 //!
+//! Each push that goes through pings this node's `upstream:<id>`
+//! heartbeat for that upstream ([`crate::liveness`]), so an upstream that
+//! stops taking pushes for longer than `[federation] grace` opens an
+//! outage here.
+//!
 //! The upstreams are read only at startup.
 
 use std::collections::BTreeMap;
@@ -28,15 +33,18 @@ use std::time::Duration;
 use reqwest::StatusCode;
 use reqwest::header::CONTENT_TYPE;
 use tocsin_alert::{Backoff, Jitter};
+use tocsin_core::config::Id;
 use tocsin_core::config::{Config, Federation};
 use tocsin_core::federation::NodeKey;
 use tocsin_core::federation::wire::{self, Batch, BatchReceipt};
 use tocsin_core::incident::Timestamp;
+use tocsin_engine::HeartbeatHandle;
 use tocsin_store::{Day, PushCursor, Store, Unpushed};
 use tokio::task::JoinSet;
 
 use crate::exit::Exit;
-use crate::metrics::{Metrics, PushMetrics};
+use crate::liveness::{self, Pulse};
+use crate::metrics::{CheckMetrics, Metrics, PushMetrics};
 use crate::net;
 use crate::output::Failure;
 
@@ -114,6 +122,11 @@ impl PushSettings {
                 .map(|federation| federation.push_interval.get()),
         }
     }
+
+    /// The ids of the nodes pushed to.
+    pub(crate) fn upstreams(&self) -> impl Iterator<Item = &str> {
+        self.targets.iter().map(|(id, _)| id.as_str())
+    }
 }
 
 /// The nodes this node pushes to, as startup read them.
@@ -129,6 +142,7 @@ struct Inner {
     client: Option<reqwest::Client>,
     pacing: Option<Pacing>,
     metrics: PushMetrics,
+    checks: Option<CheckMetrics>,
     upstreams: Vec<Arc<Upstream>>,
 }
 
@@ -136,6 +150,8 @@ struct Inner {
 struct Upstream {
     id: String,
     endpoint: String,
+    /// Its `upstream:<id>` heartbeat.
+    heartbeat: String,
 }
 
 impl Upstreams {
@@ -185,6 +201,9 @@ impl Upstreams {
                 metrics.push.pushing_to(&id);
                 Arc::new(Upstream {
                     endpoint: format!("{}{}", url.trim_end_matches('/'), wire::BATCH_PATH),
+                    heartbeat: Id::parse(&id)
+                        .map(|node| Id::synthetic(liveness::UPSTREAM, &node).to_string())
+                        .unwrap_or_default(),
                     id,
                 })
             })
@@ -196,6 +215,7 @@ impl Upstreams {
                 client: Some(client),
                 pacing: Some(pacing),
                 metrics: metrics.push.clone(),
+                checks: Some(metrics.checks.clone()),
                 upstreams,
             }),
         })
@@ -213,12 +233,16 @@ impl Upstreams {
         }
     }
 
-    /// Starts one pusher per upstream.
-    pub(crate) fn start(&self, store: &Arc<Store>) -> Pushers {
+    /// Starts one pusher per upstream, each pinging its `upstream:<id>`
+    /// heartbeat through `heartbeats`.
+    pub(crate) fn start(&self, store: &Arc<Store>, heartbeats: &HeartbeatHandle) -> Pushers {
         let mut tasks = JoinSet::new();
-        let (Some(key), Some(client), Some(pacing)) =
-            (&self.inner.key, &self.inner.client, self.inner.pacing)
-        else {
+        let (Some(key), Some(client), Some(pacing), Some(checks)) = (
+            &self.inner.key,
+            &self.inner.client,
+            self.inner.pacing,
+            &self.inner.checks,
+        ) else {
             return Pushers { tasks };
         };
         for upstream in &self.inner.upstreams {
@@ -229,6 +253,9 @@ impl Upstreams {
                 store: Arc::clone(store),
                 client: client.clone(),
                 metrics: self.inner.metrics.clone(),
+                heartbeats: heartbeats.clone(),
+                checks: checks.clone(),
+                pulse: Pulse::default(),
                 pacing,
             };
             tasks.spawn(pusher.run());
@@ -318,6 +345,9 @@ struct Pusher {
     store: Arc<Store>,
     client: reqwest::Client,
     metrics: PushMetrics,
+    heartbeats: HeartbeatHandle,
+    checks: CheckMetrics,
+    pulse: Pulse,
     pacing: Pacing,
 }
 
@@ -333,6 +363,14 @@ impl Pusher {
                         tracing::info!(upstream, failures, "pushing succeeds again");
                     }
                     failures = 0;
+                    self.pulse
+                        .beat(
+                            &self.heartbeats,
+                            &self.checks,
+                            &self.upstream.heartbeat,
+                            self.pacing.interval,
+                        )
+                        .await;
                     match next {
                         Next::Now => Duration::ZERO,
                         Next::Later => {

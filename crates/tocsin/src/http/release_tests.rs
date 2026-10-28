@@ -100,6 +100,7 @@ fn api() -> Api {
         admin: None,
         live: Arc::new(tocsin_engine::Snapshot::default()),
         heartbeats: HeartbeatHandle::default(),
+        liveness: crate::liveness::Pulse::default(),
         alert_wake: Arc::default(),
         config_status: crate::reload::steady_status(),
         metrics: Arc::new(crate::metrics::Metrics::new()),

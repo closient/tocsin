@@ -44,6 +44,15 @@ impl Id {
         }
     }
 
+    /// The id of a heartbeat tocsin keeps itself rather than reads from a
+    /// file, `<kind>:<node>`, such as `node:edge-1`. No configured id holds
+    /// a colon, so it never collides with one, and [`Id::parse`] refuses it,
+    /// so no file and no ping can name it.
+    #[must_use]
+    pub fn synthetic(kind: &str, node: &Id) -> Self {
+        Id(format!("{kind}:{node}"))
+    }
+
     /// The identifier as written.
     #[must_use]
     pub fn as_str(&self) -> &str {

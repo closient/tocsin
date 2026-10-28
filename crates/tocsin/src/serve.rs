@@ -36,6 +36,7 @@ use tower::ServiceExt as _;
 use crate::exit::Exit;
 use crate::http::events::{EventBus, wake_on_incident_changes};
 use crate::http::{self, AppState};
+use crate::liveness::{self, Pulse};
 use crate::lock;
 use crate::metrics::{Counted, Metered, Metrics};
 use crate::otlp;
@@ -90,7 +91,10 @@ pub fn run(config: &Path, node: Option<&str>, data: Option<&Path>) -> Result<Rep
         .build()
         .map_err(|error| Failure::new(Exit::Runtime, format!("cannot start runtime: {error}")))?;
     let config_folder = config;
-    let config = Arc::new(loaded.config);
+    let mut config = loaded.config;
+    let push = PushSettings::of(&config);
+    liveness::watch(&mut config, push.upstreams());
+    let config = Arc::new(config);
     let signal_name = runtime.block_on(serve(
         config_folder,
         node,
@@ -185,6 +189,18 @@ fn subscriptions(config: &Config) -> Result<Option<Arc<Subscriptions>>, Failure>
         })
 }
 
+/// The admin pages' authentication, if the configuration turns them on.
+fn admin(config: &Config) -> Result<Option<Arc<AdminAuth>>, Failure> {
+    AdminAuth::from_config(config)
+        .map(|admin| admin.map(Arc::new))
+        .map_err(|error| {
+            Failure::new(
+                Exit::Runtime,
+                format!("cannot start the admin page: {error}"),
+            )
+        })
+}
+
 /// The app connecting Slack channels, if `[slack]` turns it on.
 fn slack(config: &Config) -> Result<Option<Arc<crate::slack::SlackApp>>, Failure> {
     crate::slack::SlackApp::from_config(config)
@@ -241,14 +257,7 @@ async fn serve(
     let hangup = install(SignalKind::hangup())?;
     // Before anything that holds the store starts, so failing here leaves
     // nothing to stop.
-    let admin = AdminAuth::from_config(config)
-        .map_err(|error| {
-            Failure::new(
-                Exit::Runtime,
-                format!("cannot start the admin page: {error}"),
-            )
-        })?
-        .map(Arc::new);
+    let admin = admin(config)?;
     let subscriptions = subscriptions(config)?;
     let slack = slack(config)?;
     let telemetry = telemetry(config)?;
@@ -283,7 +292,7 @@ async fn serve(
         subscriptions.as_ref(),
         telemetry,
     );
-    monitor.attach_pushers(upstreams.start(&store));
+    monitor.attach_pushers(upstreams.start(&store, &monitor.heartbeats()));
     let (status, config_status) = watch::channel(ConfigStatus::loaded(http::now()));
     let state = AppState {
         store: Arc::clone(&store),
@@ -292,6 +301,7 @@ async fn serve(
         admin,
         live: Arc::new(monitor.status_handle()),
         heartbeats: monitor.heartbeats(),
+        liveness: Pulse::default(),
         alert_wake: monitor.alert_waker(),
         config_status,
         metrics: Arc::clone(&metrics),
@@ -1280,6 +1290,7 @@ mod tests {
             admin: None,
             live: Arc::new(tocsin_engine::Snapshot::default()),
             heartbeats: tocsin_engine::HeartbeatHandle::default(),
+            liveness: crate::liveness::Pulse::default(),
             alert_wake: Arc::default(),
             config_status: crate::reload::steady_status(),
             metrics: Arc::new(crate::metrics::Metrics::new()),
@@ -1568,6 +1579,7 @@ mod tests {
             admin: None,
             live: Arc::new(monitor.engine.status_handle()),
             heartbeats: monitor.heartbeats(),
+            liveness: crate::liveness::Pulse::default(),
             alert_wake: monitor.alert_waker(),
             config_status: crate::reload::steady_status(),
             metrics,

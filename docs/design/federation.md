@@ -438,14 +438,16 @@ cuts the hub off from two of three locations yields "quorum lost", not
 
 - **A push is a heartbeat.** Each node pushes at least every
   `push_interval` (default 15 seconds), empty if it has nothing new. The
-  receiver records, at most once a minute, a ping of a synthetic
-  heartbeat `node:<id>`. A colon cannot appear in a config id, so the
-  name never collides. Its deadline, outage, alert and resolve are the
-  existing heartbeat machinery ([heartbeats.md](../heartbeats.md)), with
+  receiver records, once the push commits and at most twice a
+  `push_interval`, a ping of a synthetic heartbeat `node:<id>`. A colon
+  cannot appear in a config id, so the name never collides. Its deadline,
+  outage, alert and resolve are the existing heartbeat machinery
+  ([heartbeats.md](../heartbeats.md#node-liveness)), with `interval` and
   `grace` from `[federation]`.
-- **A pusher watches its upstream.** Pushes failing for longer than
-  `grace` open `upstream:<id>` on the pusher, alerting through its own
-  notifiers, and resolve when a push succeeds.
+- **A pusher watches its upstream.** Each push that succeeds pings
+  `upstream:<id>` on the pusher, the same way. With no push succeeding
+  for `push_interval + grace` it opens, alerting through the pusher's own
+  notifiers, and the next push that succeeds resolves it.
 - **Who reports the hub's death.** Any node that pushes to it and can
   reach a notifier on its own path. A DMZ spoke usually cannot: the point
   of the hub was that the spoke has no way out but to it.
@@ -504,8 +506,9 @@ queried):
 - `GET /api/v1/federation/nodes` (`status:read`): each node's state,
   store, last push by the receiver's clock, clock offset, backlog, config
   match and liveness. TOC-79 serves the state, stores, last push, clock
-  offset and backlog; config match and liveness come with the liveness
-  work.
+  offset and backlog. Liveness, read from the `node:<id>` and
+  `upstream:<id>` heartbeats TOC-81 added, comes with the node board in
+  TOC-80; config match is not served yet.
 
 **Metrics** (labels from configuration only, per
 [metrics.md](../metrics.md)): `tocsin_node_up`,

@@ -71,6 +71,25 @@ pub(crate) struct Writer {
     thread: JoinHandle<()>,
     /// Writes queued so far.
     queued: AtomicU64,
+    /// Callers waiting on the writer right now.
+    waiting: AtomicU64,
+}
+
+/// Counts a caller as waiting on the writer until it is dropped, so one
+/// whose future is dropped mid-wait stops counting too.
+struct Waiting<'a>(&'a AtomicU64);
+
+impl Waiting<'_> {
+    fn start(count: &AtomicU64) -> Waiting<'_> {
+        count.fetch_add(1, Ordering::Relaxed);
+        Waiting(count)
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl Writer {
@@ -83,6 +102,7 @@ impl Writer {
             sender,
             thread,
             queued: AtomicU64::new(0),
+            waiting: AtomicU64::new(0),
         })
     }
 
@@ -91,10 +111,17 @@ impl Writer {
         self.queued.load(Ordering::Relaxed)
     }
 
+    /// How many callers are waiting on the writer right now: for a queue
+    /// with room, those waiting to hear their write committed.
+    pub(crate) fn waiting(&self) -> u64 {
+        self.waiting.load(Ordering::Relaxed)
+    }
+
     /// Queues an insert; resolves once its transaction has committed with
     /// the outage it opened, or else the outage it ended, or else (a
     /// `Record` with no change) the result's row id.
     pub(crate) async fn insert(&self, insert: Insert) -> Result<i64> {
+        let _waiting = Waiting::start(&self.waiting);
         let (reply, receive) = oneshot::channel();
         self.send(insert, Some(reply)).await?;
         receive.await.map_err(|_| Error::Closed)?
@@ -131,6 +158,7 @@ impl Writer {
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
+        let _waiting = Waiting::start(&self.waiting);
         let (reply, receive) = oneshot::channel();
         let job: Job = Box::new(move |conn| {
             let outcome = guarded(conn, |conn| job(conn));

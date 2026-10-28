@@ -1374,7 +1374,9 @@ async fn silence(fixture: &Fixture, episode: Option<i64>, at: i64, expires_at: i
 
 /// What silence `id` has held back, oldest first, as (kind, ms after T0),
 /// once it has held `count`. Waits on the paused clock, a second at a time,
-/// for the worker to get there.
+/// for the worker to get there, and only moves it once the worker is not
+/// waiting on a write, or the clock would run on through the write and the
+/// worker's next pass would stamp a later time than it should.
 async fn held(fixture: &Fixture, id: i64, count: usize) -> Vec<(HeldKind, i64)> {
     loop {
         let silence = fixture
@@ -1391,7 +1393,27 @@ async fn held(fixture: &Fixture, id: i64, count: usize) -> Vec<(HeldKind, i64)> 
                 .map(|held| (held.kind, held.at.as_millis() - T0))
                 .collect();
         }
+        settle(fixture).await;
         tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// Holds the paused clock until no one has waited on the store's writer
+/// thread for two blocking yields in a row. The runtime can't see that
+/// thread, so it takes a worker waiting on a write for idle and moves the
+/// clock on; a blocking task in flight holds it, and the worker runs
+/// meanwhile, so a write it goes on to make shows up in the next look.
+async fn settle(fixture: &Fixture) {
+    let mut quiet = 0;
+    while quiet < 2 {
+        tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(1)))
+            .await
+            .unwrap();
+        quiet = if fixture.store.writes_waiting() == 0 {
+            quiet + 1
+        } else {
+            0
+        };
     }
 }
 
@@ -1603,15 +1625,13 @@ fn a_fire_whose_answer_timed_out_before_a_silence_still_gets_its_resolve() {
             (AlertEvent::Fire, Answer::Hang)
         );
         let id = silence(&fixture, None, T0, T0 + 24 * HOUR_MS).await;
-        // Timed out at 10s, the retry is held back instead of sent. The hold
-        // is stamped by the worker's next pass after the timeout, so it
-        // can't come sooner; how much later is up to the paused clock, which
-        // `held` moves a second a poll while the worker waits on the writer
-        // thread. What must hold is that the retry never went out.
+        // Timed out at 10s, the retry is held back instead of sent: after
+        // the timeout and no later than the 15s backoff, since a pass at the
+        // retry's due time looks for a silence before it sends.
         let seen = held(&fixture, id, 1).await;
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].0, HeldKind::Fire);
-        assert!(seen[0].1 >= 10_000, "{seen:?}");
+        assert!((10_000..=15_000).contains(&seen[0].1), "{seen:?}");
         assert_eq!(sent(&slack).len(), 1, "{:?}", sent(&slack));
 
         running.change(up(outage, T0 + HOUR_MS)).await;

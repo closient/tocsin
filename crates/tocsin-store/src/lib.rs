@@ -309,6 +309,15 @@ impl Store {
         self.writer.queued()
     }
 
+    /// How many callers are waiting on the writer thread right now, for
+    /// tests: a tokio runtime with a paused clock can't see that thread, so
+    /// it counts a task waiting on a write as idle and moves the clock on.
+    /// A test can hold the clock until this is zero.
+    #[must_use]
+    pub fn writes_waiting(&self) -> u64 {
+        self.writer.waiting()
+    }
+
     /// What the writer and the checkpointer have done since the store
     /// opened to keep the write-ahead log bounded, for the write-latency
     /// bench and diagnostics: a slow write can be traced to the path that

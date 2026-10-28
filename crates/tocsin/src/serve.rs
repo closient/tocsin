@@ -45,6 +45,7 @@ use crate::push::{PushSettings, Pushers, Upstreams};
 use crate::reload::{ConfigStatus, LiveRouter, Reloader, Reloading};
 use crate::subscribers::Subscriptions;
 use crate::subscribers::worker::Postman;
+use crate::takeover::{AlertOrder, Takeover, Watching, take_over_when_ahead_is_down};
 use crate::web::identity::AdminAuth;
 
 pub fn run(config: &Path, node: Option<&str>, data: Option<&Path>) -> Result<Report, Failure> {
@@ -359,6 +360,10 @@ async fn serve(
 pub(crate) struct Monitor {
     engine: Engine,
     wake: JoinHandle<()>,
+    /// What the takeover of other nodes' outages reads, sent anew on
+    /// reload, and the task that runs it.
+    takeover: watch::Sender<Arc<Takeover>>,
+    taking_over: JoinHandle<()>,
     alerter: Alerter,
     history: Arc<AlertingHistory>,
     /// What alerting is configured with now, to go back to when a reload
@@ -384,6 +389,26 @@ pub(crate) enum ReloadError {
     Unfinished(Failure),
 }
 
+/// The HTTP client alerting delivers through. Like the probes, alerting
+/// runs without system root certificates: each HTTPS delivery then fails
+/// and is recorded as failed.
+fn alerting_client() -> Result<reqwest::Client, Failure> {
+    match crate::net::http_client(HTTP_TIMEOUT).build() {
+        Ok(client) => Ok(client),
+        Err(error) => {
+            tracing::error!(
+                "alerting cannot verify TLS ({error}); every HTTPS notifier will fail \
+                 until the system trusts a certificate authority"
+            );
+            crate::net::http_client(HTTP_TIMEOUT)
+                .tls_certs_only(std::iter::empty())
+                .build()
+                .map_err(|error| {
+                    Failure::new(Exit::Runtime, format!("cannot set up HTTP: {error}"))
+                })
+        }
+    }
+}
 impl Monitor {
     /// Starts the alert delivery worker and the engine on `store`,
     /// publishing on `events`. The engine records outages through
@@ -412,23 +437,7 @@ impl Monitor {
                 format!("cannot schedule the checks: {error}"),
             )
         })?;
-        // Like the probes, alerting runs without system root certificates:
-        // each HTTPS delivery then fails and is recorded as failed.
-        let client = match crate::net::http_client(HTTP_TIMEOUT).build() {
-            Ok(client) => client,
-            Err(error) => {
-                tracing::error!(
-                    "alerting cannot verify TLS ({error}); every HTTPS notifier will fail \
-                     until the system trusts a certificate authority"
-                );
-                crate::net::http_client(HTTP_TIMEOUT)
-                    .tls_certs_only(std::iter::empty())
-                    .build()
-                    .map_err(|error| {
-                        Failure::new(Exit::Runtime, format!("cannot set up HTTP: {error}"))
-                    })?
-            }
-        };
+        let client = alerting_client()?;
         let hooks: Arc<dyn SlackHooks> = Arc::clone(store) as Arc<dyn SlackHooks>;
         let notifiers =
             tocsin_alert::build_all(config, &client, Some(&hooks)).map_err(|error| {
@@ -475,6 +484,7 @@ impl Monitor {
         // Subscribed before the engine starts, so no incident write can fall
         // between its first read and the subscription.
         let incident_changes = events.subscribe();
+        let ahead_changes = events.subscribe();
         let engine = match Engine::start(plan, parts).await {
             Ok(engine) => engine,
             Err(error) => {
@@ -489,9 +499,24 @@ impl Monitor {
             incident_changes,
             engine.notices_handle(),
         ));
+        let (takeover, taking) = watch::channel(Arc::new(Takeover {
+            order: AlertOrder::of(config),
+            router: Arc::clone(&router),
+        }));
+        let taking_over = tokio::spawn(take_over_when_ahead_is_down(
+            ahead_changes,
+            taking,
+            Watching {
+                store: Arc::clone(store),
+                live: engine.status_handle(),
+                alert_wake: alerter.waker(),
+            },
+        ));
         Ok(Monitor {
             engine,
             wake,
+            takeover,
+            taking_over,
             alerter,
             history,
             notifiers,
@@ -554,6 +579,10 @@ impl Monitor {
         }
         self.notifiers = notifiers;
         self.router = router;
+        self.takeover.send_replace(Arc::new(Takeover {
+            order: AlertOrder::of(config),
+            router: Arc::clone(&self.router),
+        }));
         let ended = end_alerts_without_notifier(&self.store, &self.notifiers, Removed::ByReload)
             .await
             .map_err(ReloadError::Unfinished)?
@@ -599,6 +628,8 @@ impl Monitor {
     pub(crate) async fn stop(self) {
         self.wake.abort();
         let _ = self.wake.await;
+        self.taking_over.abort();
+        let _ = self.taking_over.await;
         self.engine.shutdown().await;
         self.alerter.stop().await;
         if let Some(postman) = self.postman {

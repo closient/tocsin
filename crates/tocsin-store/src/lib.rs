@@ -538,6 +538,30 @@ impl Store {
             .await
     }
 
+    /// Opens alerts at `now_ms` for every other node's outage this store
+    /// holds open and alerted with no alert open yet, where `decide` gives
+    /// it [`RemoteAlerting::opens`]: a node in `[federation] alert_order`
+    /// taking over the outages pushed while a node ahead of it was up, now
+    /// that every node ahead is down. Its own outages and a tocsin-kept
+    /// heartbeat's (`node:`, `upstream:`, `quorum:`) are left alone, and an
+    /// outage with an alert open already is not fired again, so a second
+    /// run opens nothing the first did. Resolves with the deliveries
+    /// queued.
+    ///
+    /// # Errors
+    ///
+    /// The write fails; nothing is written then.
+    pub async fn take_over(
+        &self,
+        local_node_id: String,
+        decide: impl Fn(&NewOutage) -> RemoteAlerting + Send + 'static,
+        now_ms: i64,
+    ) -> Result<usize> {
+        self.writer
+            .run(move |conn| federation::take_over(conn, &local_node_id, &decide, now_ms))
+            .await
+    }
+
     /// Every notifier among `notifiers` that still has an open alert or a
     /// pending delivery: the worker keeps a removed notifier until none is
     /// left, so it can send the resolves the removal queued.

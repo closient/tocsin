@@ -221,7 +221,14 @@ sees them: its `node:<id>` liveness heartbeat is not confirmed up, which
 includes a node it has never heard from. The node that pushed the outage
 counts as up, as the push is word from it. Behind a node that is up, it
 opens no new alerts and re-fires only the ones it already has, so a backup
-stops paging for new outages once the node ahead of it is back. Nodes do
+stops paging for new outages once the node ahead of it is back. It decides
+again when the nodes ahead go down: once every node ahead is down and at
+least one of them is confirmed down (a node merely never heard from, as
+right after a restart, cannot start this alone), it opens alerts for every
+other node's outage it holds open without one, with no new push needed, so
+an outage pushed while the node ahead was up still pages once that node
+stops. Such an alert is late, as below, when it opens long after the
+origin detected the outage, and the end push resolves it as usual. Nodes do
 not tell each other what they sent: a hub that comes back while an outage
 its backup paged for is still open pages for it too. The alert's identity
 names the node that reported the outage, whichever node fires it.

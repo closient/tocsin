@@ -24,13 +24,14 @@ use tocsin_core::federation::wire::{
 use tocsin_core::incident::Timestamp;
 use tocsin_core::state::Confirmed;
 use tocsin_core::status::{CheckKind, OutageEnding};
-use tocsin_engine::{CheckSnapshot, HeartbeatHandle, MemberKind, Snapshot};
+use tocsin_engine::{CheckSnapshot, HeartbeatHandle, MemberKind, Ping, Snapshot};
 use tocsin_store::{RemoteStore, Store};
 use tower::ServiceExt;
 
 use super::events::EventBus;
 use super::federation::backlog;
 use super::{AppState, now, router};
+use crate::serve::Monitor;
 use crate::web::identity::AdminAuth;
 
 const READER: &str = "reader-secret-0123456789";
@@ -981,4 +982,173 @@ async fn the_public_reads_a_quorum_checks_outages_under_the_quorum_alone() {
     let (status, body) = api.send(read(Some(READER))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(nodes(&body), ["*", "spoke"]);
+}
+
+/// [`alerting_config_text`] with `first` pushing to the hub, so the hub
+/// watches its `node:first` heartbeat, served over a running monitor: the
+/// engine confirms that heartbeat, and the hub takes over when it goes
+/// down.
+async fn api_watching_first() -> (Api, Monitor) {
+    let text = alerting_config_text().replace(
+        "url = \"https://first.example.com\"\n",
+        &format!(
+            "url = \"https://first.example.com\"\npublic_keys = [\"{}\"]\npush_to = [\"hub\"]\n",
+            NodeKey::from_seed([4; 32]).public_key()
+        ),
+    );
+    let mut config = load(text);
+    crate::liveness::watch(&mut config, []);
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(&dir.path().join(tocsin_store::DB_FILE)).unwrap());
+    let events = EventBus::new();
+    let metrics = Arc::new(crate::metrics::Metrics::new());
+    let monitor = Monitor::start(&config, &store, &events, &metrics)
+        .await
+        .unwrap();
+    let state = AppState {
+        store,
+        config: Arc::new(config),
+        events,
+        admin: None,
+        live: Arc::new(monitor.status_handle()),
+        heartbeats: monitor.heartbeats(),
+        liveness: crate::liveness::Pulse::default(),
+        alert_wake: monitor.alert_waker(),
+        config_status: crate::reload::steady_status(),
+        metrics,
+        subscribers: None,
+        slack: None,
+    };
+    let api = Api {
+        dir,
+        router: router(state.clone()),
+        state,
+    };
+    (api, monitor)
+}
+
+impl Api {
+    /// Pings `node:first` with `health`, as a push from it, or the lack of
+    /// one, would, and waits for the engine to confirm it.
+    async fn first_goes(&self, health: Health) {
+        self.state
+            .heartbeats
+            .ping(
+                "node:first",
+                Ping {
+                    health,
+                    message: None,
+                },
+            )
+            .await
+            .unwrap();
+        eventually("node:first confirmed", || {
+            crate::takeover::node_liveness(
+                &self.state.live.snapshot(),
+                &tocsin_core::config::Id::parse("first").unwrap(),
+            ) == Some(health)
+        })
+        .await;
+    }
+
+    /// The alerts the hub fired for the spoke's outages; not for its own
+    /// `node:first`, which pages too.
+    async fn spokes_alerts(&self) -> Vec<tocsin_store::StoredAlert> {
+        let mut fired = self.state.store.alerts().await.unwrap();
+        fired.retain(|alert| alert.node_id == "spoke");
+        fired
+    }
+
+    /// Waits for the hub to fire for the spoke's outage, and returns what
+    /// it fired.
+    async fn taken_over(&self) -> Vec<tocsin_store::StoredAlert> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let fired = self.spokes_alerts().await;
+            if !fired.is_empty() {
+                return fired;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "never took over");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+}
+
+/// Waits until `done` holds, for up to ten seconds.
+async fn eventually(what: &str, done: impl Fn() -> bool) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !done() {
+        assert!(tokio::time::Instant::now() < deadline, "never: {what}");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn an_outage_pushed_while_the_node_ahead_was_up_pages_once_that_node_goes_down() {
+    let (api, monitor) = api_watching_first().await;
+    api.first_goes(Health::Up).await;
+    let mut sent = batch();
+    sent.outages = vec![open(1, 7, ago(5))];
+    let (status, receipt) = api.push(&sent).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(api.spokes_alerts().await, []);
+
+    api.first_goes(Health::Down).await;
+    let fired = api.taken_over().await;
+    assert_eq!(fired.len(), 1);
+    assert_eq!(fired[0].node_id, "spoke");
+    assert_eq!(fired[0].subject_id, "api-port");
+    assert_eq!(fired[0].notifier_id, "pager");
+    assert_eq!(fired[0].ended_at_ms, None);
+    assert_eq!(fired[0].arrived_late_at_ms, None);
+
+    let mut ended = batch();
+    ended.cursor.outages = Some(1);
+    let ended_at = now();
+    ended.outages = vec![end(2, 7, ended_at)];
+    let (status, receipt) = api.push(&ended).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    let resolved = api.spokes_alerts().await;
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].id, fired[0].id);
+    assert_eq!(resolved[0].ended_at_ms, Some(ended_at.as_millis()));
+    monitor.stop().await;
+}
+
+#[tokio::test]
+async fn a_takeover_long_after_the_outage_began_says_it_was_late() {
+    let (api, monitor) = api_watching_first().await;
+    api.first_goes(Health::Up).await;
+    let mut sent = batch();
+    sent.outages = vec![open(1, 7, ago(3_600))];
+    let (status, receipt) = api.push(&sent).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(api.spokes_alerts().await, []);
+
+    let before = now().as_millis();
+    api.first_goes(Health::Down).await;
+    let fired = api.taken_over().await;
+    assert_eq!(fired.len(), 1);
+    let arrived = fired[0].arrived_late_at_ms.expect("marked late");
+    assert!(arrived >= before, "{arrived} < {before}");
+    monitor.stop().await;
+}
+
+#[tokio::test]
+async fn the_node_ahead_going_down_again_does_not_page_twice() {
+    let (api, monitor) = api_watching_first().await;
+    api.first_goes(Health::Up).await;
+    let mut sent = batch();
+    sent.outages = vec![open(1, 7, ago(5))];
+    let (status, receipt) = api.push(&sent).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    api.first_goes(Health::Down).await;
+    api.taken_over().await;
+
+    // Up and down again: the open alert is not fired a second time.
+    api.first_goes(Health::Up).await;
+    api.first_goes(Health::Down).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(api.spokes_alerts().await.len(), 1);
+    monitor.stop().await;
 }

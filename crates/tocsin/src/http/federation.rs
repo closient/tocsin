@@ -25,7 +25,7 @@ use tocsin_core::federation::wire::{
     self, Batch, BatchReceipt, LastPush, NodeList, NodeStatus, NodeStore, RemoteCheck,
 };
 use tocsin_core::incident::{FieldError, Timestamp};
-use tocsin_engine::{Ping, Snapshot};
+use tocsin_engine::Ping;
 use tocsin_store::{RemoteAlerting, RemoteBatch, RemoteOutageChange, RemoteStore, SubjectKind};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -35,6 +35,7 @@ use super::error::{self, ApiError, ErrorBody};
 use super::{AppState, now};
 use crate::liveness;
 use crate::metrics::NodePush;
+use crate::takeover::{AlertOrder, node_liveness};
 
 /// The OpenAPI tag for these routes.
 pub const TAG: &str = "federation";
@@ -112,7 +113,7 @@ pub async fn push_batch(
     let remote_batch = RemoteBatch::from_wire(batch)?;
     let received_at = now();
     let local = state.config.server.node_id.clone().unwrap_or_default();
-    let alerting = remote_alerting(&state, &local, &remote_batch, received_at.as_millis());
+    let alerting = remote_alerting(&state, &remote_batch, received_at.as_millis());
     let applied = state
         .store
         .apply_batch(remote_batch, local, alerting, received_at.as_millis())
@@ -189,32 +190,20 @@ async fn conflicted(state: &AppState, node: &Node, conflict: tocsin_store::Error
 /// this node is in `alert_order`. A node opens alerts only while every node
 /// ahead of it there is down: unheard, or its `node:<id>` heartbeat not
 /// confirmed up. Behind one that is up, it re-fires only what it already
-/// fired. A tocsin-kept heartbeat (`node:<id>`, `upstream:<id>`) never
-/// pages from a push: each node watches those itself. An outage is late
-/// when it reaches this node more than a push and its grace after the
-/// check could have confirmed it.
+/// fired, until every node ahead goes down and it takes the outage over
+/// (`crate::takeover`). A tocsin-kept heartbeat (`node:<id>`,
+/// `upstream:<id>`) never pages from a push: each node watches those
+/// itself.
 fn remote_alerting(
     state: &AppState,
-    local: &str,
     batch: &RemoteBatch,
     received_at_ms: i64,
 ) -> BTreeMap<i64, RemoteAlerting> {
     let mut alerting = BTreeMap::new();
-    let Some(federation) = &state.config.federation else {
+    let Some(order) = AlertOrder::of(&state.config) else {
         return alerting;
     };
-    let Some(position) = federation
-        .alert_order
-        .iter()
-        .position(|node| node.as_str() == local)
-    else {
-        return alerting;
-    };
-    let opens_new = alert_order_ahead_is_down(
-        state,
-        &federation.alert_order[..position],
-        batch.node_id.as_str(),
-    );
+    let opens_new = order.ahead_is_down(&state.live.snapshot(), Some(batch.node_id.as_str()));
     let mut router: Option<Router> = None;
     for change in &batch.outages {
         let RemoteOutageChange::Open {
@@ -227,66 +216,12 @@ fn remote_alerting(
             continue;
         }
         let router = router.get_or_insert_with(|| Router::new(&state.config));
-        let routing = router.routing(
-            outage.subject_kind,
-            &outage.check_id,
-            outage.component_id.as_deref(),
-            outage.health,
-        );
-        let confirm_span_ms = match outage.subject_kind {
-            SubjectKind::Check => state
-                .config
-                .checks
-                .iter()
-                .find(|check| check.id.as_str() == outage.check_id)
-                .map_or(0, |check| {
-                    millis(check.interval.get()) * i64::from(check.confirm)
-                        + millis(check.timeout.get())
-                }),
-            SubjectKind::Heartbeat => 0,
-        };
-        let due_by_ms = outage.started_at_ms
-            + confirm_span_ms
-            + millis(federation.push_interval.get())
-            + millis(federation.grace.get());
         alerting.insert(
             *origin_id,
-            RemoteAlerting {
-                routing,
-                opens: opens_new,
-                arrived_late_at_ms: (received_at_ms > due_by_ms).then_some(received_at_ms),
-            },
+            order.alerting(router, outage, opens_new, received_at_ms),
         );
     }
     alerting
-}
-
-/// Whether every node in `ahead` is down as this node sees it: its
-/// `node:<id>` heartbeat unheard, or confirmed anything but up. The node
-/// that sent the batch is up whatever its heartbeat says yet: the push is
-/// itself word from it, and its beat is recorded only after the batch.
-fn alert_order_ahead_is_down(state: &AppState, ahead: &[Id], pusher: &str) -> bool {
-    let snapshot = state.live.snapshot();
-    ahead
-        .iter()
-        .all(|node| node.as_str() != pusher && node_liveness(&snapshot, node) != Some(Health::Up))
-}
-
-/// The confirmed health of `node`'s `node:<id>` heartbeat in `snapshot`;
-/// `None` while unheard. The one test of whether a node is heard from, for
-/// paging by `alert_order` and for showing its checks alike.
-fn node_liveness(snapshot: &Snapshot, node: &Id) -> Option<Health> {
-    let heartbeat = Id::synthetic(liveness::NODE, node);
-    snapshot
-        .checks
-        .iter()
-        .find(|check| check.id == heartbeat.as_str())
-        .and_then(|check| check.state)
-        .map(|confirmed| confirmed.health)
-}
-
-fn millis(duration: std::time::Duration) -> i64 {
-    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
 /// Every node the configuration lists: whether it is retired, its stores

@@ -609,7 +609,9 @@ impl Spec {
 
     fn component(&self) -> Option<String> {
         match self {
-            Spec::Check(compiled, _) => compiled.check().component.as_ref().map(ToString::to_string),
+            Spec::Check(compiled, _) => {
+                compiled.check().component.as_ref().map(ToString::to_string)
+            }
             Spec::Heartbeat(heartbeat, _) => heartbeat.component.as_ref().map(ToString::to_string),
             Spec::Quorum(quorum) => quorum.component.clone(),
         }
@@ -630,7 +632,9 @@ impl Spec {
             Spec::Check(compiled, _) => up_window_ms(compiled.check()),
             Spec::Heartbeat(heartbeat, _) => allowance_ms(heartbeat),
             // Its first evaluation after a start comes one window in.
-            Spec::Quorum(quorum) => quorum.window_ms.saturating_add(duration_ms(quorum.interval)),
+            Spec::Quorum(quorum) => quorum
+                .window_ms
+                .saturating_add(duration_ms(quorum.interval)),
         }
     }
 

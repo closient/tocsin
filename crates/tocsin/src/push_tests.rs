@@ -669,7 +669,10 @@ fn a_reload_tells_whether_the_push_settings_moved() {
     let text = config_text("spoke", "http://hub.invalid")
         .replace("push_to = [\"hub\"]\n", "")
         // Pushing nowhere, a check on both nodes has no node to derive it.
-        .replace("default_nodes = [\"hub\", \"spoke\"]", "default_nodes = [\"spoke\"]");
+        .replace(
+            "default_nodes = [\"hub\", \"spoke\"]",
+            "default_nodes = [\"spoke\"]",
+        );
     let nowhere = load_text("spoke", text, Some(&spoke_key()));
     assert_ne!(PushSettings::of(&running), PushSettings::of(&nowhere));
 }

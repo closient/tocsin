@@ -1029,7 +1029,9 @@ impl<'a> Loader<'a> {
                 if !item_nodes.is_empty() {
                     self.report(
                         &origin.key("nodes"),
-                        format!("`nodes` places a {kind} in a federation, and no `[[node]]` is listed"),
+                        format!(
+                            "`nodes` places a {kind} in a federation, and no `[[node]]` is listed"
+                        ),
                         Some("list each server as a `[[node]]`, or remove `nodes`".to_owned()),
                     );
                 }
@@ -1063,7 +1065,11 @@ impl<'a> Loader<'a> {
         }
         for heartbeat in &items.heartbeats {
             let named = &heartbeat.value.nodes;
-            let count = if named.is_empty() { default_nodes.len() } else { named.len() };
+            let count = if named.is_empty() {
+                default_nodes.len()
+            } else {
+                named.len()
+            };
             if count > 1 {
                 let origin = if named.is_empty() {
                     heartbeat.origin.clone()
@@ -1105,7 +1111,10 @@ impl<'a> Loader<'a> {
             if value.quorum.is_some() {
                 self.report(
                     &check.origin.key("quorum"),
-                    format!("`quorum` needs a check run on two or more nodes, and `{}` runs on one", value.id),
+                    format!(
+                        "`quorum` needs a check run on two or more nodes, and `{}` runs on one",
+                        value.id
+                    ),
                     Some("list the nodes it runs on in `nodes`, or remove `quorum`".to_owned()),
                 );
             }
@@ -1116,7 +1125,10 @@ impl<'a> Loader<'a> {
         {
             self.report(
                 &check.origin.key("quorum"),
-                format!("`quorum` must be between 1 and the check's {} nodes", nodes.len()),
+                format!(
+                    "`quorum` must be between 1 and the check's {} nodes",
+                    nodes.len()
+                ),
                 None,
             );
         }
@@ -1141,7 +1153,10 @@ impl<'a> Loader<'a> {
         let alert_order = &federation.value.alert_order;
         let problem = if evaluators.is_empty() {
             Some((
-                format!("no node receives the results of every node check `{}` runs on", value.id),
+                format!(
+                    "no node receives the results of every node check `{}` runs on",
+                    value.id
+                ),
                 format!(
                     "a quorum check's state is derived where its results converge: have {} push to one node",
                     list(nodes)
@@ -1156,7 +1171,9 @@ impl<'a> Loader<'a> {
                 ),
                 "list them in `[federation] alert_order`, which says which one pages".to_owned(),
             ))
-        } else if !alert_order.is_empty() && !evaluators.iter().any(|node| alert_order.contains(node)) {
+        } else if !alert_order.is_empty()
+            && !evaluators.iter().any(|node| alert_order.contains(node))
+        {
             Some((
                 format!(
                     "check `{}` is derived on {}, and none is in `alert_order`, so it would never alert",
@@ -2861,10 +2878,20 @@ fn edit_distance(left: &str, right: &str) -> usize {
 /// check's `quorum` and where it was written.
 fn placed(items: &Items) -> impl Iterator<Item = (&'static str, &[Id], Option<u32>, &Origin)> {
     let checks = items.checks.iter().map(|check| {
-        ("check", check.value.nodes.as_slice(), check.value.quorum, &check.origin)
+        (
+            "check",
+            check.value.nodes.as_slice(),
+            check.value.quorum,
+            &check.origin,
+        )
     });
     let heartbeats = items.heartbeats.iter().map(|heartbeat| {
-        ("heartbeat", heartbeat.value.nodes.as_slice(), None, &heartbeat.origin)
+        (
+            "heartbeat",
+            heartbeat.value.nodes.as_slice(),
+            None,
+            &heartbeat.origin,
+        )
     });
     checks.chain(heartbeats)
 }

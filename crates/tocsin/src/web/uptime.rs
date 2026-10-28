@@ -310,10 +310,7 @@ mod tests {
         ]);
         let bar = bar(&tallies, &["web".to_owned()], today);
         assert_eq!(bar.days[89].tone, Tone::Up);
-        assert_eq!(
-            bar.days[89].text,
-            format!("{today}, today so far: 100% up")
-        );
+        assert_eq!(bar.days[89].text, format!("{today}, today so far: 100% up"));
         assert_eq!(bar.days[88].tone, Tone::Down);
         assert_eq!(
             bar.days[88].text,

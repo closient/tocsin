@@ -79,11 +79,9 @@ impl Config {
         if nodes < 2 {
             return None;
         }
-        Some(
-            check
-                .quorum
-                .map_or(nodes / 2 + 1, |quorum| usize::try_from(quorum).unwrap_or(usize::MAX)),
-        )
+        Some(check.quorum.map_or(nodes / 2 + 1, |quorum| {
+            usize::try_from(quorum).unwrap_or(usize::MAX)
+        }))
     }
 
     /// Whether `check`'s results all converge on the node `node_id`, so it
@@ -95,8 +93,7 @@ impl Config {
             && self.check_nodes(check).iter().all(|node| {
                 node.as_str() == node_id
                     || self.nodes.iter().any(|listed| {
-                        listed.id == *node
-                            && listed.push_to.iter().any(|to| to.as_str() == node_id)
+                        listed.id == *node && listed.push_to.iter().any(|to| to.as_str() == node_id)
                     })
             })
     }
@@ -119,12 +116,15 @@ impl Config {
     #[must_use]
     pub fn quorum_window(&self, check: &Check) -> std::time::Duration {
         let interval = check.interval.get();
-        let travel = self.federation.as_ref().map_or(std::time::Duration::ZERO, |federation| {
-            federation
-                .push_interval
-                .get()
-                .saturating_add(federation.grace.get())
-        });
+        let travel = self
+            .federation
+            .as_ref()
+            .map_or(std::time::Duration::ZERO, |federation| {
+                federation
+                    .push_interval
+                    .get()
+                    .saturating_add(federation.grace.get())
+            });
         interval.saturating_mul(2).saturating_add(travel)
     }
 
@@ -165,7 +165,9 @@ impl Config {
         let check_id = heartbeat_id
             .strip_prefix(QUORUM_HEARTBEAT)?
             .strip_prefix(':')?;
-        self.checks.iter().find(|check| check.id.as_str() == check_id)
+        self.checks
+            .iter()
+            .find(|check| check.id.as_str() == check_id)
     }
 
     /// The nodes that must all be down before the node `node_id` opens an

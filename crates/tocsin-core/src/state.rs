@@ -215,7 +215,12 @@ pub fn quorum_health(quorum: usize, nodes: &[Option<Health>]) -> Option<Health> 
     // fewer than `quorum` are fresh.
     let quorum = quorum.max(1);
     Health::ALL.into_iter().rev().find(|&level| {
-        nodes.iter().flatten().filter(|&&health| health >= level).count() >= quorum
+        nodes
+            .iter()
+            .flatten()
+            .filter(|&&health| health >= level)
+            .count()
+            >= quorum
     })
 }
 
@@ -498,8 +503,14 @@ mod tests {
     #[test]
     fn quorum_takes_the_worst_health_enough_fresh_nodes_share() {
         // Two of three: one node down leaves the check up.
-        assert_eq!(quorum_health(2, &[Some(Up), Some(Up), Some(Down)]), Some(Up));
-        assert_eq!(quorum_health(2, &[Some(Up), Some(Down), Some(Down)]), Some(Down));
+        assert_eq!(
+            quorum_health(2, &[Some(Up), Some(Up), Some(Down)]),
+            Some(Up)
+        );
+        assert_eq!(
+            quorum_health(2, &[Some(Up), Some(Down), Some(Down)]),
+            Some(Down)
+        );
         // Two are degraded or worse, but only one is down.
         assert_eq!(
             quorum_health(2, &[Some(Up), Some(Degraded), Some(Down)]),

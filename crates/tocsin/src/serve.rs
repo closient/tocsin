@@ -439,6 +439,8 @@ impl Monitor {
         // but nothing is left to send them through: the worker records
         // each as failed and counts it in `tocsin_alerts_abandoned_total`.
         end_alerts_without_notifier(store, &notifiers, Removed::WhileStopped).await?;
+        // Their resolves go out once the worker starts.
+        retire_nodes(store, config).await?;
         let router = Arc::new(Router::new(config));
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let alerter = Alerter::start(
@@ -519,7 +521,8 @@ impl Monitor {
     /// running, if the checks cannot be scheduled, a notifier cannot be
     /// built, or the engine cannot start the new checks.
     /// [`ReloadError::Unfinished`] if the open alerts on removed notifiers
-    /// cannot be ended; the next reload or start tries again.
+    /// cannot be ended, or the open outages of retired nodes cannot be
+    /// withdrawn; the next reload or start tries again.
     pub(crate) async fn reload(&mut self, config: &Config) -> Result<(), ReloadError> {
         let plan = Plan::from_config(config).map_err(|error| {
             ReloadError::Rejected(Failure::new(
@@ -552,7 +555,10 @@ impl Monitor {
         self.router = router;
         let ended = end_alerts_without_notifier(&self.store, &self.notifiers, Removed::ByReload)
             .await
-            .map_err(ReloadError::Unfinished)?;
+            .map_err(ReloadError::Unfinished)?
+            + retire_nodes(&self.store, config)
+                .await
+                .map_err(ReloadError::Unfinished)?;
         if ended > 0 {
             self.alerter.waker().notify_one();
         }
@@ -662,6 +668,37 @@ async fn end_alerts_without_notifier(
         ),
     }
     Ok(ended)
+}
+
+/// Retires the stores of every node `config` marks retired, withdrawing
+/// the outages they have open here and queueing the resolves of their
+/// alerts. Returns how many deliveries it queued.
+async fn retire_nodes(store: &Store, config: &Config) -> Result<usize, Failure> {
+    let retired: Vec<String> = config
+        .nodes
+        .iter()
+        .filter(|node| node.retired)
+        .map(|node| node.id.to_string())
+        .collect();
+    if retired.is_empty() {
+        return Ok(0);
+    }
+    let queued = store
+        .retire_nodes(retired, tocsin_store::now_ms())
+        .await
+        .map_err(|error| {
+            Failure::new(
+                Exit::Runtime,
+                format!("cannot withdraw the outages of retired nodes: {error}"),
+            )
+        })?;
+    if queued > 0 {
+        tracing::warn!(
+            alerts = queued,
+            "withdrew the open outages of retired nodes and ended their alerts"
+        );
+    }
+    Ok(queued)
 }
 
 /// The root certificates HTTP and TLS checks verify against. Without a

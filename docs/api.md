@@ -287,7 +287,7 @@ node's `public_keys`.
 | 200 | The batch is applied and committed. The receipt counts what was applied and gives the new `cursor`; a pusher moves its own cursor only on this. |
 | 401 | A header is missing, the node is not listed, or the signature does not verify. All three get the same answer, and the first two are given before the body is read. |
 | 403 | The node is `retired`, or the store it pushed from is. |
-| 409 | The node has a store marked `conflicted`, or this store resent an outage change that differs from the one applied. Both mean two machines pushing as one node. |
+| 409 | The node has a store marked `conflicted`, this store was replaced by a newer store of the node and pushed again, or this store resent an outage change that differs from the one applied. All three mean two machines pushing as one node: every store of the node is then marked `conflicted` and refused until the node is retired, and the node's liveness heartbeat goes down with the reason. |
 | 413 | The body is over the size limit. The pusher sends fewer rows; nothing was written. |
 | 422 | The body names another node or store than the headers, holds a row that is not the pushing node's, is out of order, or holds a bad value. Nothing is written; `fields[].path` names the problems, by the body's own field names. |
 

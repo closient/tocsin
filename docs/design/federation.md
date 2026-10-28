@@ -328,8 +328,8 @@ end before its start) refuses the batch with the field named.
 - The receiver refuses its pushes with 403, withdraws its open outages
   (`ending = withdrawn`, alerts resolve as ended by the configuration, as
   for a check removed from config: [alerting.md](../alerting.md)), stops its liveness
-  watch, and keeps its history. Today a hub would never withdraw them,
-  because `withdraw_orphans` only reads its own node's outages.
+  watch, and keeps its history. The outages are withdrawn when the
+  hub starts or reloads with the node retired.
 - The bar sums nodes per day, so a retired node drops out from the first
   day it has no rollup; past days keep its share.
 

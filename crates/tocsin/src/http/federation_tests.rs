@@ -2,7 +2,8 @@
 
 //! The federation routes in process: a signed push applied and answered
 //! with its cursor, every refusal before the signature checks out the same
-//! 401, a retired node's 403, a conflicting store's 409, a row that is not
+//! 401, a retired node's 403, a conflicting store's 409, a rebuilt node's
+//! new store replacing its old one, a row that is not
 //! the pusher's refused whole, and the node list with what the last push
 //! said.
 
@@ -317,8 +318,8 @@ impl Api {
         self.send(request.body(Body::from(body)).unwrap()).await
     }
 
-    /// Sets the state of every store pushed here, as nothing yet does
-    /// (TOC-82).
+    /// Sets the state of every store pushed here directly, without the
+    /// pushes that would lead to it.
     fn mark_stores(&self, state: &str) -> rusqlite::Connection {
         let database =
             rusqlite::Connection::open(self.dir.path().join(tocsin_store::DB_FILE)).unwrap();
@@ -886,4 +887,48 @@ async fn a_remote_check_reads_unknown_while_its_node_is_not_heard_from() {
         let board = api.board().await;
         assert!(board.contains("api-port: Unknown"), "{board}");
     }
+}
+
+/// A rebuilt node's new store is taken and replaces the old one; the old
+/// one pushing again is refused as a conflict, and from then on so is the
+/// new one.
+#[tokio::test]
+async fn a_rebuilt_node_replaces_its_store_and_the_old_one_pushing_again_conflicts() {
+    const REBUILT: &str = "fedcba9876543210fedcba9876543210";
+    let api = api();
+    let mut first = batch();
+    first.outages = vec![open(1, 3, ago(60))];
+    let (status, body) = api.push(&first).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let rebuilt = Push {
+        store: Some(REBUILT),
+        ..Push::default()
+    };
+    let fresh = Batch {
+        store: REBUILT.into(),
+        ..batch()
+    };
+    let (status, body) = api.push_as(rebuilt, &fresh).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let database = rusqlite::Connection::open(api.dir.path().join(tocsin_store::DB_FILE)).unwrap();
+    let ending: String = database
+        .query_row("SELECT ending FROM outage WHERE origin_id = 3", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(ending, "withdrawn");
+
+    let (status, body) = api.push(&batch()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["message"].as_str().unwrap().contains("replaced"),
+        "{body}"
+    );
+    let rebuilt = Push {
+        store: Some(REBUILT),
+        ..Push::default()
+    };
+    let (status, body) = api.push_as(rebuilt, &fresh).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
 }

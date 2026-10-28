@@ -829,3 +829,136 @@ async fn an_upstream_that_refuses_pushes_goes_down_on_the_spoke_until_it_takes_t
     pushers.stop().await;
     monitor.stop().await;
 }
+
+/// Two machines pushing as `spoke`: the second one's new store replaces
+/// the first's, and when the first pushes again the hub refuses both and
+/// its liveness heartbeat for the node goes down saying why, so it alerts
+/// with the reason rather than as a silent node.
+#[tokio::test]
+async fn two_machines_pushing_as_one_node_alert_on_the_hub_with_the_reason() {
+    let (dir, store) = open();
+    let config = watching(load_text(
+        "hub",
+        watched(&config_text("hub", "http://hub.invalid")),
+        Some(&hub_key()),
+    ));
+    let monitor = Monitor::start(&config, &store, &EventBus::new(), &Metrics::new())
+        .await
+        .unwrap();
+    let hub = serve_hub(dir, Arc::clone(&store), config, monitor.heartbeats()).await;
+    let (old, rebuilt) = (spoke(&hub), spoke(&hub));
+    let start = |spoke: &Spoke| {
+        Upstreams::from_config(&spoke.config, &spoke.metrics)
+            .unwrap()
+            .paced(watched_pacing())
+            .start(&spoke.store, &HeartbeatHandle::default())
+    };
+    let stores = || {
+        hub.read()
+            .query_row(
+                "SELECT count(*), sum(state = 'conflicted') FROM node_store WHERE local = 0",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
+            )
+            .unwrap()
+    };
+
+    let pushers = start(&old);
+    eventually("the hub hears the old machine", || async {
+        up(&monitor, "node:spoke")
+    })
+    .await;
+    pushers.stop().await;
+    let rebuilt_pushers = start(&rebuilt);
+    eventually("the rebuilt machine's store replaces it", || async {
+        stores() == (2, Some(0))
+    })
+    .await;
+
+    let old_pushers = start(&old);
+    eventually("both stores are conflicted", || async {
+        stores() == (2, Some(2))
+    })
+    .await;
+    eventually("the node is down and alerting", || {
+        alerting(&hub.store, "hub", "node:spoke")
+    })
+    .await;
+    let told: i64 = hub
+        .read()
+        .query_row(
+            "SELECT count(*) FROM check_result
+             WHERE node_id = 'hub' AND check_id = 'node:spoke' AND error LIKE '%retire one%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(told > 0, "the node went down without the reason");
+    old_pushers.stop().await;
+    rebuilt_pushers.stop().await;
+    monitor.stop().await;
+}
+
+/// When `[[node]] retired = true` takes effect.
+#[derive(Debug, Clone, Copy)]
+enum Retiring {
+    AtStart,
+    AtReload,
+}
+
+/// Retiring a node withdraws the outages it has open on the hub, whether
+/// the hub starts with it retired or a reload retires it.
+#[tokio::test]
+async fn retiring_a_node_withdraws_its_open_outages_at_start_and_at_reload() {
+    for when in [Retiring::AtStart, Retiring::AtReload] {
+        let hub = hub().await;
+        let spoke = spoke(&hub);
+        let id = spoke
+            .store
+            .open_outage(outage(tocsin_store::now_ms() - 60_000))
+            .await
+            .unwrap();
+        let pushers = spoke.start(10);
+        eventually("the hub holds the open outage", || async {
+            hub.outages() == [(id, false)]
+        })
+        .await;
+        pushers.stop().await;
+
+        let text = watched(&config_text("hub", "http://hub.invalid"));
+        let retired = text
+            .replace("push_to = [\"hub\"]", "push_to = [\"hub\"]\nretired = true")
+            .replace(
+                "default_nodes = [\"hub\", \"spoke\"]",
+                "default_nodes = [\"hub\"]",
+            );
+        let retired = load_text("hub", retired, Some(&hub_key()));
+        let monitor = match when {
+            Retiring::AtStart => {
+                Monitor::start(&retired, &hub.store, &EventBus::new(), &Metrics::new())
+                    .await
+                    .unwrap()
+            }
+            Retiring::AtReload => {
+                let running = load_text("hub", text, Some(&hub_key()));
+                let mut monitor =
+                    Monitor::start(&running, &hub.store, &EventBus::new(), &Metrics::new())
+                        .await
+                        .unwrap();
+                assert_eq!(hub.outages(), [(id, false)], "{when:?}: withdrawn too soon");
+                monitor.reload(&retired).await.unwrap();
+                monitor
+            }
+        };
+        let ending: String = hub
+            .read()
+            .query_row(
+                "SELECT ending FROM outage WHERE node_id = 'spoke' AND origin_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(ending, "withdrawn", "{when:?}");
+        monitor.stop().await;
+    }
+}

@@ -416,6 +416,22 @@
             "null"
           ]
         },
+        "nodes": {
+          "description": "The `[[node]]`s that run this check; without it, `[federation]\ndefault_nodes`. Each node starts only the checks naming it. Run on\ntwo or more nodes, the check is a quorum check: where their results\nconverge, its state is the worst health at least `quorum` fresh\nnodes agree on, and it alerts only on that.",
+          "items": {
+            "$ref": "#/definitions/Id"
+          },
+          "type": "array"
+        },
+        "quorum": {
+          "description": "How many of the check's nodes must agree on a health for it to be\nthe check's; a majority of its nodes when absent. Needs two or more\nnodes.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "target": {
           "description": "What is probed. Its form depends on the type: a URL for `http`,\n`host:port` for `tcp`, `host` or `host:port` for `tls`, a domain\nname for `dns` and a host for `icmp`.",
           "type": "string"
@@ -907,6 +923,13 @@
             "string",
             "null"
           ]
+        },
+        "nodes": {
+          "description": "The one `[[node]]` that watches this heartbeat's deadline, the one\nits job pings; without it, `[federation] default_nodes`, which must\nthen name exactly one node.",
+          "items": {
+            "$ref": "#/definitions/Id"
+          },
+          "type": "array"
         },
         "topology_node": {
           "anyOf": [

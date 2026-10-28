@@ -57,6 +57,8 @@ A probe run on an interval, whose result sets a component's health.
 | `labels` | table of string |  |  | Labels on the check's alerts, such as `{ team = "ops" }`: a receiver like Alertmanager routes on them. `[alerting]` can require some and limit their values. |
 | `link` | [array of tables](#table-link) |  |  | Links shown with the check, such as its dashboard or runbook, each a `[[check.link]]` table. |
 | `name` | string |  |  | Display name; the id is shown when it is absent. |
+| `nodes` | array of [`Id`](#type-id) |  |  | The `[[node]]`s that run this check; without it, `[federation] default_nodes`. Each node starts only the checks naming it. Run on two or more nodes, the check is a quorum check: where their results converge, its state is the worst health at least `quorum` fresh nodes agree on, and it alerts only on that. |
+| `quorum` | integer, ≥ 1 |  |  | How many of the check's nodes must agree on a health for it to be the check's; a majority of its nodes when absent. Needs two or more nodes. |
 | `target` | string | yes |  | What is probed. Its form depends on the type: a URL for `http`, `host:port` for `tcp`, `host` or `host:port` for `tls`, a domain name for `dns` and a host for `icmp`. |
 | `tcp` | [table](#table-tcpsettings) |  |  | Settings for `tcp` checks. |
 | `timeout` | [`Duration`](#type-duration) |  | `"10s"` | How long one probe may take before it counts as failed. Must be shorter than the interval. |
@@ -282,6 +284,7 @@ A `[[check.link]]` or `[[heartbeat.link]]`: a named link to somewhere an operato
 | `labels` | table of string |  |  | Labels on the heartbeat's alerts, such as `{ team = "ops" }`: a receiver like Alertmanager routes on them. `[alerting]` can require some and limit their values. |
 | `link` | [array of tables](#table-link) |  |  | Links shown with the heartbeat, such as the job's logs or runbook, each a `[[heartbeat.link]]` table. |
 | `name` | string |  |  | Display name; the id is shown when it is absent. |
+| `nodes` | array of [`Id`](#type-id) |  |  | The one `[[node]]` that watches this heartbeat's deadline, the one its job pings; without it, `[federation] default_nodes`, which must then name exactly one node. |
 | `topology_node` | [`TopologyNode`](#type-topologynode) |  |  | The node this heartbeat watches in a map of the estate, such as `operations-01/job:backup`. Every alert of the heartbeat carries it as the `topology_node` label; `[topology]` can limit the ids allowed. |
 
 <a id="table-node"></a>

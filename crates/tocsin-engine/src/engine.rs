@@ -11,11 +11,11 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tocsin_core::Health;
-use tocsin_core::config::{Check, ComponentRule, Heartbeat};
+use tocsin_core::config::{Check, ComponentRule, Heartbeat, QUORUM_NODE};
 use tocsin_core::probe::{CompiledCheck, Facts, ProbeError, ProbeErrorKind, ProbeOutcome};
 use tocsin_core::state::{
     ComponentStatus, Confirmation, Confirmed, JITTER_DIVISOR, Transition, component_health,
-    component_status, jitter,
+    component_status, jitter, quorum_health,
 };
 use tocsin_store::{
     LastUp, LatestResult, NewCheckResult, NewOutage, Outage, OutageChange, OutageEnd, SubjectKind,
@@ -27,7 +27,7 @@ use tracing::{error, info};
 
 use crate::event::{CheckChange, ComponentChange, EngineEvent, MemberKind};
 use crate::notice::{Notice, in_maintenance, incident_impact, next_boundary};
-use crate::plan::Plan;
+use crate::plan::{Plan, QuorumPlan, Role};
 use crate::ports::{Clock, History, Notices, Runner, Sink, SystemClock};
 
 /// How long the notices task sleeps when no maintenance boundary is due
@@ -44,6 +44,11 @@ pub const PROBE_BACKSTOP: Duration = Duration::from_secs(5);
 /// the job's own report, and a missed deadline has already waited out the
 /// grace, so neither needs corroborating.
 pub const HEARTBEAT_CONFIRM: u32 = 1;
+
+/// How many agreeing evaluations confirm a quorum check's change: one. Each
+/// node's evidence is already its confirmed state, so the evaluation needs
+/// no corroborating of its own.
+const QUORUM_CONFIRM: u32 = 1;
 
 /// How the error of a missed heartbeat deadline begins, which tells a
 /// miss from a ping in its history: a ping reporting itself down has its
@@ -327,7 +332,8 @@ pub struct Engine {
     /// Stops the notices task.
     stop: watch::Sender<bool>,
     notices: JoinHandle<()>,
-    /// Every running check and heartbeat, by id.
+    /// Every running check, heartbeat and quorum evaluation, by
+    /// [`Spec::key`].
     members: BTreeMap<String, Member>,
 }
 
@@ -478,70 +484,187 @@ struct Member {
 impl fmt::Debug for Member {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Member")
-            .field("id", &self.spec.id())
+            .field("key", &self.spec.key())
             .finish_non_exhaustive()
     }
 }
 
-/// A check or heartbeat as configured.
+/// A check, heartbeat or quorum evaluation as configured.
 #[derive(Clone)]
 enum Spec {
-    Check(Arc<CompiledCheck>),
-    Heartbeat(Heartbeat),
+    /// A check run on this node, and the part its results play.
+    Check(Arc<CompiledCheck>, Role),
+    /// A heartbeat, and when it may open an alert: a `quorum:<check>`
+    /// heartbeat alerts when its evaluation would.
+    Heartbeat(Box<Heartbeat>, Gate),
+    /// A quorum check's state, derived from its nodes' results.
+    Quorum(Arc<QuorumPlan>),
+}
+
+/// When a member's change may open an alert of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Gate {
+    /// Always, maintenance windows aside.
+    Open,
+    /// Never: another node alerts for it.
+    Quiet,
+    /// Only while every one of these `node:<id>` heartbeats, those of the
+    /// nodes ahead of this one in `[federation] alert_order`, is not up.
+    /// One this node does not watch counts as not up, so a page is never
+    /// lost to a node it cannot see.
+    Behind(Vec<String>),
+}
+
+impl Gate {
+    /// The gate of a quorum evaluation, from the nodes ahead of this one.
+    fn of_quorum(quorum: &QuorumPlan) -> Gate {
+        match &quorum.ahead {
+            None => Gate::Quiet,
+            Some(ahead) if ahead.is_empty() => Gate::Open,
+            Some(ahead) => Gate::Behind(ahead.clone()),
+        }
+    }
+
+    /// Whether a change may open an alert now, given the members' states.
+    fn may_open(&self, state: &State) -> bool {
+        match self {
+            Gate::Open => true,
+            Gate::Quiet => false,
+            Gate::Behind(ahead) => ahead.iter().all(|id| {
+                state
+                    .checks
+                    .get(id)
+                    .and_then(|entry| entry.state)
+                    .is_none_or(|state| state.health != Health::Up)
+            }),
+        }
+    }
 }
 
 impl Spec {
     fn all(plan: &Plan) -> Vec<Spec> {
+        let gates: HashMap<&str, Gate> = plan
+            .quorums
+            .iter()
+            .filter_map(|quorum| {
+                let heartbeat = quorum.heartbeat.as_deref()?;
+                Some((heartbeat, Gate::of_quorum(quorum)))
+            })
+            .collect();
         plan.checks
             .iter()
-            .map(|compiled| Spec::Check(Arc::clone(compiled)))
-            .chain(plan.heartbeats.iter().cloned().map(Spec::Heartbeat))
+            .map(|compiled| {
+                let role = plan
+                    .roles
+                    .get(compiled.check().id.as_str())
+                    .copied()
+                    .unwrap_or(Role::Own);
+                Spec::Check(Arc::clone(compiled), role)
+            })
+            .chain(plan.heartbeats.iter().map(|heartbeat| {
+                let gate = gates
+                    .get(heartbeat.id.as_str())
+                    .cloned()
+                    .unwrap_or(Gate::Open);
+                Spec::Heartbeat(Box::new(heartbeat.clone()), gate)
+            }))
+            .chain(plan.quorums.iter().cloned().map(Spec::Quorum))
             .collect()
     }
 
+    /// What the engine keys its member by: the id, or for a quorum
+    /// evaluation `*/<check>`, since the check's own run on this node,
+    /// its evidence, has the id.
+    fn key(&self) -> String {
+        match self {
+            Spec::Quorum(quorum) => format!("{QUORUM_NODE}/{}", quorum.check_id),
+            _ => self.id(),
+        }
+    }
+
+    /// The check or heartbeat it is.
     fn id(&self) -> String {
         match self {
-            Spec::Check(compiled) => compiled.check().id.to_string(),
-            Spec::Heartbeat(heartbeat) => heartbeat.id.to_string(),
+            Spec::Check(compiled, _) => compiled.check().id.to_string(),
+            Spec::Heartbeat(heartbeat, _) => heartbeat.id.to_string(),
+            Spec::Quorum(quorum) => quorum.check_id.clone(),
+        }
+    }
+
+    /// The node its results and outages are recorded under: `local`, or
+    /// [`QUORUM_NODE`] for a quorum evaluation.
+    fn node<'a>(&self, local: &'a str) -> &'a str {
+        match self {
+            Spec::Quorum(_) => QUORUM_NODE,
+            _ => local,
         }
     }
 
     fn kind(&self) -> MemberKind {
         match self {
-            Spec::Check(_) => MemberKind::Check,
-            Spec::Heartbeat(_) => MemberKind::Heartbeat,
+            Spec::Check(..) | Spec::Quorum(_) => MemberKind::Check,
+            Spec::Heartbeat(..) => MemberKind::Heartbeat,
         }
     }
 
     fn component(&self) -> Option<String> {
         match self {
-            Spec::Check(compiled) => compiled.check().component.as_ref(),
-            Spec::Heartbeat(heartbeat) => heartbeat.component.as_ref(),
+            Spec::Check(compiled, _) => {
+                compiled.check().component.as_ref().map(ToString::to_string)
+            }
+            Spec::Heartbeat(heartbeat, _) => heartbeat.component.as_ref().map(ToString::to_string),
+            Spec::Quorum(quorum) => quorum.component.clone(),
         }
-        .map(ToString::to_string)
     }
 
     /// How many agreeing results confirm a change.
     fn confirm(&self) -> u32 {
         match self {
-            Spec::Check(compiled) => compiled.check().confirm,
-            Spec::Heartbeat(_) => HEARTBEAT_CONFIRM,
+            Spec::Check(compiled, _) => compiled.check().confirm,
+            Spec::Heartbeat(..) => HEARTBEAT_CONFIRM,
+            Spec::Quorum(_) => QUORUM_CONFIRM,
         }
     }
 
     /// How long after its latest `up` result it is still up; see `seed`.
     fn up_window_ms(&self) -> i64 {
         match self {
-            Spec::Check(compiled) => up_window_ms(compiled.check()),
-            Spec::Heartbeat(heartbeat) => allowance_ms(heartbeat),
+            Spec::Check(compiled, _) => up_window_ms(compiled.check()),
+            Spec::Heartbeat(heartbeat, _) => allowance_ms(heartbeat),
+            // Its first evaluation after a start comes one window in.
+            Spec::Quorum(quorum) => quorum
+                .window_ms
+                .saturating_add(duration_ms(quorum.interval)),
+        }
+    }
+
+    /// Whether it is the check's or heartbeat's state in the snapshot,
+    /// events and components: all but a quorum check's evidence, whose
+    /// evaluation is.
+    fn presented(&self) -> bool {
+        !matches!(self, Spec::Check(_, Role::Evidence))
+    }
+
+    /// When its changes may open an alert.
+    fn gate(&self) -> Gate {
+        match self {
+            Spec::Check(_, Role::Own) => Gate::Open,
+            Spec::Check(_, Role::Quiet | Role::Evidence) => Gate::Quiet,
+            Spec::Heartbeat(_, gate) => gate.clone(),
+            Spec::Quorum(quorum) => Gate::of_quorum(quorum),
         }
     }
 
     /// Whether `other` is configured exactly as this one is.
     fn same(&self, other: &Spec) -> bool {
         match (self, other) {
-            (Spec::Check(this), Spec::Check(other)) => this.check() == other.check(),
-            (Spec::Heartbeat(this), Spec::Heartbeat(other)) => this == other,
+            (Spec::Check(this, this_role), Spec::Check(other, other_role)) => {
+                this.check() == other.check() && this_role == other_role
+            }
+            (Spec::Heartbeat(this, this_gate), Spec::Heartbeat(other, other_gate)) => {
+                this == other && this_gate == other_gate
+            }
+            (Spec::Quorum(this), Spec::Quorum(other)) => this == other,
             _ => false,
         }
     }
@@ -551,6 +674,7 @@ impl Spec {
 enum Run {
     Check(CheckRun),
     Heartbeat(HeartbeatRun),
+    Quorum(QuorumRun),
 }
 
 impl Run {
@@ -558,14 +682,23 @@ impl Run {
         match self {
             Run::Check(run) => &run.tracker,
             Run::Heartbeat(run) => &run.tracker,
+            Run::Quorum(run) => &run.tracker,
         }
     }
 
     /// The same member's state, carried over to `spec`, a changed
     /// configuration of the same kind.
-    fn carry_over(self, spec: &Spec) -> Run {
+    fn carry_over(mut self, spec: &Spec) -> Run {
+        let tracker = match &mut self {
+            Run::Check(run) => &mut run.tracker,
+            Run::Heartbeat(run) => &mut run.tracker,
+            Run::Quorum(run) => &mut run.tracker,
+        };
+        tracker.component = spec.component();
+        tracker.gate = spec.gate();
+        tracker.presented = spec.presented();
         match (self, spec) {
-            (Run::Check(mut run), Spec::Check(compiled)) => {
+            (Run::Check(mut run), Spec::Check(compiled, _)) => {
                 let confirm = compiled.check().confirm;
                 if confirm != run.compiled.check().confirm {
                     run.tracker.confirmation = match run.tracker.confirmation.state() {
@@ -573,11 +706,14 @@ impl Run {
                         None => Confirmation::new(confirm),
                     };
                 }
-                run.tracker.component = spec.component();
                 run.compiled = Arc::clone(compiled);
                 Run::Check(run)
             }
-            (Run::Heartbeat(mut run), Spec::Heartbeat(heartbeat)) => {
+            (Run::Quorum(mut run), Spec::Quorum(quorum)) => {
+                run.quorum = Arc::clone(quorum);
+                Run::Quorum(run)
+            }
+            (Run::Heartbeat(mut run), Spec::Heartbeat(heartbeat, _)) => {
                 // The deadline was measured from the latest result (or, after
                 // a miss the engine slept through, from when it woke); measure
                 // the new allowance from the same point. A miss waiting to be
@@ -586,13 +722,27 @@ impl Run {
                 run.allowance_ms = allowance_ms(heartbeat);
                 run.deadline_ms = anchor_ms.saturating_add(run.allowance_ms);
                 run.retry = None;
-                run.tracker.component = spec.component();
-                run.heartbeat = Box::new(heartbeat.clone());
+                run.heartbeat.clone_from(heartbeat);
                 Run::Heartbeat(run)
             }
             (run, _) => run,
         }
     }
+}
+
+/// What `specs` run, as `(node, kind, id)`: the outages left open under
+/// anything else are orphans.
+fn running(specs: &[Spec], node_id: &str) -> HashSet<(String, SubjectKind, String)> {
+    specs
+        .iter()
+        .map(|spec| {
+            (
+                spec.node(node_id).to_owned(),
+                subject_kind(spec.kind()),
+                spec.id(),
+            )
+        })
+        .collect()
 }
 
 /// Moves `members` to `plan`; see [`Engine::reconcile`].
@@ -606,65 +756,88 @@ async fn reconcile(
     let mut added = Vec::new();
     let mut changed = Vec::new();
     for spec in &specs {
-        match members.get(&spec.id()) {
+        match members.get(&spec.key()) {
             Some(member) if member.spec.same(spec) => {}
             Some(member) if member.spec.kind() == spec.kind() => changed.push(spec.clone()),
             _ => added.push(spec.clone()),
         }
     }
-    let wanted: HashMap<String, MemberKind> =
-        specs.iter().map(|spec| (spec.id(), spec.kind())).collect();
+    let wanted: HashMap<String, &Spec> = specs.iter().map(|spec| (spec.key(), spec)).collect();
     let removed: Vec<String> = members
         .iter()
-        .filter(|(id, member)| wanted.get(*id) != Some(&member.spec.kind()))
-        .map(|(id, _)| id.clone())
+        .filter(|(key, member)| {
+            wanted
+                .get(*key)
+                .is_none_or(|spec| spec.kind() != member.spec.kind())
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    let changed_keys: Vec<String> = changed.iter().map(Spec::key).collect();
+    // A removed member leaves the snapshot, as does a changed one no longer
+    // shown; one still shown keeps its entry, and its latest raw result,
+    // for its next task.
+    let mut gone: Vec<String> = removed
+        .iter()
+        .map(|key| (key, true))
+        .chain(
+            changed_keys
+                .iter()
+                .zip(&changed)
+                .map(|(key, spec)| (key, !spec.presented())),
+        )
+        .filter_map(|(key, leaving)| {
+            let old = &members.get(key)?.spec;
+            (leaving && old.presented()).then(|| old.id())
+        })
         .collect();
 
     // Every read, before anything stops.
     let now_ms = shared.parts.clock.now_ms();
     let history = shared.parts.history.as_ref();
-    let mut seeds = seed(history, &shared.node_id, &added, now_ms).await?;
+    let mut seeds = HashMap::new();
+    for node in [shared.node_id.as_str(), QUORUM_NODE] {
+        let on_node: Vec<Spec> = added
+            .iter()
+            .filter(|spec| spec.node(&shared.node_id) == node)
+            .cloned()
+            .collect();
+        seeds.extend(seed(history, node, &on_node, now_ms).await?);
+    }
     let anchors = heartbeat_anchors(history, &shared.node_id, &added).await?;
 
     // New pings for a removed heartbeat are refused as unknown from here;
     // a changed one's keep queueing for its next task.
     {
         let mut senders = heartbeats.write();
-        for id in &removed {
-            senders.remove(id);
+        for key in &removed {
+            senders.remove(key);
         }
     }
-    let changed_ids: Vec<String> = changed.iter().map(Spec::id).collect();
-    let mut handed_back = stop(members, removed.iter().chain(&changed_ids)).await;
+    let mut handed_back = stop(members, removed.iter().chain(&changed_keys)).await;
 
-    let running: HashSet<(SubjectKind, String)> = specs
-        .iter()
-        .map(|spec| (subject_kind(spec.kind()), spec.id()))
-        .collect();
-    withdraw_orphans(shared, &running).await;
+    withdraw_orphans(shared, &running(&specs, &shared.node_id)).await;
 
     let start_ms = shared.parts.clock.now_ms();
     let mut runs = Vec::with_capacity(added.len() + changed.len());
-    let mut panicked = Vec::new();
     for spec in &changed {
-        match handed_back.remove(&spec.id()) {
+        match handed_back.remove(&spec.key()) {
             Some(run) => runs.push((spec.clone(), run.carry_over(spec))),
-            None => panicked.push(spec.id()),
+            None if spec.presented() => gone.push(spec.id()),
+            None => {}
         }
     }
     let mut new_senders = Vec::new();
     for spec in &added {
         let seed = seeds
-            .remove(&spec.id())
+            .remove(&spec.key())
             .unwrap_or_else(|| Seed::unknown(spec.confirm()));
-        let (run, sender) = new_run(spec, seed, &anchors, start_ms);
+        let (run, sender) = new_run(shared, heartbeats, spec, seed, &anchors, start_ms);
         if let Some(sender) = sender {
-            new_senders.push((spec.id(), sender));
+            new_senders.push((spec.key(), sender));
         }
         runs.push((spec.clone(), run));
     }
 
-    let gone: Vec<&String> = removed.iter().chain(&panicked).collect();
     publish(
         shared,
         &gone,
@@ -675,19 +848,30 @@ async fn reconcile(
     let start = Instant::now();
     for (spec, run) in runs {
         let (stop, stopped) = watch::channel(false);
-        let shared = Arc::clone(shared);
-        let task =
-            match run {
-                Run::Check(run) => tokio::spawn(async move {
-                    Run::Check(check_loop(shared, run, start, stopped).await)
-                }),
-                Run::Heartbeat(run) => tokio::spawn(async move {
-                    Run::Heartbeat(heartbeat_loop(shared, run, stopped).await)
-                }),
-            };
-        members.insert(spec.id(), Member { spec, stop, task });
+        let task = spawn(Arc::clone(shared), run, start, stopped);
+        members.insert(spec.key(), Member { spec, stop, task });
     }
     Ok(())
+}
+
+/// Starts the task that runs `run`, from `start`.
+fn spawn(
+    shared: Arc<Shared>,
+    run: Run,
+    start: Instant,
+    stopped: watch::Receiver<bool>,
+) -> JoinHandle<Run> {
+    match run {
+        Run::Check(run) => {
+            tokio::spawn(async move { Run::Check(check_loop(shared, run, start, stopped).await) })
+        }
+        Run::Heartbeat(run) => {
+            tokio::spawn(async move { Run::Heartbeat(heartbeat_loop(shared, run, stopped).await) })
+        }
+        Run::Quorum(run) => {
+            tokio::spawn(async move { Run::Quorum(quorum_loop(shared, run, start, stopped).await) })
+        }
+    }
 }
 
 /// Stops the members with `ids` and waits for them, returning the state
@@ -717,20 +901,21 @@ async fn stop<'a>(
     handed_back
 }
 
-/// Shows the reconciled members in the shared state: drops those `gone`,
-/// enters each of `trackers` (a changed one keeping its latest raw result),
-/// rebuilds the components from `plan` and emits the statuses that moved.
+/// Shows the reconciled members in the shared state: drops the ids `gone`,
+/// enters each of `trackers` that is shown (a changed one keeping its
+/// latest raw result), rebuilds the components from `plan` and emits the
+/// statuses that moved.
 fn publish<'a>(
     shared: &Shared,
-    gone: &[&String],
+    gone: &[String],
     trackers: impl Iterator<Item = &'a Tracker>,
     plan: &Plan,
 ) {
     let mut state = shared.lock();
     for id in gone {
-        state.checks.remove(*id);
+        state.checks.remove(id);
     }
-    for tracker in trackers {
+    for tracker in trackers.filter(|tracker| tracker.presented) {
         let last = state.checks.get(&tracker.id).and_then(|entry| entry.last);
         state.checks.insert(
             tracker.id.clone(),
@@ -747,29 +932,36 @@ fn publish<'a>(
     }
 }
 
-/// Withdraws every outage this node has open for a check or heartbeat not
-/// in `running`, so it does not stay open forever; its alerts end with a
+/// Withdraws every outage this node has open, as itself or as
+/// [`QUORUM_NODE`], for a check, heartbeat or quorum evaluation not in
+/// `running`, so it does not stay open forever; its alerts end with a
 /// resolve that says the configuration ended them, not one claiming a
 /// recovery nobody saw. A failure is logged, and the outage is
 /// tried again at the next reconcile or start.
-async fn withdraw_orphans(shared: &Shared, running: &HashSet<(SubjectKind, String)>) {
+async fn withdraw_orphans(shared: &Shared, running: &HashSet<(String, SubjectKind, String)>) {
     let history = shared.parts.history.as_ref();
-    let open = match history.open_outages(&shared.node_id).await {
-        Ok(open) => open,
-        Err(error) => {
-            error!(
-                %error,
-                "reading open outages failed, so those of removed checks and heartbeats stay \
-                 open until the next reload or restart"
-            );
-            return;
+    let mut open = Vec::new();
+    for node in [shared.node_id.as_str(), QUORUM_NODE] {
+        match history.open_outages(node).await {
+            Ok(outages) => open.extend(outages),
+            Err(error) => {
+                error!(
+                    %error,
+                    "reading open outages failed, so those of removed checks and heartbeats \
+                     stay open until the next reload or restart"
+                );
+                return;
+            }
         }
-    };
+    }
     let now_ms = shared.parts.clock.now_ms();
-    for outage in open
-        .into_iter()
-        .filter(|outage| !running.contains(&(outage.subject_kind, outage.check_id.clone())))
-    {
+    for outage in open.into_iter().filter(|outage| {
+        !running.contains(&(
+            outage.node_id.clone(),
+            outage.subject_kind,
+            outage.check_id.clone(),
+        ))
+    }) {
         match history.withdraw(outage.id, now_ms).await {
             Ok(()) => info!(
                 kind = %outage.subject_kind,
@@ -825,9 +1017,24 @@ impl Shared {
 struct Tracker {
     id: String,
     kind: MemberKind,
+    /// The node its results and outages are recorded under.
+    node_id: String,
     component: Option<String>,
     confirmation: Confirmation,
     outage: Option<OpenOutage>,
+    /// When its changes may open an alert.
+    gate: Gate,
+    /// Whether it is shown as the check's or heartbeat's state; see
+    /// `Spec::presented`.
+    presented: bool,
+}
+
+/// A quorum check's evaluation, owned by its task.
+struct QuorumRun {
+    quorum: Arc<QuorumPlan>,
+    tracker: Tracker,
+    /// Where the `quorum:<check>` heartbeat is pinged.
+    heartbeats: HeartbeatHandle,
 }
 
 /// A check's private state, owned by its task.
@@ -883,6 +1090,8 @@ impl Seed {
 /// A new member's run, from its seed and, for a heartbeat, its anchor (see
 /// `heartbeat_anchors`), with the sender a heartbeat's pings arrive on.
 fn new_run(
+    shared: &Shared,
+    heartbeats: &HeartbeatHandle,
     spec: &Spec,
     seed: Seed,
     anchors: &HashMap<String, i64>,
@@ -895,19 +1104,30 @@ fn new_run(
     let tracker = Tracker {
         id: spec.id(),
         kind: spec.kind(),
+        node_id: spec.node(&shared.node_id).to_owned(),
         component: spec.component(),
         confirmation,
         outage,
+        gate: spec.gate(),
+        presented: spec.presented(),
     };
     match spec {
-        Spec::Check(compiled) => (
+        Spec::Check(compiled, _) => (
             Run::Check(CheckRun {
                 compiled: Arc::clone(compiled),
                 tracker,
             }),
             None,
         ),
-        Spec::Heartbeat(heartbeat) => {
+        Spec::Quorum(quorum) => (
+            Run::Quorum(QuorumRun {
+                quorum: Arc::clone(quorum),
+                tracker,
+                heartbeats: heartbeats.clone(),
+            }),
+            None,
+        ),
+        Spec::Heartbeat(heartbeat, _) => {
             let (sender, pings) = mpsc::channel(PING_QUEUE);
             let allowance_ms = allowance_ms(heartbeat);
             // Measured from the latest stored result, so a restart does not
@@ -916,7 +1136,7 @@ fn new_run(
             let anchor = anchors.get(&tracker.id).copied();
             let anchor_ms = anchor.unwrap_or(start_ms);
             let run = HeartbeatRun {
-                heartbeat: Box::new(heartbeat.clone()),
+                heartbeat: heartbeat.clone(),
                 tracker,
                 allowance_ms,
                 deadline_ms: anchor_ms.saturating_add(allowance_ms),
@@ -976,6 +1196,7 @@ async fn seed(
         .map(|last| (last.check_id.clone(), last))
         .collect();
 
+    // Keyed by `Spec::key`, which on one node is the id.
     let mut seeds = HashMap::with_capacity(specs.len());
     for spec in specs {
         let id = spec.id();
@@ -999,7 +1220,7 @@ async fn seed(
         } else {
             Seed::unknown(confirm)
         };
-        seeds.insert(id, seed);
+        seeds.insert(spec.key(), seed);
     }
     Ok(seeds)
 }
@@ -1041,6 +1262,11 @@ fn allowance_ms(heartbeat: &Heartbeat) -> i64 {
         .get()
         .saturating_add(heartbeat.grace.get());
     i64::try_from(allowance.as_millis()).unwrap_or(i64::MAX)
+}
+
+/// `duration` in milliseconds.
+fn duration_ms(duration: Duration) -> i64 {
+    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
 /// How long after a check's latest `up` result it can still be confirmed
@@ -1208,7 +1434,7 @@ async fn check_loop(
         let Some(outcome) = outcome else {
             return run;
         };
-        let result = new_result(&shared.node_id, &run.tracker.id, &outcome);
+        let result = new_result(&run.tracker.node_id, &run.tracker.id, &outcome);
         if let Err(error) = record(&shared, &mut run.tracker, result).await {
             error!(
                 check = %run.tracker.id,
@@ -1283,7 +1509,7 @@ async fn take_ping(
         return Err(PingError::NotStored);
     }
     let at_ms = arrived_ms.max(run.last_ms);
-    let result = ping_result(&shared.node_id, &run.tracker.id, at_ms, ping);
+    let result = ping_result(&run.tracker.node_id, &run.tracker.id, at_ms, ping);
     if let Err(error) = record(shared, &mut run.tracker, result).await {
         error!(
             heartbeat = %run.tracker.id,
@@ -1301,7 +1527,7 @@ async fn take_ping(
 /// Resolves with whether it was stored; if not, schedules another try.
 async fn miss(shared: &Shared, run: &mut HeartbeatRun) -> bool {
     let at_ms = run.deadline_ms;
-    let result = missed_result(&shared.node_id, &run.heartbeat, at_ms);
+    let result = missed_result(&run.tracker.node_id, &run.heartbeat, at_ms);
     match record(shared, &mut run.tracker, result).await {
         Ok(()) => {
             let now_ms = shared.parts.clock.now_ms();
@@ -1325,6 +1551,196 @@ async fn miss(shared: &Shared, run: &mut HeartbeatRun) -> bool {
             run.retry = Some((Instant::now() + wait, wait));
             false
         }
+    }
+}
+
+/// Evaluates one quorum check until it is stopped, then hands its state
+/// back: first one window after the start, so every node has had the time
+/// a fresh result takes to arrive, then every interval.
+///
+/// Each evaluation takes every node's confirmed health, from its open
+/// outage for the check (none means up), if its latest result is within
+/// the window, and records the health at least `quorum` of them agree on
+/// (see [`quorum_health`]) as a result under [`QUORUM_NODE`], which
+/// confirms at once. It then pings the `quorum:<check>` heartbeat up.
+///
+/// With too few fresh nodes the check is unknown: it is shown with no
+/// state, its confirmation and any open outage stay as they were, nothing
+/// is recorded, and the heartbeat is pinged down, saying which nodes are
+/// stale. An evaluation whose reads fail is logged and skipped, so the
+/// heartbeat's deadline, not this loop, reports a store that stays down.
+async fn quorum_loop(
+    shared: Arc<Shared>,
+    mut run: QuorumRun,
+    start: Instant,
+    mut stopped: watch::Receiver<bool>,
+) -> QuorumRun {
+    let window = Duration::from_millis(u64::try_from(run.quorum.window_ms).unwrap_or(0));
+    let mut ticks = tokio::time::interval_at(start + window, run.quorum.interval);
+    ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = ticks.tick() => {}
+            _ = stopped.changed() => return run,
+        }
+        let evidence = tokio::select! {
+            evidence = gather(&shared, &run.quorum) => evidence,
+            _ = stopped.changed() => return run,
+        };
+        let evidence = match evidence {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                error!(
+                    check = %run.quorum.check_id,
+                    %error,
+                    "reading the nodes' results for a quorum check failed; this evaluation is \
+                     skipped"
+                );
+                continue;
+            }
+        };
+        let ping = evaluate(&shared, &mut run, &evidence).await;
+        if let Some(heartbeat) = run.quorum.heartbeat.clone() {
+            // Not awaited past a stop: a reconcile that stops this task and
+            // the heartbeat's together waits for this one before the
+            // heartbeat's next task takes the ping.
+            tokio::select! {
+                pinged = run.heartbeats.ping(&heartbeat, ping) => if let Err(error) = pinged {
+                    error!(heartbeat = %heartbeat, %error, "pinging a quorum heartbeat failed");
+                },
+                _ = stopped.changed() => return run,
+            }
+        }
+    }
+}
+
+/// Each of `quorum`'s nodes' confirmed health for its check, in order:
+/// `None` for one with no result within the window.
+async fn gather(
+    shared: &Shared,
+    quorum: &QuorumPlan,
+) -> Result<Vec<Option<Health>>, tocsin_store::Error> {
+    let history = shared.parts.history.as_ref();
+    let now_ms = shared.parts.clock.now_ms();
+    let mut evidence = Vec::with_capacity(quorum.nodes.len());
+    for node in &quorum.nodes {
+        let fresh = history
+            .latest_results(node, vec![quorum.check_id.clone()])
+            .await?
+            .iter()
+            .any(|latest| now_ms.saturating_sub(latest.started_at_ms) <= quorum.window_ms);
+        let health = if fresh {
+            let open = history.open_outages(node).await?;
+            Some(
+                open.iter()
+                    .find(|outage| {
+                        outage.subject_kind == SubjectKind::Check
+                            && outage.check_id == quorum.check_id
+                    })
+                    .map_or(Health::Up, |outage| outage.health),
+            )
+        } else {
+            None
+        };
+        evidence.push(health);
+    }
+    Ok(evidence)
+}
+
+/// Records what `evidence` decides for `run`'s check, and returns the ping
+/// for its quorum heartbeat; see [`quorum_loop`].
+async fn evaluate(shared: &Shared, run: &mut QuorumRun, evidence: &[Option<Health>]) -> Ping {
+    let quorum = &run.quorum;
+    let Some(health) = quorum_health(quorum.quorum, evidence) else {
+        lose_quorum(shared, &run.tracker);
+        let stale: Vec<&str> = quorum
+            .nodes
+            .iter()
+            .zip(evidence)
+            .filter(|(_, health)| health.is_none())
+            .map(|(node, _)| node.as_str())
+            .collect();
+        return Ping {
+            health: Health::Down,
+            message: Some(format!(
+                "quorum lost: {} of {} nodes have a result within {}s, and {} are needed; \
+                 stale: {}",
+                evidence.len() - stale.len(),
+                evidence.len(),
+                quorum.window_ms / 1000,
+                quorum.quorum,
+                stale.join(", ")
+            )),
+        };
+    };
+    let agreeing = evidence
+        .iter()
+        .flatten()
+        .filter(|&&found| found >= health)
+        .count();
+    let detail: serde_json::Map<String, serde_json::Value> = quorum
+        .nodes
+        .iter()
+        .zip(evidence)
+        .map(|(node, health)| {
+            let health = health.map_or(serde_json::Value::Null, |health| health.as_str().into());
+            (node.clone(), health)
+        })
+        .collect();
+    let result = NewCheckResult {
+        node_id: run.tracker.node_id.clone(),
+        check_id: run.tracker.id.clone(),
+        started_at_ms: shared.parts.clock.now_ms(),
+        duration_ms: 0,
+        health,
+        detail: Some(serde_json::json!({ "nodes": detail })),
+        error: (health != Health::Up).then(|| {
+            format!(
+                "{agreeing} of {} nodes find it {health}, and {} are needed",
+                evidence.len(),
+                quorum.quorum
+            )
+        }),
+        status_code: None,
+    };
+    if let Err(error) = record(shared, &mut run.tracker, result).await {
+        error!(
+            check = %run.tracker.id,
+            %error,
+            "storing a quorum check's evaluation failed; it is lost, and the next one decides again"
+        );
+    }
+    // A state shown as unknown while the quorum was lost comes back even
+    // when the evaluation confirms no change.
+    refresh_component(shared, &run.tracker);
+    Ping {
+        health: Health::Up,
+        message: None,
+    }
+}
+
+/// Shows `tracker`'s check as unknown, its quorum lost, and emits the status
+/// its component moves to.
+fn lose_quorum(shared: &Shared, tracker: &Tracker) {
+    {
+        let mut state = shared.lock();
+        let Some(entry) = state.checks.get_mut(&tracker.id) else {
+            return;
+        };
+        entry.state = None;
+    }
+    refresh_component(shared, tracker);
+}
+
+/// Recomputes `tracker`'s component, if it has one, and emits its status if
+/// it moved.
+fn refresh_component(shared: &Shared, tracker: &Tracker) {
+    let Some(component) = &tracker.component else {
+        return;
+    };
+    let now_ms = shared.parts.clock.now_ms();
+    if let Some(change) = shared.lock().refresh(component, now_ms) {
+        shared.emit(EngineEvent::ComponentChanged(change));
     }
 }
 
@@ -1373,7 +1789,9 @@ async fn probe(shared: &Shared, compiled: &CompiledCheck) -> Option<ProbeOutcome
 /// If the write fails nothing is stored and nothing moves: the confirmation
 /// is put back as it was, so as far as the engine is concerned the result
 /// never happened, and the next result that confirms the same change makes
-/// it again. A check's result that confirms no change is acknowledged
+/// it again. A member that is not shown (see `Spec::presented`) updates
+/// neither the shared state nor the events. A check's result that confirms
+/// no change is acknowledged
 /// once queued, before it commits (DESIGN.md, "Durability"), so if the
 /// database refuses it later the store logs and counts it, and its place in
 /// the confirmation stays.
@@ -1425,6 +1843,9 @@ async fn record(
         }
     });
 
+    if !tracker.presented {
+        return Ok(());
+    }
     let now_ms = shared.parts.clock.now_ms();
     let mut state = shared.lock();
     if let Some(entry) = state.checks.get_mut(&tracker.id) {
@@ -1462,21 +1883,27 @@ struct PendingChange {
 /// The outage records for `transition`. A move between degraded and down
 /// ends one outage and opens another, because an outage's health never
 /// changes.
+///
+/// A change whose gate is shut opens its outage as if a maintenance window
+/// covered it: without an alert, so one opened that way stays without one
+/// until it ends. A change that ends an outage that alerted still resolves.
 fn plan_change(shared: &Shared, tracker: &Tracker, transition: Transition) -> PendingChange {
-    let maintenance = {
+    let (maintenance, may_open) = {
         let now_ms = shared.parts.clock.now_ms();
-        shared
-            .lock()
-            .maintenance(tracker.component.as_deref(), now_ms)
+        let state = shared.lock();
+        (
+            state.maintenance(tracker.component.as_deref(), now_ms),
+            tracker.gate.may_open(&state),
+        )
     };
-    let alert = alerts(&transition, tracker.outage, maintenance);
+    let alert = alerts(&transition, tracker.outage, maintenance || !may_open);
     let change = OutageChange {
         end: tracker.outage.map(|outage| OutageEnd {
             id: outage.id,
             ended_at_ms: transition.since_ms,
         }),
         open: (transition.to != Health::Up).then(|| NewOutage {
-            node_id: shared.node_id.clone(),
+            node_id: tracker.node_id.clone(),
             subject_kind: subject_kind(tracker.kind),
             check_id: tracker.id.clone(),
             component_id: tracker.component.clone(),

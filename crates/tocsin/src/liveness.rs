@@ -9,6 +9,12 @@
 //! upstream that stops taking pushes, misses its heartbeat and opens an
 //! outage, which alerts like any other, and the next push resolves it.
 //!
+//! A node that evaluates a quorum check also keeps `quorum:<check>`,
+//! pinged by the evaluation: down while too few of the check's nodes have
+//! reported recently to decide its health, and missed if the evaluation
+//! stops (`docs/design/federation.md`, "Multi-location checks with a
+//! quorum").
+//!
 //! They are added as `tocsin serve` loads the configuration, never by
 //! `config check` or `config show`: no file names them. Their ids hold a
 //! colon, which no configured id may, so they never collide with one,
@@ -27,7 +33,7 @@ use tokio::time::Instant;
 use crate::metrics::CheckMetrics;
 
 /// The kind of a heartbeat watching a node that pushes here.
-pub(crate) const NODE: &str = "node";
+pub(crate) const NODE: &str = tocsin_core::config::LIVENESS_HEARTBEAT;
 
 /// The kind of a heartbeat watching a node this node pushes to.
 pub(crate) const UPSTREAM: &str = "upstream";
@@ -36,11 +42,13 @@ pub(crate) const UPSTREAM: &str = "upstream";
 /// serve` is about to run: `node:<id>` for each node, not retired and not
 /// this one, whose `push_to` names this node, and `upstream:<id>` for each
 /// of `upstreams`, the nodes this node's pushers push to. Those are read
-/// only at startup, so a reload passes the ones startup read.
+/// only at startup, so a reload passes the ones startup read. It also adds
+/// [`Config::quorum_heartbeats`], one for each quorum check this node
+/// evaluates.
 ///
-/// Each is expected every `push_interval` and is down once `[federation]
-/// grace` passes on top without a push. It has no component, so it is on
-/// the internal page and never the public one.
+/// Each node heartbeat is expected every `push_interval` and is down once
+/// `[federation] grace` passes on top without a push. None has a component,
+/// so they are on the internal page and never the public one.
 pub(crate) fn watch<'a>(config: &mut Config, upstreams: impl IntoIterator<Item = &'a str>) {
     let (Some(federation), Some(local)) = (&config.federation, &config.server.node_id) else {
         return;
@@ -51,6 +59,7 @@ pub(crate) fn watch<'a>(config: &mut Config, upstreams: impl IntoIterator<Item =
         component: None,
         interval: federation.push_interval,
         grace: federation.grace,
+        nodes: Vec::new(),
         links: Vec::new(),
         class: ProbeClass::default(),
         topology_node: None,
@@ -71,6 +80,7 @@ pub(crate) fn watch<'a>(config: &mut Config, upstreams: impl IntoIterator<Item =
             .filter_map(|upstream| Id::parse(upstream).ok())
             .map(|node| heartbeat(UPSTREAM, &node, format!("Pushes to {node}"))),
     );
+    watches.extend(config.quorum_heartbeats(local));
     config.heartbeats.extend(watches);
 }
 

@@ -409,13 +409,30 @@ quorum = 2          # default: a majority of `nodes`
   matters: `majority` counts only members with a state, so its bar drops
   as members go silent. A quorum is an absolute count, so a silent node
   never makes "down" easier to reach.
-- **Fresh** means the hub has received a result for the check from that
-  node within two of its intervals, by the hub's clock. A stale node is
+- **Fresh** means the hub holds a result for the check from that node
+  that started within two of its intervals plus `[federation]
+  push_interval` and `grace`, by the hub's clock: one late run, and the
+  time a pushed result takes to arrive, do not lose it. A stale node is
   left out.
-- **Fewer than `quorum` fresh nodes**: the check is `unknown`, and a
-  separate "quorum lost" condition alerts, with a resolve, saying which
-  nodes are stale. The page never says "down" or "up" on too little
-  evidence.
+- A node evaluates a quorum check where every one of its nodes is that
+  node or pushes to it. On every node the check runs on, its own runs are
+  **evidence**: results and outages are written as always, but they never
+  alert and never move the check's state or component. A node that runs
+  the check without evaluating it never pages for it. The evaluator
+  derives the state one window after start, then once per interval, and
+  records each evaluation as a `*` result.
+- Where more than one node evaluates a check, `[federation] alert_order`
+  says which alerts: a node opens a `*` alert only when every node ahead
+  of it is down, and a node ahead whose `node:<id>` heartbeat it does not
+  keep counts as not up. Config refuses a check derived on two nodes that
+  would each alert for it. A `*` outage opened while held back stays
+  unalerted for its life.
+- **Fewer than `quorum` fresh nodes**: the check is `unknown`, and the
+  `quorum:<check>` heartbeat the evaluator keeps goes down, which alerts
+  and resolves like any heartbeat. It carries the check's labels, class
+  and links, routes as the check does, and has no component, so it is on
+  the internal board only. The page never says "down" or "up" on too
+  little evidence.
 - **Derived outages** are stored as outages with `node_id = '*'` ("all
   locations"). That gives them their own alert identity under
   `alert_open` without colliding with any node's own outage, needs no
@@ -425,10 +442,11 @@ quorum = 2          # default: a majority of `nodes`
   each hub, never pushed.
 - For a quorum check, the public surfaces show the `*` state and outages;
   per-node results and outages are visible with `status:read` and on the
-  internal board. Alerts fire on `*` only.
-- The bar for a quorum check should come from its `*` outages, weighted by
-  time, not from summing per-node results: today one location's local
-  trouble would drag the bar while the quorum says up.
+  internal board. Alerts fire on `*` only, titled "on a quorum of nodes".
+- The bar for a quorum check counts its `*` evaluations for each day that
+  has any, not the sum of per-node results: one location's local trouble
+  does not drag the bar while the quorum says up. A day from before the
+  check had a quorum keeps its per-node rollups.
 
 **Partitions, concretely.** A spoke that loses its route to the target
 but not to the hub opens its own outage; with 2 of 3 the check stays up.
@@ -659,7 +677,7 @@ hub restart until its config changes.
 `nodes` and `quorum` on checks (heartbeats: exactly one node);
 `state::quorum_health` beside `component_health`; derived `node_id = '*'`
 outages and alerts; "quorum lost" with resolve; public surfaces show `*`
-for quorum checks; the bar for a quorum check from `*` outages by time.
+for quorum checks; the bar for a quorum check from its `*` evaluations.
 Acceptance: with quorum 2 of 3, one node down leaves the check up and
 pages nobody; two down opens one `*` outage and one alert; two stale
 nodes give `unknown` and a "quorum lost" alert, not "down"; a property

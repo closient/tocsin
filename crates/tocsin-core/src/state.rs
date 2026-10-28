@@ -200,6 +200,30 @@ pub fn component_health(rule: ComponentRule, checks: &[Option<Health>]) -> Optio
     }
 }
 
+/// A quorum check's health from each of its nodes' confirmed health, `None`
+/// for a node that is stale: no result from it lately, so it says nothing
+/// (docs/design/federation.md, "Multi-location checks with a quorum").
+///
+/// The worst health that at least `quorum` fresh nodes are at or beyond,
+/// or `None` when fewer than `quorum` nodes are fresh: the check is then
+/// unknown and its quorum lost. Unlike the `majority` component rule, the
+/// bar is an absolute count, so a node going silent never makes `down`
+/// easier to reach.
+#[must_use]
+pub fn quorum_health(quorum: usize, nodes: &[Option<Health>]) -> Option<Health> {
+    // Every fresh node is up or beyond, so this finds nothing only when
+    // fewer than `quorum` are fresh.
+    let quorum = quorum.max(1);
+    Health::ALL.into_iter().rev().find(|&level| {
+        nodes
+            .iter()
+            .flatten()
+            .filter(|&&health| health >= level)
+            .count()
+            >= quorum
+    })
+}
+
 /// What the status page shows for a component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -474,6 +498,104 @@ mod tests {
             component_health(rule, &[None, None, Some(Down)]),
             Some(Down)
         );
+    }
+
+    #[test]
+    fn quorum_takes_the_worst_health_enough_fresh_nodes_share() {
+        // Two of three: one node down leaves the check up.
+        assert_eq!(
+            quorum_health(2, &[Some(Up), Some(Up), Some(Down)]),
+            Some(Up)
+        );
+        assert_eq!(
+            quorum_health(2, &[Some(Up), Some(Down), Some(Down)]),
+            Some(Down)
+        );
+        // Two are degraded or worse, but only one is down.
+        assert_eq!(
+            quorum_health(2, &[Some(Up), Some(Degraded), Some(Down)]),
+            Some(Degraded)
+        );
+        // A stale node never makes down easier to reach: one fresh node
+        // down of two fresh is not two down.
+        assert_eq!(quorum_health(2, &[None, Some(Up), Some(Down)]), Some(Up));
+        // Two of two: both must agree before the check is down.
+        assert_eq!(quorum_health(2, &[Some(Up), Some(Down)]), Some(Up));
+        assert_eq!(quorum_health(2, &[Some(Down), Some(Down)]), Some(Down));
+    }
+
+    #[test]
+    fn too_few_fresh_nodes_lose_the_quorum() {
+        assert_eq!(quorum_health(2, &[None, None, Some(Down)]), None);
+        assert_eq!(quorum_health(2, &[None, None, Some(Up)]), None);
+        assert_eq!(quorum_health(2, &[]), None);
+        assert_eq!(quorum_health(0, &[]), None);
+    }
+
+    /// Every list of up to five nodes, each up, degraded, down or stale.
+    fn every_node_list() -> Vec<Vec<Option<Health>>> {
+        let values = [None, Some(Up), Some(Degraded), Some(Down)];
+        let mut lists = vec![Vec::new()];
+        let mut last = vec![Vec::new()];
+        for _ in 0..5 {
+            last = last
+                .iter()
+                .flat_map(|list: &Vec<Option<Health>>| {
+                    values.iter().map(move |value| {
+                        let mut longer = list.clone();
+                        longer.push(*value);
+                        longer
+                    })
+                })
+                .collect();
+            lists.extend(last.iter().cloned());
+        }
+        lists
+    }
+
+    /// A property checked over its whole domain rather than sampled: for
+    /// every quorum and every list of up to five nodes, a stale node added
+    /// anywhere leaves the derived health as it was.
+    #[test]
+    fn a_stale_node_never_changes_the_quorum_health() {
+        for nodes in every_node_list() {
+            for quorum in 1..=nodes.len() + 1 {
+                let before = quorum_health(quorum, &nodes);
+                for at in 0..=nodes.len() {
+                    let mut with_stale = nodes.clone();
+                    with_stale.insert(at, None);
+                    assert_eq!(
+                        quorum_health(quorum, &with_stale),
+                        before,
+                        "quorum {quorum}, {nodes:?} with a stale node at {at}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Over the same domain: a node getting worse never makes the check
+    /// better, and with enough fresh nodes the quorum always holds.
+    #[test]
+    fn a_worse_node_never_improves_the_quorum_health() {
+        for nodes in every_node_list() {
+            for quorum in 1..=nodes.len() + 1 {
+                let before = quorum_health(quorum, &nodes);
+                let fresh = nodes.iter().flatten().count();
+                assert_eq!(before.is_some(), fresh >= quorum, "{quorum} of {nodes:?}");
+                for (at, node) in nodes.iter().enumerate() {
+                    let Some(health) = node else { continue };
+                    for worse in Health::ALL.into_iter().filter(|worse| worse > health) {
+                        let mut worsened = nodes.clone();
+                        worsened[at] = Some(worse);
+                        assert!(
+                            quorum_health(quorum, &worsened) >= before,
+                            "quorum {quorum}, {nodes:?} with node {at} {worse:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

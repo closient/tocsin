@@ -58,6 +58,7 @@ retired = true
 [[heartbeat]]
 id = "backup"
 interval = "1h"
+nodes = ["hub"]
 {federation}"#,
         hub = key(1).public_key(),
         spoke = key(2).public_key(),
@@ -118,6 +119,24 @@ fn a_node_watches_each_live_node_pushing_to_it_and_each_node_it_pushes_to() {
         assert_eq!(beat.interval.get(), Duration::from_secs(20));
         assert_eq!(beat.grace.get(), Duration::from_secs(45));
     }
+}
+
+/// `api` runs on `default_nodes`, hub and spoke, whose results all reach
+/// hub: a quorum check hub evaluates, so it watches `quorum:api`, and does
+/// so on every reload too, since a reload runs `watch` again.
+#[test]
+fn a_node_watches_the_quorum_of_each_quorum_check_it_evaluates() {
+    let quorum = format!(
+        "{FEDERATION}\n[[check]]\nid = \"api\"\ntype = \"tcp\"\ntarget = \"api.example.com:443\"\ninterval = \"10s\"\ntimeout = \"5s\"\n"
+    );
+    let mut config = load(&text(&quorum));
+    watch(&mut config, []);
+
+    assert_eq!(ids(&config), ["backup", "node:spoke", "quorum:api"]);
+    let beat = config.heartbeats.last().unwrap();
+    assert_eq!(beat.component, None, "quorum:api stays off the public page");
+    assert_eq!(beat.interval.get(), Duration::from_secs(10));
+    assert_eq!(beat.grace.get(), config.quorum_window(&config.checks[0]));
 }
 
 #[test]

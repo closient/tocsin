@@ -9,6 +9,7 @@ mod common;
 use common::config;
 use tocsin_alert::Router;
 use tocsin_core::Health;
+use tocsin_core::config::{Id, QUORUM_HEARTBEAT};
 use tocsin_store::{AlertRouting, SubjectKind};
 
 const MINUTE_MS: i64 = 60_000;
@@ -18,6 +19,11 @@ const HOUR_MS: i64 = 60 * MINUTE_MS;
 /// heartbeat, a Slack notifier per id in `notifiers`, an Alertmanager, and
 /// the given routes.
 fn router(notifiers: &[&str], routes: &str) -> Router {
+    Router::new(&config(&fixture(notifiers, routes)))
+}
+
+/// The configuration text behind [`router`].
+fn fixture(notifiers: &[&str], routes: &str) -> String {
     let mut toml = String::from(
         "[[group]]\nid = \"customer-facing\"\nname = \"Customer-facing\"\n\n\
          [[component]]\nid = \"web\"\nname = \"Website\"\ngroup = \"customer-facing\"\n\n\
@@ -38,7 +44,7 @@ fn router(notifiers: &[&str], routes: &str) -> Router {
         toml.push_str(&common::notifier(id));
     }
     toml.push_str(routes);
-    Router::new(&config(&toml))
+    toml
 }
 
 /// (notifier, route, repeat) for every target, by notifier.
@@ -232,4 +238,31 @@ fn a_subject_s_topology_node_is_pinned_among_its_labels_only_when_set() {
         Some("replication-03/job:backup")
     );
     assert_eq!(node(SubjectKind::Check, "rest"), None);
+}
+
+/// A quorum check's `quorum:<check>` heartbeat, down when the check's
+/// nodes cannot decide its health, routes as the check: the routes that
+/// page for `queue` page for its lost quorum, and a route on heartbeats
+/// does not.
+#[test]
+fn a_lost_quorum_routes_as_its_check() {
+    let mut config = config(&fixture(
+        &["oncheck", "onbeat", "oncomponent"],
+        "[[route]]\nid = \"check\"\nnotifiers = [\"oncheck\"]\nchecks = [\"queue\"]\n\n\
+         [[route]]\nid = \"heartbeat\"\nnotifiers = [\"onbeat\"]\nheartbeats = [\"backup\"]\n\n\
+         [[route]]\nid = \"component\"\nnotifiers = [\"oncomponent\"]\ncomponents = [\"jobs\"]\n",
+    ));
+    let mut quorum = config.heartbeats[0].clone();
+    quorum.id = Id::synthetic(QUORUM_HEARTBEAT, &Id::parse("queue").unwrap());
+    quorum.component = None;
+    config.heartbeats.push(quorum);
+    let router = Router::new(&config);
+
+    let routing = router.routing(SubjectKind::Heartbeat, "quorum:queue", None, Health::Down);
+    let mut found: Vec<&str> = targets(&routing)
+        .into_iter()
+        .map(|(notifier, ..)| notifier)
+        .collect();
+    found.sort_unstable();
+    assert_eq!(found, ["oncheck", "oncomponent"]);
 }

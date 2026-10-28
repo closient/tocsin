@@ -7,15 +7,17 @@
 //! rollup it says the first figure is coming within the hour.
 //!
 //! A day's uptime for one check is the share of its results (or, for a
-//! heartbeat, its milliseconds) that were not down, every node summed; a
-//! degraded result counts as up. A component's day is the mean over its
+//! heartbeat, its milliseconds) that were not down, every node summed, or
+//! for a quorum check, only its evaluations; a degraded result counts as
+//! up. A component's day is the mean over its
 //! checks that have data that day, and its tone is the worst health any
 //! of them saw. Percentages are floored, so a day with one failure never
 //! reads 100%. The arithmetic is in parts per million, without floats.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tocsin_core::Health;
+use tocsin_core::config::QUORUM_NODE;
 use tocsin_store::{DailyRollup, Day};
 
 /// How many days a bar covers, today included.
@@ -94,10 +96,22 @@ struct Tally {
 pub struct Tallies(HashMap<(String, Day), Tally>);
 
 impl Tallies {
-    /// `rollups` summed over nodes.
+    /// `rollups` summed over nodes. A quorum check's day counts only its
+    /// evaluations, recorded under [`QUORUM_NODE`], where it has any: the
+    /// nodes' own results are evidence the quorum may have outvoted.
     pub fn new(rollups: &[DailyRollup]) -> Self {
+        let evaluated: HashSet<(&str, Day)> = rollups
+            .iter()
+            .filter(|rollup| rollup.node_id == QUORUM_NODE)
+            .map(|rollup| (rollup.check_id.as_str(), rollup.date))
+            .collect();
         let mut tallies: HashMap<(String, Day), Tally> = HashMap::new();
         for rollup in rollups {
+            if rollup.node_id != QUORUM_NODE
+                && evaluated.contains(&(rollup.check_id.as_str(), rollup.date))
+            {
+                continue;
+            }
             tallies
                 .entry((rollup.check_id.clone(), rollup.date))
                 .and_modify(|tally| {
@@ -278,6 +292,29 @@ mod tests {
         assert_eq!(
             bar.summary,
             "93.75% up over the 2 of the last 90 days with data"
+        );
+    }
+
+    #[test]
+    fn a_quorum_checks_day_counts_its_evaluations_not_its_nodes_results() {
+        let today = Day::containing(1_760_000_000_000);
+        let tallies = Tallies::new(&[
+            // One node of three was down all day; the quorum kept it up.
+            rollup("web", "a", today, 0, 100, Health::Down),
+            rollup("web", "b", today, 100, 0, Health::Up),
+            rollup("web", "c", today, 100, 0, Health::Up),
+            rollup("web", "*", today, 100, 0, Health::Up),
+            // Before the check had a quorum: the nodes' results, summed.
+            rollup("web", "a", today.plus(-1), 50, 50, Health::Down),
+            rollup("web", "b", today.plus(-1), 100, 0, Health::Up),
+        ]);
+        let bar = bar(&tallies, &["web".to_owned()], today);
+        assert_eq!(bar.days[89].tone, Tone::Up);
+        assert_eq!(bar.days[89].text, format!("{today}, today so far: 100% up"));
+        assert_eq!(bar.days[88].tone, Tone::Down);
+        assert_eq!(
+            bar.days[88].text,
+            format!("{}: 75.00% up, worst down", today.plus(-1))
         );
     }
 

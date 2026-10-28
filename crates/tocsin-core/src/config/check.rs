@@ -42,6 +42,19 @@ pub struct Check {
     /// state changes.
     #[serde(default = "default_confirm")]
     pub confirm: u32,
+    /// The `[[node]]`s that run this check; without it, `[federation]
+    /// default_nodes`. Each node starts only the checks naming it. Run on
+    /// two or more nodes, the check is a quorum check: where their results
+    /// converge, its state is the worst health at least `quorum` fresh
+    /// nodes agree on, and it alerts only on that.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<Id>,
+    /// How many of the check's nodes must agree on a health for it to be
+    /// the check's; a majority of its nodes when absent. Needs two or more
+    /// nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub quorum: Option<u32>,
     /// Settings for `http` checks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http: Option<HttpSettings>,

@@ -15,6 +15,7 @@ mod diagnostic;
 mod load;
 mod node;
 mod notifier;
+mod placement;
 mod slack;
 mod subscribers;
 mod telemetry;
@@ -48,6 +49,7 @@ pub use notifier::{
     AlertmanagerSettings, DiscordSettings, EmailSettings, Notifier, NotifierSettings, NotifierType,
     NtfySettings, PushoverSettings, SlackSettings, TelegramSettings, WebhookSettings,
 };
+pub use placement::{LIVENESS_HEARTBEAT, QUORUM_HEARTBEAT, QUORUM_NODE};
 pub use slack::{MAX_APP_NAME, Slack};
 pub use subscribers::{Subscribers, Turnstile};
 pub use telemetry::{OWN_RESOURCE_ATTRIBUTES, Otlp, OtlpProtocol, Telemetry};
@@ -513,6 +515,11 @@ pub struct Heartbeat {
     /// `interval + grace` passes without one.
     #[serde(default = "default_grace")]
     pub grace: Duration,
+    /// The one `[[node]]` that watches this heartbeat's deadline, the one
+    /// its job pings; without it, `[federation] default_nodes`, which must
+    /// then name exactly one node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<Id>,
     /// Links shown with the heartbeat, such as the job's logs or runbook,
     /// each a `[[heartbeat.link]]` table.
     #[serde(default, rename = "link", skip_serializing_if = "Vec::is_empty")]

@@ -2139,3 +2139,98 @@ fn federation_references_are_checked() {
     ];
     assert_eq!(found, expected);
 }
+
+/// [`federation`] with a check `api` run on both nodes every 30 seconds,
+/// and `extra` added to its table.
+fn quorum_check(extra: &str) -> String {
+    format!(
+        "{}\n[[check]]\nid = \"api\"\ntype = \"tcp\"\ntarget = \"api.example.com:443\"\n\
+         interval = \"30s\"\nnodes = [\"central\", \"dmz-1\"]\n{extra}",
+        federation("NODE_KEY_B")
+    )
+}
+
+#[test]
+fn a_check_on_two_nodes_is_a_quorum_check_derived_where_its_results_converge() {
+    let config = run(&[("server.toml", &quorum_check(""))]).expect("valid");
+    let check = &config.checks[0];
+    assert_eq!(config.quorum(check), Some(2), "a majority of two");
+    assert!(
+        config.evaluates_quorum(check, "central"),
+        "dmz-1 pushes to it"
+    );
+    assert!(!config.evaluates_quorum(check, "dmz-1"));
+    assert_eq!(
+        config.quorum_evaluators(check),
+        [&Id::parse("central").unwrap()]
+    );
+    // Two intervals, then a push interval and grace for the last to arrive.
+    assert_eq!(config.quorum_window(check).as_secs(), 30 * 2 + 15 + 60);
+
+    let heartbeats = config.quorum_heartbeats("central");
+    assert_eq!(heartbeats.len(), 1);
+    let heartbeat = &heartbeats[0];
+    assert_eq!(heartbeat.id.as_str(), "quorum:api");
+    assert_eq!(heartbeat.interval.get().as_secs(), 30);
+    assert_eq!(heartbeat.grace.get().as_secs(), 135);
+    assert_eq!(heartbeat.component, None, "internal page only");
+    assert_eq!(config.quorum_heartbeats("dmz-1"), []);
+    assert_eq!(
+        config.quorum_check_of("quorum:api").map(|c| c.id.as_str()),
+        Some("api")
+    );
+    assert_eq!(config.quorum_check_of("node:api"), None);
+
+    assert_eq!(config.alerts_behind("central"), Some(&[][..]));
+    assert_eq!(
+        config.alerts_behind("dmz-1"),
+        Some(&[Id::parse("central").unwrap()][..])
+    );
+    assert_eq!(config.alerts_behind("elsewhere"), None);
+
+    let one = run(&[("server.toml", &quorum_check("quorum = 1\n"))]).expect("valid");
+    assert_eq!(one.quorum(&one.checks[0]), Some(1));
+    let single = quorum_check("").replace("nodes = [\"central\", \"dmz-1\"]", "");
+    let single = run(&[("server.toml", &single)]).expect("valid");
+    assert_eq!(
+        single.quorum(&single.checks[0]),
+        None,
+        "one node is no quorum"
+    );
+}
+
+#[test]
+fn a_quorum_is_checked_against_the_checks_nodes_and_where_they_push() {
+    assert_eq!(
+        errors(&[("q.toml", &quorum_check("quorum = 3\n"))]),
+        ["q.toml:25:10: `quorum` must be between 1 and the check's 2 nodes"]
+    );
+    let single = quorum_check("quorum = 1\n").replace("nodes = [\"central\", \"dmz-1\"]", "");
+    assert_eq!(
+        errors(&[("q.toml", &single)]),
+        ["q.toml:25:10: `quorum` needs a check run on two or more nodes, and `api` runs on one"]
+    );
+    let unpushed = quorum_check("")
+        .replace("push_to = [\"central\"]\n", "")
+        .replace("node_key = \"${ENV:NODE_KEY_B}\"\n", "");
+    assert_eq!(
+        errors(&[("q.toml", &unpushed)]),
+        ["q.toml:22:9: no node receives the results of every node check `api` runs on"]
+    );
+    // Each node pushes to the other, so both derive it; with no
+    // `alert_order` both would page.
+    let both = quorum_check("")
+        .replace(
+            "url = \"https://central.example.com\"\n",
+            "url = \"https://central.example.com\"\npush_to = [\"dmz-1\"]\n",
+        )
+        .replace(
+            "\nid = \"dmz-1\"\n",
+            "\nid = \"dmz-1\"\nurl = \"https://dmz-1.example.com\"\n",
+        )
+        .replace("alert_order = [\"central\", \"dmz-1\"]\n", "");
+    assert_eq!(
+        errors(&[("q.toml", &both)]),
+        ["q.toml:25:9: check `api` is derived on `central`, `dmz-1`, and each would alert for it"]
+    );
+}

@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use tocsin_core::Health;
+use tocsin_core::config::QUORUM_NODE;
 use tocsin_store::{EndedBy, SubjectKind};
 
 /// The annotation on the resolve of an alert the configuration ended.
@@ -151,12 +152,23 @@ impl Alert {
         };
         let test = if self.test { "[TEST] " } else { "" };
         format!(
-            "{test}[{state}] {} ({} {} on {})",
+            "{test}[{state}] {} ({} {} {})",
             one_line(&self.subject_name),
             self.subject_kind.as_str(),
             self.subject_id,
-            self.node_id
+            self.place()
         )
+    }
+
+    /// Where the alert's subject was seen, for the title: `on <node>`, or
+    /// for a quorum check's evaluation, which no one node saw, `on a quorum
+    /// of nodes`.
+    fn place(&self) -> String {
+        if self.node_id == QUORUM_NODE {
+            "on a quorum of nodes".to_owned()
+        } else {
+            format!("on {}", self.node_id)
+        }
     }
 
     /// A few sentences of detail, without the title.
@@ -313,6 +325,16 @@ mod tests {
             alert(AlertEvent::Resolve)
                 .title()
                 .starts_with("[RESOLVED] ")
+        );
+    }
+
+    #[test]
+    fn a_quorum_alert_is_placed_on_a_quorum_of_nodes() {
+        let mut quorum = alert(AlertEvent::Fire);
+        quorum.node_id = QUORUM_NODE.into();
+        assert_eq!(
+            quorum.title(),
+            "[DOWN] API  Bcc: x@example.com (check api on a quorum of nodes)"
         );
     }
 

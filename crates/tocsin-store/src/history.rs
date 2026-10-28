@@ -34,6 +34,11 @@ pub enum Checks {
         internal: Vec<String>,
         /// The configured components that are not public.
         internal_components: Vec<String>,
+        /// The configured quorum checks, whose outages are shown only
+        /// where the quorum recorded them, under
+        /// [`QUORUM_NODE`](tocsin_core::config::QUORUM_NODE): one node's
+        /// view of them is internal.
+        quorum: Vec<String>,
     },
 }
 
@@ -46,11 +51,13 @@ impl Checks {
                 public,
                 internal,
                 internal_components,
+                quorum,
             } => Some(
                 serde_json::json!({
                     "public": public,
                     "internal": internal,
                     "internal_components": internal_components,
+                    "quorum": quorum,
                 })
                 .to_string(),
             ),
@@ -60,9 +67,12 @@ impl Checks {
 
 /// The clause that narrows outages to the checks a reader may see, bound
 /// by [`Checks::bind`]. [`OUTAGES`] spells it out in each arm, and the
-/// timeline's outage read uses it too.
+/// timeline's outage read uses it too. `'*'` is
+/// [`QUORUM_NODE`](tocsin_core::config::QUORUM_NODE).
 pub(crate) const SHOWN: &str = "(:shown IS NULL \
      OR (check_id NOT IN (SELECT value FROM json_each(:shown, '$.internal')) \
+         AND (node_id = '*' \
+              OR check_id NOT IN (SELECT value FROM json_each(:shown, '$.quorum'))) \
          AND ((component_id IS NOT NULL \
                AND component_id NOT IN \
                    (SELECT value FROM json_each(:shown, '$.internal_components'))) \
@@ -362,6 +372,8 @@ const OUTAGES: &str =
        AND started_at <= :at AND (started_at < :at OR id < :before)
        AND (:shown IS NULL
             OR (check_id NOT IN (SELECT value FROM json_each(:shown, '$.internal'))
+                AND (node_id = '*'
+                     OR check_id NOT IN (SELECT value FROM json_each(:shown, '$.quorum')))
                 AND ((component_id IS NOT NULL
                       AND component_id NOT IN
                           (SELECT value FROM json_each(:shown, '$.internal_components')))
@@ -374,6 +386,8 @@ const OUTAGES: &str =
        AND started_at <= :at AND (started_at < :at OR id < :before)
        AND (:shown IS NULL
             OR (check_id NOT IN (SELECT value FROM json_each(:shown, '$.internal'))
+                AND (node_id = '*'
+                     OR check_id NOT IN (SELECT value FROM json_each(:shown, '$.quorum')))
                 AND ((component_id IS NOT NULL
                       AND component_id NOT IN
                           (SELECT value FROM json_each(:shown, '$.internal_components')))
@@ -386,6 +400,8 @@ const OUTAGES: &str =
        AND started_at <= :at AND (started_at < :at OR id < :before)
        AND (:shown IS NULL
             OR (check_id NOT IN (SELECT value FROM json_each(:shown, '$.internal'))
+                AND (node_id = '*'
+                     OR check_id NOT IN (SELECT value FROM json_each(:shown, '$.quorum')))
                 AND ((component_id IS NOT NULL
                       AND component_id NOT IN
                           (SELECT value FROM json_each(:shown, '$.internal_components')))

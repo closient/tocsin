@@ -13,7 +13,7 @@ use axum::response::Response;
 use axum::routing::get;
 use jiff::tz::TimeZone;
 use serde::Deserialize;
-use tocsin_core::config::Config;
+use tocsin_core::config::{Config, QUORUM_NODE};
 use tocsin_core::release::{Release, TimelineEvent};
 use tocsin_core::status::OutageEnding;
 use tocsin_store::Order;
@@ -145,7 +145,12 @@ pub(super) fn row(event: &TimelineEvent, rows: &Rows<'_>) -> Row {
             text: format!("{} {health}", check_name(rows.config, check_id)),
             href: None,
             detail: format!(
-                "on {node_id}{}{}",
+                "on {}{}{}",
+                if node_id == QUORUM_NODE {
+                    "a quorum of nodes"
+                } else {
+                    node_id
+                },
                 component_id
                     .as_deref()
                     .map_or_else(String::new, |component| {

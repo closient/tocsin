@@ -932,3 +932,53 @@ async fn a_rebuilt_node_replaces_its_store_and_the_old_one_pushing_again_conflic
     let (status, body) = api.push_as(rebuilt, &fresh).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
 }
+
+/// `api-port` runs on `hub` and `spoke`, so it is a quorum check: the
+/// public reads its outages as the quorum recorded them, under `*`, and a
+/// `status:read` token reads each node's as well.
+#[tokio::test]
+async fn the_public_reads_a_quorum_checks_outages_under_the_quorum_alone() {
+    let api = api();
+    let at = now().as_millis() - 60_000;
+    for node in ["spoke", tocsin_core::config::QUORUM_NODE] {
+        api.state
+            .store
+            .open_outage(tocsin_store::NewOutage {
+                node_id: node.into(),
+                subject_kind: tocsin_store::SubjectKind::Check,
+                check_id: "api-port".into(),
+                component_id: Some("api".into()),
+                health: Health::Down,
+                started_at_ms: at,
+                alerted: false,
+            })
+            .await
+            .unwrap();
+    }
+    let read = |token: Option<&str>| {
+        let mut request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/outages");
+        if let Some(token) = token {
+            request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        request.body(Body::empty()).unwrap()
+    };
+    let nodes = |body: &Value| -> Vec<String> {
+        let mut nodes: Vec<String> = body["outages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|outage| outage["node_id"].as_str().unwrap().to_owned())
+            .collect();
+        nodes.sort();
+        nodes
+    };
+
+    let (status, body) = api.send(read(None)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(nodes(&body), ["*"]);
+    let (status, body) = api.send(read(Some(READER))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(nodes(&body), ["*", "spoke"]);
+}

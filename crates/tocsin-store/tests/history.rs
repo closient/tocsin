@@ -184,6 +184,7 @@ async fn outages_narrow_to_the_checks_shown() {
         public: vec!["a".to_owned()],
         internal: vec!["b".to_owned()],
         internal_components: Vec::new(),
+        quorum: Vec::new(),
     };
     let read = |rows: Vec<tocsin_core::status::OutageRecord>| -> Vec<(i64, String)> {
         rows.into_iter().map(|row| (row.id, row.check_id)).collect()
@@ -226,6 +227,7 @@ async fn outages_narrow_to_the_checks_shown() {
                     public: Vec::new(),
                     internal: vec!["a".to_owned(), "b".to_owned()],
                     internal_components: Vec::new(),
+                    quorum: Vec::new(),
                 }
             )
             .await
@@ -569,6 +571,7 @@ async fn outages_of_removed_checks_follow_the_component_they_recorded() {
         public: vec!["moved-on".to_owned()],
         internal: vec!["moved-off".to_owned()],
         internal_components: vec!["hosts".to_owned()],
+        quorum: Vec::new(),
     };
     let ids: Vec<i64> = store
         .outages(page(0, None, 10), shown.clone())
@@ -601,6 +604,63 @@ async fn outages_of_removed_checks_follow_the_component_they_recorded() {
         })
         .collect();
     assert_eq!(checks, ["gone", "moved-on"]);
+}
+
+/// The public reads a quorum check's outages as its quorum recorded them,
+/// under `*`, never one node's: node `a` down while the check is up is
+/// internal. A check that is not a quorum check shows every node's.
+#[tokio::test]
+async fn the_public_reads_a_quorum_checks_outages_as_its_quorum_recorded_them() {
+    let (_dir, store) = open();
+    let on = |node: &str, check: &str, at| NewOutage {
+        node_id: node.into(),
+        ..outage(check, at, Down)
+    };
+    store.open_outage(on("a", "api", 1_000)).await.unwrap();
+    let quorum = store.open_outage(on("*", "api", 1_001)).await.unwrap();
+    let elsewhere = store.open_outage(on("a", "web", 1_002)).await.unwrap();
+    let shown = Checks::Public {
+        public: vec!["api".to_owned(), "web".to_owned()],
+        internal: Vec::new(),
+        internal_components: Vec::new(),
+        quorum: vec!["api".to_owned()],
+    };
+    let ids: Vec<i64> = store
+        .outages(page(0, None, 10), shown.clone())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(ids, [elsewhere, quorum]);
+
+    let timeline = store
+        .timeline(TimelineQuery {
+            drafts: Drafts::Include,
+            visible: Projects::All,
+            shown,
+            since: Timestamp::from_millis(0),
+            after: None,
+            order: Order::OldestFirst,
+            limit: 10,
+            component: None,
+        })
+        .await
+        .unwrap();
+    let nodes: Vec<_> = timeline
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            TimelineEvent::Outage {
+                node_id, check_id, ..
+            } => Some((node_id.as_str(), check_id.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(nodes, [("*", "api"), ("a", "web")]);
+
+    let all = store.outages(page(0, None, 10), Checks::All).await.unwrap();
+    assert_eq!(all.len(), 3, "a trusted reader sees every node's");
 }
 
 #[tokio::test]

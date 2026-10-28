@@ -55,7 +55,8 @@ pub fn may_see(config: &Config, viewer: Viewer, component: Option<&str>) -> bool
 /// outlive the configuration: a configured check's follow where it is
 /// now, so moving it off its component, or onto one that is not public,
 /// hides them too, and a removed check's follow the component each
-/// recorded (see [`Checks::Public`]).
+/// recorded (see [`Checks::Public`]). A quorum check's are the quorum's
+/// alone: the public never reads one node's view of it.
 pub fn shown(config: &Config, viewer: Viewer) -> Checks {
     match viewer {
         Viewer::Trusted => Checks::All,
@@ -87,6 +88,12 @@ pub fn shown(config: &Config, viewer: Viewer) -> Checks {
                     .iter()
                     .filter(|component| !component.public)
                     .map(|component| component.id.as_str().to_owned())
+                    .collect(),
+                quorum: config
+                    .checks
+                    .iter()
+                    .filter(|check| config.quorum(check).is_some())
+                    .map(|check| check.id.as_str().to_owned())
                     .collect(),
             }
         }

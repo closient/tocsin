@@ -17,13 +17,17 @@ use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use tocsin_alert::{AlertingHistory, Router as AlertRouter};
 use tocsin_alert::{Backoff, Jitter};
 use tocsin_core::Health;
 use tocsin_core::config::{Config, Environment, Source};
 use tocsin_core::federation::NodeKey;
 use tocsin_core::federation::wire::Batch;
+use tocsin_engine::ports::{History, SystemClock};
 use tocsin_engine::{HeartbeatHandle, Snapshot};
-use tocsin_store::{NewCheckResult, NewOutage, PushCursor, Retention, Store, SubjectKind};
+use tocsin_store::{
+    EndedBy, NewCheckResult, NewOutage, OutageChange, PushCursor, Retention, Store, SubjectKind,
+};
 use tower::ServiceExt;
 
 use super::{Pacing, PushSettings, Pushers, Upstreams};
@@ -965,6 +969,193 @@ async fn retiring_a_node_withdraws_its_open_outages_at_start_and_at_reload() {
             )
             .unwrap();
         assert_eq!(ending, "withdrawn", "{when:?}");
+        monitor.stop().await;
+    }
+}
+
+/// `text` with `[federation] alert_order` set to `order`, when given.
+fn ordered(text: &str, order: Option<&str>) -> String {
+    match order {
+        Some(order) => text.replace(
+            "[federation]\n",
+            &format!("[federation]\nalert_order = {order}\n"),
+        ),
+        None => text.to_owned(),
+    }
+}
+
+/// `text` routing every outage to a pager.
+fn paged(text: &str) -> String {
+    format!(
+        "{text}\n[[notifier]]\nid = \"pager\"\ntype = \"ntfy\"\n\n\
+         [notifier.ntfy]\nurl = \"http://127.0.0.1:9/pager\"\n\n\
+         [[route]]\nid = \"all\"\nnotifiers = [\"pager\"]\n"
+    )
+}
+
+/// Records the spoke's `kind` `id` going down on `store`, through the
+/// alerting history `config` routes with, as the spoke's engine would.
+async fn goes_down(store: &Arc<Store>, config: &Config, kind: SubjectKind, id: &str) {
+    let history = AlertingHistory::new(
+        Arc::clone(store),
+        Arc::new(AlertRouter::new(config)),
+        Arc::default(),
+        Arc::new(SystemClock),
+    );
+    let started_at_ms = tocsin_store::now_ms() - 1_000;
+    let open = NewOutage {
+        subject_kind: kind,
+        check_id: id.into(),
+        component_id: None,
+        ..outage(started_at_ms)
+    };
+    let result = NewCheckResult {
+        check_id: id.into(),
+        health: Health::Down,
+        ..result(started_at_ms)
+    };
+    let change = OutageChange {
+        end: None,
+        open: Some(open),
+    };
+    history.record(result, kind, Some(change)).await.unwrap();
+}
+
+/// The subject of each alert with a message waiting in `store`'s outbox,
+/// sorted.
+async fn deliveries(store: &Store) -> Vec<String> {
+    let mut subjects: Vec<String> = store
+        .outbox()
+        .await
+        .unwrap()
+        .pending
+        .into_iter()
+        .map(|delivery| delivery.alert.subject_id)
+        .collect();
+    subjects.sort();
+    subjects
+}
+
+/// A spoke outside `alert_order` with a route: its check's outage is
+/// stored and pushed without an alert on the spoke, and the hub, first in
+/// the list, fires the one alert. Its `upstream:hub` heartbeat still
+/// alerts on the spoke, which alone watches it.
+#[tokio::test]
+async fn a_spoke_outside_alert_order_leaves_its_own_outages_to_the_hub() {
+    let order = Some("[\"hub\"]");
+    let (dir, store) = open();
+    let config = load_text(
+        "hub",
+        paged(&ordered(&config_text("hub", "http://hub.invalid"), order)),
+        Some(&hub_key()),
+    );
+    let hub = serve_hub(dir, store, config, HeartbeatHandle::default()).await;
+    let spoke = spoke(&hub);
+    let quiet = load_text(
+        "spoke",
+        paged(&ordered(&config_text("spoke", &hub.url), order)),
+        Some(&spoke_key()),
+    );
+
+    goes_down(&spoke.store, &quiet, SubjectKind::Check, "api-port").await;
+    goes_down(&spoke.store, &quiet, SubjectKind::Heartbeat, "upstream:hub").await;
+    let open = spoke.store.open_outages("spoke").await.unwrap();
+    assert!(
+        open.iter()
+            .any(|outage| outage.check_id == "api-port" && outage.alerted),
+        "the spoke stores its outage as one to page for: {open:?}"
+    );
+    assert_eq!(deliveries(&spoke.store).await, ["upstream:hub"]);
+
+    let pushers = spoke.start(10);
+    eventually("the hub fires for the spoke's check", || async {
+        !hub.store.alerts().await.unwrap().is_empty()
+    })
+    .await;
+    pushers.stop().await;
+    let fired = hub.store.alerts().await.unwrap();
+    assert_eq!(fired.len(), 1, "{fired:?}");
+    assert_eq!(fired[0].node_id, "spoke");
+    assert_eq!(fired[0].subject_id, "api-port");
+    assert_eq!(deliveries(&hub.store).await, ["api-port"]);
+}
+
+/// A node in `alert_order`, or any node when the list is empty or there
+/// is none, pages for its own check as it always did.
+#[tokio::test]
+async fn a_node_in_alert_order_or_without_one_pages_for_its_own_checks() {
+    for order in [Some("[\"spoke\", \"hub\"]"), None] {
+        let (_dir, store) = open();
+        let config = load_text(
+            "spoke",
+            paged(&ordered(&config_text("spoke", "http://hub.invalid"), order)),
+            Some(&spoke_key()),
+        );
+        goes_down(&store, &config, SubjectKind::Check, "api-port").await;
+        assert_eq!(deliveries(&store).await, ["api-port"], "{order:?}");
+    }
+}
+
+/// When the spoke leaves `alert_order` takes effect.
+#[derive(Debug, Clone, Copy)]
+enum Leaving {
+    AtStart,
+    AtReload,
+}
+
+/// An alert the spoke opened for its own heartbeat before it left
+/// `alert_order` ends by configuration once it has, at start or at
+/// reload; the alert for a heartbeat tocsin keeps
+/// stays open.
+#[tokio::test]
+async fn leaving_alert_order_ends_the_spokes_own_alerts_at_start_and_at_reload() {
+    for when in [Leaving::AtStart, Leaving::AtReload] {
+        let (_dir, store) = open();
+        let text = format!(
+            "{}\n[[heartbeat]]\nid = \"backup\"\ninterval = \"1h\"\nnodes = [\"spoke\"]\n",
+            watched(&config_text("spoke", "http://hub.invalid"))
+        );
+        let configured = |order| {
+            watching(load_text(
+                "spoke",
+                ordered(&text, order),
+                Some(&spoke_key()),
+            ))
+        };
+        let paging = configured(None);
+        let quiet = configured(Some("[\"hub\"]"));
+        goes_down(&store, &paging, SubjectKind::Heartbeat, "backup").await;
+        goes_down(&store, &paging, SubjectKind::Heartbeat, "upstream:hub").await;
+        assert_eq!(deliveries(&store).await, ["backup", "upstream:hub"]);
+
+        let monitor = match when {
+            Leaving::AtStart => Monitor::start(&quiet, &store, &EventBus::new(), &Metrics::new())
+                .await
+                .unwrap(),
+            Leaving::AtReload => {
+                let mut monitor =
+                    Monitor::start(&paging, &store, &EventBus::new(), &Metrics::new())
+                        .await
+                        .unwrap();
+                let open = store.alerts().await.unwrap();
+                assert!(
+                    open.iter().all(|alert| alert.ended_at_ms.is_none()),
+                    "{when:?}: ended too soon: {open:?}"
+                );
+                monitor.reload(&quiet).await.unwrap();
+                monitor
+            }
+        };
+        let alerts = store.alerts().await.unwrap();
+        let ended = |id: &str| {
+            alerts
+                .iter()
+                .find(|alert| alert.subject_id == id)
+                .map(|alert| alert.ended_by)
+                .unwrap()
+        };
+        assert_eq!(ended("backup"), Some(EndedBy::Config), "{when:?}");
+        assert_eq!(ended("upstream:hub"), None, "{when:?}");
         monitor.stop().await;
     }
 }

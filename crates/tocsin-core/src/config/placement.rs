@@ -187,4 +187,21 @@ impl Config {
             .position(|node| node.as_str() == node_id)?;
         Some(&federation.alert_order[..position])
     }
+
+    /// Whether `[federation] alert_order` names other nodes but not
+    /// `node_id`. Such a node leaves paging for its own checks and
+    /// heartbeats to the nodes in the list, which page for them from its
+    /// pushes; it still pages for those tocsin keeps (`node:<id>`,
+    /// `upstream:<id>`, `quorum:<check>`), which each node watches itself.
+    /// False without a federation.
+    #[must_use]
+    pub fn outside_alert_order(&self, node_id: &str) -> bool {
+        self.federation.as_ref().is_some_and(|federation| {
+            !federation.alert_order.is_empty()
+                && !federation
+                    .alert_order
+                    .iter()
+                    .any(|node| node.as_str() == node_id)
+        })
+    }
 }

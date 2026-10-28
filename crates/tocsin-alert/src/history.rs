@@ -18,8 +18,10 @@ use crate::route::Router;
 ///
 /// It takes the engine's decision as given: an opened outage marked
 /// `alerted` fires on every notifier its routes name, and a recovery
-/// resolves whatever its predecessor fired. It never looks at maintenance
-/// windows; the engine already did.
+/// resolves whatever its predecessor fired, with one exception: a node
+/// outside `[federation] alert_order` fires nothing for its own checks and
+/// configured heartbeats, which the nodes in the list page for from its
+/// pushes. It never looks at maintenance windows; the engine already did.
 ///
 /// [`set_router`](Self::set_router) changes the routes for outages opened
 /// from then on; alerts already open keep the notifiers they fired on.
@@ -76,12 +78,18 @@ impl History for AlertingHistory {
             let Some(change) = change else {
                 return self.store.record(result, kind, None).await;
             };
+            let router = self.router();
+            // A node outside `alert_order` routes none of its own outages:
+            // they stay alert-worthy, so the nodes in the list page for
+            // them once its push lands.
             let routing = change
                 .open
                 .as_ref()
-                .filter(|open| open.alerted)
+                .filter(|open| {
+                    open.alerted && !router.leaves_to_alert_order(&open.node_id, &open.check_id)
+                })
                 .map(|open| {
-                    self.router().routing(
+                    router.routing(
                         open.subject_kind,
                         &open.check_id,
                         open.component_id.as_deref(),

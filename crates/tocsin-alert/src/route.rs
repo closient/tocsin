@@ -80,6 +80,9 @@ pub struct Router {
     /// Each notifier's `max_in_flight`.
     max_in_flight: HashMap<String, usize>,
     routes: Vec<CompiledRoute>,
+    /// This node's id when it is outside `[federation] alert_order`, so
+    /// the nodes in it page for its own checks and heartbeats instead.
+    quiet_node: Option<String>,
 }
 
 /// A subject's configured labels with its `class` and, when it has one, its
@@ -215,6 +218,7 @@ impl Router {
                 repeat_ms: Some(millis(route.repeat.get())).filter(|ms| *ms > 0),
             })
             .collect();
+        let node_id = config.server.node_id.as_deref().unwrap_or_default();
         Router {
             subjects,
             quorum,
@@ -223,7 +227,27 @@ impl Router {
             pushover,
             max_in_flight,
             routes,
+            quiet_node: config
+                .outside_alert_order(node_id)
+                .then(|| node_id.to_owned()),
         }
+    }
+
+    /// Whether this node leaves the alert for its own outage of
+    /// `subject_id` to the nodes in `[federation] alert_order`, as it does
+    /// for every check and heartbeat it is configured with when it is not
+    /// in the list. Those tocsin keeps, whose ids hold a `:`, still alert
+    /// here: each node watches them itself, and no push pages for them.
+    #[must_use]
+    pub fn leaves_to_alert_order(&self, node_id: &str, subject_id: &str) -> bool {
+        self.quiet_node.as_deref() == Some(node_id) && !subject_id.contains(':')
+    }
+
+    /// This node's id when it leaves its own outages to the nodes in
+    /// `[federation] alert_order`.
+    #[must_use]
+    pub fn quiet_node(&self) -> Option<&str> {
+        self.quiet_node.as_deref()
     }
 
     /// The check or heartbeat's display name, or its id.

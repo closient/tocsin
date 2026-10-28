@@ -738,7 +738,7 @@
       "description": "`[federation]`: settings every node of a federation shares. Required\nonce any `[[node]]` is listed.",
       "properties": {
         "alert_order": {
-          "description": "The nodes that alert for outages other nodes report, in order: a\nnode alerts only while every node ahead of it is down.",
+          "description": "The nodes that alert for outages other nodes report, in order: a\nnode alerts only while every node ahead of it is down. A node left\nout of a non-empty list leaves its own checks and configured\nheartbeats to them.",
           "items": {
             "$ref": "#/definitions/Id"
           },

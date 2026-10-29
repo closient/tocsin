@@ -4,6 +4,9 @@
 # cannot publish itself fails here. The server needs the `tocsin` project
 # and a token with the `release` scope (examples/config/releases.toml); set
 # the repository variable TOCSIN_URL and the secret TOCSIN_RELEASE_TOKEN.
+# Federated hubs keep separate release logs, so TOCSIN_URL may list several
+# servers separated by spaces; each gets its own publish, with the same token,
+# and the job fails if any of them refused it.
 name: Record release
 
 on:
@@ -49,9 +52,17 @@ jobs:
       - name: Publish the release
         run: |
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body > "$RUNNER_TEMP/notes.md"
-          "$RUNNER_TEMP/tocsin" release publish \
-            --project tocsin \
-            --version "$TAG" \
-            --title "$TITLE" \
-            --notes-file "$RUNNER_TEMP/notes.md" \
-            --release-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG"
+          read -r -a servers <<<"$TOCSIN_URL"
+          failed=0
+          for server in "${servers[@]}"; do
+            if ! TOCSIN_URL="$server" "$RUNNER_TEMP/tocsin" release publish \
+              --project tocsin \
+              --version "$TAG" \
+              --title "$TITLE" \
+              --notes-file "$RUNNER_TEMP/notes.md" \
+              --release-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG"; then
+              echo "::error::$server did not record $TAG"
+              failed=1
+            fi
+          done
+          exit "$failed"

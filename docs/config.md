@@ -492,7 +492,7 @@ push_to = ["operations-01"]
 default_nodes = ["operations-01"]
 ```
 
-Each node makes its own key pair with `tocsin node keygen`: the public key goes under its `[[node]]`, and the private key into the secret store its host reads `[server] node_key` from, such as `TOCSIN_NODE_KEY`. A push is signed over the sending node's id, the store it comes from and its body, so one node's key cannot speak for another. This release loads and checks these fields; nodes do not push yet.
+Each node makes its own key pair with `tocsin node keygen`: the public key goes under its `[[node]]`, and the private key into the secret store its host reads `[server] node_key` from, such as `TOCSIN_NODE_KEY`. A push is signed over the sending node's id, the store it comes from and its body, so one node's key cannot speak for another. Each node pushes its own rows to the nodes in its `push_to`, signed with that key.
 
 Naming nodes explicitly keeps the id from changing under a server when its host is renamed. A single server named by its hostname warns at startup when its database holds outages still open under another node id, naming each node and what is out on it: those were opened before a rename, and nothing will end them until `node_id` is set back to the old name.
 

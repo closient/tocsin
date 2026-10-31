@@ -26,7 +26,7 @@ use super::colour::{AA_TEXT, DARK, LIGHT};
 use super::diagnostic::{Diagnostic, LineIndex};
 use super::notifier::NotifierType;
 use super::telemetry::OWN_RESOURCE_ATTRIBUTES;
-use super::values::{Id, Secret, Text, email_address, is_unanswerable};
+use super::values::{HeartbeatRef, Id, Secret, Text, email_address, is_unanswerable};
 use super::{
     Auth, AuthMode, Check, Component, Config, Federation, Group, Heartbeat, Link, MAX_APP_NAME,
     Node, NodeIdSource, Notifier, Page, Project, Route, Server, Slack, Subscribers, Telemetry,
@@ -620,11 +620,21 @@ impl<'a> Loader<'a> {
                 ("component", "components", &route.value.components),
                 ("group", "groups", &route.value.groups),
                 ("check", "checks", &route.value.checks),
-                ("heartbeat", "heartbeats", &route.value.heartbeats),
             ];
             for (kind, key, ids) in lists {
                 for (index, id) in ids.iter().enumerate() {
                     references.push((kind, id, route.origin.key(key).index(index)));
+                }
+            }
+            // `node:<node>` and `upstream:<node>` name the heartbeat tocsin
+            // keeps for a node, so it is the node that must exist.
+            for (index, heartbeat) in route.value.heartbeats.iter().enumerate() {
+                let origin = route.origin.key("heartbeats").index(index);
+                match heartbeat {
+                    HeartbeatRef::Configured(id) => references.push(("heartbeat", id, origin)),
+                    HeartbeatRef::Node(node) | HeartbeatRef::Upstream(node) => {
+                        references.push(("node", node, origin));
+                    }
                 }
             }
         }
@@ -959,6 +969,62 @@ impl<'a> Loader<'a> {
             }
         }
         self.validate_nodes(items, &retired);
+        self.validate_route_nodes(items, &retired);
+    }
+
+    /// Each route's `node:<node>` and `upstream:<node>` names a heartbeat
+    /// some node keeps: one for each node whose `push_to` names it, the other
+    /// on each node that pushes to it. An unknown node is reported as a
+    /// reference.
+    fn validate_route_nodes(&mut self, items: &Items, retired: &HashSet<&str>) {
+        for route in &items.routes {
+            for (index, heartbeat) in route.value.heartbeats.iter().enumerate() {
+                let Some(id) = heartbeat.node() else { continue };
+                if !items.nodes.iter().any(|node| node.value.id == *id) {
+                    continue;
+                }
+                let at = route.origin.key("heartbeats").index(index);
+                if retired.contains(id.as_str()) {
+                    self.report(&at, format!("node `{id}` is retired"), None);
+                    continue;
+                }
+                match heartbeat {
+                    HeartbeatRef::Configured(_) => {}
+                    HeartbeatRef::Node(_) => {
+                        let pushes = items
+                            .nodes
+                            .iter()
+                            .any(|node| node.value.id == *id && !node.value.push_to.is_empty());
+                        if !pushes {
+                            self.report(
+                                &at,
+                                format!(
+                                    "node `{id}` pushes to no node, so no node keeps `{heartbeat}`"
+                                ),
+                                Some(format!(
+                                    "a node keeps `{heartbeat}` when `{id}`'s `push_to` names it"
+                                )),
+                            );
+                        }
+                    }
+                    HeartbeatRef::Upstream(_) => {
+                        let pushed_to = items
+                            .nodes
+                            .iter()
+                            .any(|node| !node.value.retired && node.value.push_to.contains(id));
+                        if !pushed_to {
+                            self.report(
+                                &at,
+                                format!("no node pushes to `{id}`, so no node keeps `{heartbeat}`"),
+                                Some(format!(
+                                    "a node keeps `{heartbeat}` when its `push_to` names `{id}`"
+                                )),
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Each `[[node]]`: its `url`, whom it pushes to, and that no public

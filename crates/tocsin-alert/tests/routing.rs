@@ -10,6 +10,7 @@ use common::config;
 use tocsin_alert::Router;
 use tocsin_core::Health;
 use tocsin_core::config::{Id, QUORUM_HEARTBEAT};
+use tocsin_core::federation::NodeKey;
 use tocsin_store::{AlertRouting, SubjectKind};
 
 const MINUTE_MS: i64 = 60_000;
@@ -265,4 +266,71 @@ fn a_lost_quorum_routes_as_its_check() {
         .collect();
     found.sort_unstable();
     assert_eq!(found, ["oncheck", "oncomponent"]);
+}
+
+/// The hub `node-a`, which this node runs as, and `spoke` and `edge`
+/// pushing to it, so `node-a` keeps `node:spoke` and `node:edge`, and each
+/// spoke `upstream:node-a`.
+fn federation() -> String {
+    let key = |seed: u8| NodeKey::from_seed([seed; 32]).public_key();
+    format!(
+        "[server]\nnode_id = \"node-a\"\n\n\
+         [[node]]\nid = \"node-a\"\nurl = \"https://node-a.example.com\"\npublic_keys = [\"{}\"]\n\n\
+         [[node]]\nid = \"spoke\"\npublic_keys = [\"{}\"]\npush_to = [\"node-a\"]\n\n\
+         [[node]]\nid = \"edge\"\npublic_keys = [\"{}\"]\npush_to = [\"node-a\"]\n\n\
+         [federation]\ndefault_nodes = [\"node-a\"]\n\n",
+        key(1),
+        key(2),
+        key(3),
+    )
+}
+
+#[test]
+fn a_route_matches_the_heartbeats_a_node_keeps_for_other_nodes() {
+    let router = router(
+        &["pager", "chat", "onbeat"],
+        &format!(
+            "{}[[route]]\nid = \"spoke\"\nnotifiers = [\"pager\"]\nheartbeats = [\"node:spoke\"]\n\
+             notify_on = \"down\"\nrepeat = \"1h\"\n\n\
+             [[route]]\nid = \"upstream\"\nnotifiers = [\"chat\"]\nheartbeats = [\"upstream:node-a\"]\n\n\
+             [[route]]\nid = \"backup\"\nnotifiers = [\"onbeat\"]\nheartbeats = [\"backup\"]\n",
+            federation()
+        ),
+    );
+    let sent_to = |kind, subject: &str, health| {
+        targets(&router.routing(kind, subject, None, health))
+            .into_iter()
+            .map(|(notifier, route, repeat)| (notifier.to_owned(), route.to_owned(), repeat))
+            .collect::<Vec<_>>()
+    };
+    let to =
+        |notifier: &str, route: &str, repeat| vec![(notifier.to_owned(), route.to_owned(), repeat)];
+
+    // Each goes where its route says, with that route's repeat, exactly as
+    // a `[[heartbeat]]` would.
+    assert_eq!(
+        sent_to(SubjectKind::Heartbeat, "node:spoke", Health::Down),
+        to("pager", "spoke", Some(HOUR_MS))
+    );
+    assert_eq!(
+        sent_to(SubjectKind::Heartbeat, "upstream:node-a", Health::Down),
+        to("chat", "upstream", Some(4 * HOUR_MS))
+    );
+    // Another node's heartbeat, the bare node id, the other kind and the
+    // same id as a check match nothing.
+    assert_eq!(
+        sent_to(SubjectKind::Heartbeat, "node:edge", Health::Down),
+        []
+    );
+    assert_eq!(sent_to(SubjectKind::Heartbeat, "spoke", Health::Down), []);
+    assert_eq!(
+        sent_to(SubjectKind::Heartbeat, "upstream:spoke", Health::Down),
+        []
+    );
+    assert_eq!(sent_to(SubjectKind::Check, "node:spoke", Health::Down), []);
+    // `notify_on` holds too.
+    assert_eq!(
+        sent_to(SubjectKind::Heartbeat, "node:spoke", Health::Degraded),
+        []
+    );
 }

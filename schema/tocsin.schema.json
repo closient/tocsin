@@ -949,6 +949,11 @@
       ],
       "type": "object"
     },
+    "HeartbeatRef": {
+      "description": "A `[[heartbeat]]`'s id, or a heartbeat tocsin keeps for a `[[node]]`: `node:<node>` on each node it pushes to, down once its pushes stop, and `upstream:<node>` on each node that pushes to it, down once it stops taking them.",
+      "pattern": "^((node|upstream):)?[a-z0-9][a-z0-9-]*$",
+      "type": "string"
+    },
     "HttpMethod": {
       "description": "An HTTP request method.",
       "oneOf": [
@@ -1777,9 +1782,9 @@
           "type": "array"
         },
         "heartbeats": {
-          "description": "Only alerts for these heartbeats.",
+          "description": "Only alerts for these heartbeats: a `[[heartbeat]]`'s id, or\n`node:<node>` and `upstream:<node>` for the heartbeats a node keeps\nfor the nodes that push to it and that it pushes to.",
           "items": {
-            "$ref": "#/definitions/Id"
+            "$ref": "#/definitions/HeartbeatRef"
           },
           "type": "array"
         },

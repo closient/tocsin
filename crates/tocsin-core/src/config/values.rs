@@ -10,6 +10,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use super::placement::{LIVENESS_HEARTBEAT, QUORUM_HEARTBEAT, UPSTREAM_HEARTBEAT};
+
 /// An identifier: a slug matching `^[a-z0-9][a-z0-9-]*$`.
 ///
 /// Identifiers name components, groups, checks and every other item, and
@@ -47,7 +49,8 @@ impl Id {
     /// The id of a heartbeat tocsin keeps itself rather than reads from a
     /// file, `<kind>:<node>`, such as `node:edge-1`. No configured id holds
     /// a colon, so it never collides with one, and [`Id::parse`] refuses it,
-    /// so no file and no ping can name it.
+    /// so no file defines one and no ping can name it. A `[[route]]` names
+    /// the `node:` and `upstream:` ones through a [`HeartbeatRef`].
     #[must_use]
     pub fn synthetic(kind: &str, node: &Id) -> Self {
         Id(format!("{kind}:{node}"))
@@ -83,6 +86,102 @@ impl JsonSchema for Id {
             "type": "string",
             "pattern": ID_PATTERN,
             "description": "A slug: lowercase letters, digits and hyphens, starting with a letter or digit."
+        })
+    }
+}
+
+/// A heartbeat a `[[route]]` names: a `[[heartbeat]]`'s id, or one tocsin
+/// keeps for a node, `node:<node>` or `upstream:<node>`.
+///
+/// Written and serialized as the heartbeat's id, which is what the alerts
+/// for it carry.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum HeartbeatRef {
+    /// A `[[heartbeat]]`, by its id.
+    Configured(Id),
+    /// `node:<node>`, kept by each node `<node>` pushes to: down once the
+    /// pushes from it stop.
+    Node(Id),
+    /// `upstream:<node>`, kept by each node that pushes to `<node>`: down
+    /// once it stops taking them.
+    Upstream(Id),
+}
+
+/// The pattern every [`HeartbeatRef`] matches, as published in the JSON
+/// Schema.
+pub const HEARTBEAT_REF_PATTERN: &str = "^((node|upstream):)?[a-z0-9][a-z0-9-]*$";
+
+impl HeartbeatRef {
+    /// Parses a heartbeat reference, explaining what is wrong when it is
+    /// not one.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when `text` is neither an [`Id`] nor `node:` or
+    /// `upstream:` followed by one.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let Some((kind, node)) = text.split_once(':') else {
+            return Id::parse(text).map(HeartbeatRef::Configured);
+        };
+        let invalid = || {
+            format!(
+                "invalid heartbeat `{text}`: name a `[[heartbeat]]` by its id, or a node's pushes as `{LIVENESS_HEARTBEAT}:<node>` or `{UPSTREAM_HEARTBEAT}:<node>`"
+            )
+        };
+        let node = Id::parse(node).map_err(|_| invalid())?;
+        match kind {
+            LIVENESS_HEARTBEAT => Ok(HeartbeatRef::Node(node)),
+            UPSTREAM_HEARTBEAT => Ok(HeartbeatRef::Upstream(node)),
+            QUORUM_HEARTBEAT => Err(format!(
+                "`{text}` routes as the check `{node}`: name `{node}` in `checks` instead"
+            )),
+            _ => Err(invalid()),
+        }
+    }
+
+    /// The node a `node:` or `upstream:` heartbeat watches.
+    #[must_use]
+    pub fn node(&self) -> Option<&Id> {
+        match self {
+            HeartbeatRef::Configured(_) => None,
+            HeartbeatRef::Node(node) | HeartbeatRef::Upstream(node) => Some(node),
+        }
+    }
+}
+
+impl fmt::Display for HeartbeatRef {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HeartbeatRef::Configured(id) => write!(formatter, "{id}"),
+            HeartbeatRef::Node(node) => write!(formatter, "{LIVENESS_HEARTBEAT}:{node}"),
+            HeartbeatRef::Upstream(node) => write!(formatter, "{UPSTREAM_HEARTBEAT}:{node}"),
+        }
+    }
+}
+
+impl Serialize for HeartbeatRef {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for HeartbeatRef {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        HeartbeatRef::parse(&text).map_err(serde::de::Error::custom)
+    }
+}
+
+impl JsonSchema for HeartbeatRef {
+    fn schema_name() -> Cow<'static, str> {
+        "HeartbeatRef".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "pattern": HEARTBEAT_REF_PATTERN,
+            "description": "A `[[heartbeat]]`'s id, or a heartbeat tocsin keeps for a `[[node]]`: `node:<node>` on each node it pushes to, down once its pushes stop, and `upstream:<node>` on each node that pushes to it, down once it stops taking them."
         })
     }
 }

@@ -470,7 +470,7 @@ A destination for operator alerts. Every alert it sends is followed by a resolve
 | `checks` | array of [`Id`](#type-id) |  |  | Only alerts for these checks. |
 | `components` | array of [`Id`](#type-id) |  |  | Only alerts for these components. |
 | `groups` | array of [`Id`](#type-id) |  |  | Only alerts for components in these groups. |
-| `heartbeats` | array of [`Id`](#type-id) |  |  | Only alerts for these heartbeats. |
+| `heartbeats` | array of [`HeartbeatRef`](#type-heartbeatref) |  |  | Only alerts for these heartbeats: a `[[heartbeat]]`'s id, or `node:<node>` and `upstream:<node>` for the heartbeats a node keeps for the nodes that push to it and that it pushes to. |
 | `id` | [`Id`](#type-id) | yes |  | Unique among routes in every file. |
 | `notifiers` | array of [`Id`](#type-id) | yes |  | The `[[notifier]]`s that receive matching alerts. |
 | `notify_on` | [`FailureState`](#type-failurestate) |  | `"down"` | The least severe state that alerts: `degraded` alerts on degraded and down, `down` on down only. |
@@ -703,6 +703,14 @@ The state a failed assertion puts its check in.
 |-------|---------|
 | `"degraded"` | Working, but worse than it should be. |
 | `"down"` | Not working. |
+
+<a id="type-heartbeatref"></a>
+
+### `HeartbeatRef`
+
+A `[[heartbeat]]`'s id, or a heartbeat tocsin keeps for a `[[node]]`: `node:<node>` on each node it pushes to, down once its pushes stop, and `upstream:<node>` on each node that pushes to it, down once it stops taking them.
+
+A string matching `^((node|upstream):)?[a-z0-9][a-z0-9-]*$`.
 
 <a id="type-httpmethod"></a>
 

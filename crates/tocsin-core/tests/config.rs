@@ -4,8 +4,8 @@
 //! column.
 
 use tocsin_core::config::{
-    AuthMode, CheckType, Config, DARK, Diagnostic, Environment, Id, NodeIdSource, NotifierType,
-    ProbeClass, Secret, Source, TokenScope, TopologyNode, load,
+    AuthMode, CheckType, Config, DARK, Diagnostic, Environment, HeartbeatRef, Id, NodeIdSource,
+    NotifierType, ProbeClass, Secret, Source, TokenScope, TopologyNode, load,
 };
 use tocsin_core::federation::NodeKey;
 
@@ -2138,6 +2138,109 @@ fn federation_references_are_checked() {
         "f.toml:22:17: `push_interval` must be longer than 0s".to_owned(),
     ];
     assert_eq!(found, expected);
+}
+
+/// [`federation`] with a retired node `old`, and a route sending the
+/// `heartbeats` listed to a Slack notifier, on line 10 of `notify.toml`.
+fn node_route(heartbeats: &str) -> [(&'static str, String); 2] {
+    let federation = format!(
+        "{}\n[[node]]\nid = \"old\"\npublic_keys = [\"{}\"]\nretired = true\npush_to = [\"central\"]\n",
+        federation("NODE_KEY_B"),
+        public(3),
+    );
+    let route = format!(
+        "[[notifier]]\nid = \"ops\"\ntype = \"slack\"\n[notifier.slack]\nwebhook_url = \"${{ENV:SLACK_WEBHOOK_URL}}\"\n\n\
+         [[route]]\nid = \"nodes\"\nnotifiers = [\"ops\"]\nheartbeats = [{heartbeats}]\n"
+    );
+    [("server.toml", federation), ("notify.toml", route)]
+}
+
+fn node_route_files<'a>(files: &'a [(&'static str, String); 2]) -> [(&'static str, &'a str); 2] {
+    [(files[0].0, &files[0].1), (files[1].0, &files[1].1)]
+}
+
+#[test]
+fn a_route_names_the_heartbeats_a_node_keeps_for_other_nodes() {
+    let files = node_route(r#""node:dmz-1", "upstream:central""#);
+    let config = run(&node_route_files(&files)).expect("valid");
+    let heartbeats = &config.routes[0].heartbeats;
+    assert_eq!(
+        heartbeats,
+        &[
+            HeartbeatRef::Node(Id::parse("dmz-1").unwrap()),
+            HeartbeatRef::Upstream(Id::parse("central").unwrap()),
+        ]
+    );
+    // Written, shown and routed as the id the heartbeat's alerts carry.
+    let ids: Vec<String> = heartbeats.iter().map(ToString::to_string).collect();
+    assert_eq!(ids, ["node:dmz-1", "upstream:central"]);
+    let shown = serde_json::to_value(&config.routes[0]).unwrap();
+    assert_eq!(
+        shown["heartbeats"],
+        serde_json::json!(["node:dmz-1", "upstream:central"])
+    );
+}
+
+#[test]
+fn a_route_naming_a_node_no_node_keeps_a_heartbeat_for_is_rejected() {
+    let files = node_route(
+        r#""node:dmz-2", "upstream:centrl", "node:central", "upstream:dmz-1", "node:old""#,
+    );
+    let found = errors(&node_route_files(&files));
+    assert_eq!(
+        found,
+        [
+            "notify.toml:10:15: unknown node `dmz-2`",
+            "notify.toml:10:29: unknown node `centrl`",
+            "notify.toml:10:48: node `central` pushes to no node, so no node keeps `node:central`",
+            "notify.toml:10:64: no node pushes to `dmz-1`, so no node keeps `upstream:dmz-1`",
+            "notify.toml:10:82: node `old` is retired",
+        ]
+    );
+    let unknown = run(&node_route_files(&files)).expect_err("invalid");
+    assert_eq!(unknown[0].hint.as_deref(), Some("did you mean `dmz-1`?"));
+    assert_eq!(unknown[1].hint.as_deref(), Some("did you mean `central`?"));
+
+    // Without a federation there is no node to name.
+    let alone = "[[notifier]]\nid = \"ops\"\ntype = \"slack\"\n[notifier.slack]\nwebhook_url = \"${ENV:SLACK_WEBHOOK_URL}\"\n\n\
+                 [[route]]\nid = \"nodes\"\nnotifiers = [\"ops\"]\nheartbeats = [\"node:dmz-1\"]\n";
+    let diagnostic = only_error(&[("notify.toml", alone)]);
+    assert_eq!(diagnostic.message, "unknown node `dmz-1`");
+    assert_eq!(
+        diagnostic.hint.as_deref(),
+        Some("no `[[node]]` is defined in any file")
+    );
+}
+
+#[test]
+fn a_route_heartbeat_with_a_colon_is_a_node_heartbeat() {
+    for (written, message) in [
+        (
+            "nodes:dmz-1",
+            "invalid heartbeat `nodes:dmz-1`: name a `[[heartbeat]]` by its id, or a node's pushes as `node:<node>` or `upstream:<node>`",
+        ),
+        (
+            "node:",
+            "invalid heartbeat `node:`: name a `[[heartbeat]]` by its id, or a node's pushes as `node:<node>` or `upstream:<node>`",
+        ),
+        (
+            "node:Dmz-1",
+            "invalid heartbeat `node:Dmz-1`: name a `[[heartbeat]]` by its id, or a node's pushes as `node:<node>` or `upstream:<node>`",
+        ),
+        (
+            "quorum:api",
+            "`quorum:api` routes as the check `api`: name `api` in `checks` instead",
+        ),
+    ] {
+        let files = node_route(&format!("\"{written}\""));
+        let diagnostic = only_error(&node_route_files(&files));
+        assert_eq!(diagnostic.message, message, "{written}");
+        assert_eq!(
+            diagnostic.location().as_deref(),
+            Some("notify.toml:10:14"),
+            "{written}"
+        );
+    }
 }
 
 /// [`federation`] with a check `api` run on both nodes every 30 seconds,

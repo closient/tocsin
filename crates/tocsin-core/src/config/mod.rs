@@ -49,15 +49,15 @@ pub use notifier::{
     AlertmanagerSettings, DiscordSettings, EmailSettings, Notifier, NotifierSettings, NotifierType,
     NtfySettings, PushoverSettings, SlackSettings, TelegramSettings, WebhookSettings,
 };
-pub use placement::{LIVENESS_HEARTBEAT, QUORUM_HEARTBEAT, QUORUM_NODE};
+pub use placement::{LIVENESS_HEARTBEAT, QUORUM_HEARTBEAT, QUORUM_NODE, UPSTREAM_HEARTBEAT};
 pub use slack::{MAX_APP_NAME, Slack};
 pub use subscribers::{Subscribers, Turnstile};
 pub use telemetry::{OWN_RESOURCE_ATTRIBUTES, Otlp, OtlpProtocol, Telemetry};
 pub use topology::Topology;
 pub use values::{
-    BYTE_SIZE_PATTERN, ByteSize, Cidr, DURATION_PATTERN, Duration, ID_PATTERN, Id, SECRET_PATTERN,
-    Secret, TOPOLOGY_NODE_MAX, TOPOLOGY_NODE_PATTERN, Text, TopologyNode, email_address,
-    is_unanswerable,
+    BYTE_SIZE_PATTERN, ByteSize, Cidr, DURATION_PATTERN, Duration, HEARTBEAT_REF_PATTERN,
+    HeartbeatRef, ID_PATTERN, Id, SECRET_PATTERN, Secret, TOPOLOGY_NODE_MAX, TOPOLOGY_NODE_PATTERN,
+    Text, TopologyNode, email_address, is_unanswerable,
 };
 
 /// One configuration file. Every key is optional in a single file; rules
@@ -618,9 +618,11 @@ pub struct Route {
     /// Only alerts for these checks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<Id>,
-    /// Only alerts for these heartbeats.
+    /// Only alerts for these heartbeats: a `[[heartbeat]]`'s id, or
+    /// `node:<node>` and `upstream:<node>` for the heartbeats a node keeps
+    /// for the nodes that push to it and that it pushes to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub heartbeats: Vec<Id>,
+    pub heartbeats: Vec<HeartbeatRef>,
     /// The least severe state that alerts: `degraded` alerts on degraded and
     /// down, `down` on down only.
     #[serde(default)]

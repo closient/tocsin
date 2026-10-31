@@ -26,7 +26,8 @@ use tocsin_core::federation::wire::Batch;
 use tocsin_engine::ports::{History, SystemClock};
 use tocsin_engine::{HeartbeatHandle, Snapshot};
 use tocsin_store::{
-    EndedBy, NewCheckResult, NewOutage, OutageChange, PushCursor, Retention, Store, SubjectKind,
+    DeliveryKind, EndedBy, NewCheckResult, NewOutage, OutageChange, PushCursor, Retention, Store,
+    SubjectKind,
 };
 use tower::ServiceExt;
 
@@ -1182,4 +1183,140 @@ async fn leaving_alert_order_ends_the_spokes_own_alerts_at_start_and_at_reload()
         assert_eq!(ended("upstream:hub"), None, "{when:?}");
         monitor.stop().await;
     }
+}
+
+/// `text`, from [`watched`] or [`paged`], with its one route replaced:
+/// `node:spoke` and `upstream:hub` page, the configured `backup` heartbeat
+/// goes to a chat notifier, and nothing else is routed.
+fn routed_by_node(text: &str) -> String {
+    let (text, _all) = text.split_once("[[route]]").unwrap();
+    format!(
+        "{text}[[notifier]]\nid = \"chat\"\ntype = \"ntfy\"\n\n\
+         [notifier.ntfy]\nurl = \"http://127.0.0.1:9/chat\"\n\n\
+         [[route]]\nid = \"spoke\"\nnotifiers = [\"pager\"]\nheartbeats = [\"node:spoke\"]\n\n\
+         [[route]]\nid = \"upstream\"\nnotifiers = [\"pager\"]\nheartbeats = [\"upstream:hub\"]\n\n\
+         [[route]]\nid = \"backup\"\nnotifiers = [\"chat\"]\nheartbeats = [\"backup\"]\n"
+    )
+}
+
+/// The next message waiting for each alert in `store`'s outbox, as (kind,
+/// subject, notifier, route), sorted.
+async fn sent(store: &Store) -> Vec<(DeliveryKind, String, String, String)> {
+    let mut sent: Vec<_> = store
+        .outbox()
+        .await
+        .unwrap()
+        .pending
+        .into_iter()
+        .map(|delivery| {
+            (
+                delivery.kind,
+                delivery.alert.subject_id,
+                delivery.alert.notifier_id,
+                delivery.alert.route_id,
+            )
+        })
+        .collect();
+    sent.sort_by(|a, b| (&a.1, &a.2, &a.3).cmp(&(&b.1, &b.2, &b.3)));
+    sent
+}
+
+/// A route naming `node:spoke` pages, on the hub that keeps that heartbeat,
+/// once the spoke stops pushing, and resolves when it pushes again; only
+/// its notifier hears of it. The hub pages whether it is first in
+/// `alert_order` or not: only a node that pushes to one listed before it
+/// leaves its outages to others, and `node:` outages never.
+#[tokio::test]
+async fn a_route_for_a_node_s_pushes_pages_on_the_hub_when_they_stop() {
+    for order in [None, Some("[\"spoke\", \"hub\"]")] {
+        let (dir, store) = open();
+        let text = with_backup(&routed_by_node(&watched(&ordered(
+            &config_text("hub", "http://hub.invalid"),
+            order,
+        ))));
+        let config = watching(load_text("hub", text, Some(&hub_key())));
+        let monitor = Monitor::start(&config, &store, &EventBus::new(), &Metrics::new())
+            .await
+            .unwrap();
+        let hub = serve_hub(dir, Arc::clone(&store), config, monitor.heartbeats()).await;
+        let spoke = spoke(&hub);
+        let start = || {
+            Upstreams::from_config(&spoke.config, &spoke.metrics)
+                .unwrap()
+                .paced(watched_pacing())
+                .start(&spoke.store, &HeartbeatHandle::default())
+        };
+
+        let pushers = start();
+        eventually("the hub hears the spoke", || async {
+            up(&monitor, "node:spoke")
+        })
+        .await;
+        pushers.stop().await;
+        eventually("the silent spoke is down and alerting", || {
+            alerting(&hub.store, "hub", "node:spoke")
+        })
+        .await;
+        let sent = sent(&hub.store).await;
+        assert!(
+            !sent.is_empty()
+                && sent.iter().all(|(kind, subject, notifier, route)| {
+                    *kind == DeliveryKind::Fire
+                        && (subject.as_str(), notifier.as_str(), route.as_str())
+                            == ("node:spoke", "pager", "spoke")
+                }),
+            "{order:?}: {sent:?}"
+        );
+
+        let pushers = start();
+        eventually("its next push resolves it", || {
+            resolved(&hub.store, "hub", "node:spoke")
+        })
+        .await;
+        pushers.stop().await;
+        // Under load the spoke can miss its grace while still pushing, so
+        // there may be more than one alert: each went to the routed pager.
+        let alerts = hub.store.alerts().await.unwrap();
+        assert!(
+            !alerts.is_empty()
+                && alerts.iter().all(|alert| {
+                    (
+                        alert.subject_id.as_str(),
+                        alert.notifier_id.as_str(),
+                        alert.route_id.as_str(),
+                    ) == ("node:spoke", "pager", "spoke")
+                }),
+            "{order:?}: {alerts:?}"
+        );
+        monitor.stop().await;
+    }
+}
+
+/// A spoke outside `alert_order` leaves its configured `backup` heartbeat to
+/// the hub even with a route naming it, but its `upstream:hub` heartbeat,
+/// which no other node keeps, pages through the route that names it.
+#[tokio::test]
+async fn a_spoke_outside_alert_order_pages_for_its_upstream_through_its_route() {
+    let (_dir, store) = open();
+    let quiet = load_text(
+        "spoke",
+        with_backup(&routed_by_node(&paged(&ordered(
+            &config_text("spoke", "http://hub.invalid"),
+            Some("[\"hub\"]"),
+        )))),
+        Some(&spoke_key()),
+    );
+    assert!(quiet.outside_alert_order("spoke"));
+
+    goes_down(&store, &quiet, SubjectKind::Heartbeat, "backup").await;
+    goes_down(&store, &quiet, SubjectKind::Heartbeat, "upstream:hub").await;
+    assert_eq!(
+        sent(&store).await,
+        [(
+            DeliveryKind::Fire,
+            "upstream:hub".to_owned(),
+            "pager".to_owned(),
+            "upstream".to_owned(),
+        )]
+    );
 }

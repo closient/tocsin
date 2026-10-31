@@ -87,7 +87,11 @@ from the next alert, and it cannot be set under `labels`.
 `[[route]]` sends alerts matching its filters to its notifiers (see
 [config.md](config.md)). `checks` and `heartbeats` match the subject's id,
 `components` and `groups` match its component, and `notify_on` is the least
-severe health that alerts. An empty filter matches everything.
+severe health that alerts. An empty filter matches everything. In a
+federation, `heartbeats` can also name the heartbeats tocsin keeps for
+other nodes, `node:<id>` and `upstream:<id>`
+([heartbeats.md](heartbeats.md#node-liveness)); they route, repeat and
+resolve like any other heartbeat, on the node that keeps them.
 
 When several routes send one alert to the same notifier, it gets one copy,
 repeated on the shortest of their `repeat` intervals. Every alert is
@@ -248,7 +252,7 @@ it still stores each outage and pushes it, and the nodes in the list page
 for it. A node outside the list that pushes to none of them pages for its
 own as before, since nobody else would. It keeps paging for the
 heartbeats tocsin keeps and for quorum checks, which no other node pages
-for. An alert it opened for one of its own outages before it left the
+for, so a route naming its `upstream:<id>` still pages from it. An alert it opened for one of its own outages before it left the
 list ends at the next start or reload, with *ended by* `config`, and its
 resolve goes out; the nodes in the list take the outage over from its
 next push.

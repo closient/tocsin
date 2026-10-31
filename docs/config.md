@@ -412,7 +412,7 @@ Sends alerts matching its filters to its notifiers. An empty filter matches ever
 | `components` | component ids | `[]` | Only alerts for these components. |
 | `groups` | group ids | `[]` | Only alerts for components in these groups. |
 | `checks` | check ids | `[]` | Only alerts for these checks. |
-| `heartbeats` | heartbeat ids | `[]` | Only alerts for these heartbeats. |
+| `heartbeats` | heartbeat ids, `node:<node>` or `upstream:<node>` | `[]` | Only alerts for these heartbeats. `node:<node>` and `upstream:<node>` are the ones a node keeps for a node that pushes to it and for one it pushes to ([heartbeats.md](heartbeats.md#node-liveness)). |
 | `notify_on` | `degraded` or `down` | `down` | The least severe state that alerts. |
 | `repeat` | duration | `"4h"` | Re-send while the alert is still firing. At least `"1m"`, or `"0s"` to never repeat. |
 

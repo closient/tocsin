@@ -18,8 +18,9 @@
 //! They are added as `tocsin serve` loads the configuration, never by
 //! `config check` or `config show`: no file names them. Their ids hold a
 //! colon, which no configured id may, so they never collide with one,
-//! and neither a ping nor a `[[route]]` can name them. A silence can, to
-//! quiet a node taken down on purpose.
+//! and no ping can name them. A `[[route]]` can name the `node:` and
+//! `upstream:` ones, to send a node's outage to its own notifiers, and a
+//! silence can, to quiet a node taken down on purpose.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -36,7 +37,7 @@ use crate::metrics::CheckMetrics;
 pub(crate) const NODE: &str = tocsin_core::config::LIVENESS_HEARTBEAT;
 
 /// The kind of a heartbeat watching a node this node pushes to.
-pub(crate) const UPSTREAM: &str = "upstream";
+pub(crate) const UPSTREAM: &str = tocsin_core::config::UPSTREAM_HEARTBEAT;
 
 /// Adds the liveness heartbeats to `config`, a configuration `tocsin
 /// serve` is about to run: `node:<id>` for each node, not retired and not

@@ -213,7 +213,7 @@ impl Router {
                 components: set(&route.components),
                 groups: set(&route.groups),
                 checks: set(&route.checks),
-                heartbeats: set(&route.heartbeats),
+                heartbeats: route.heartbeats.iter().map(ToString::to_string).collect(),
                 notify_on: Health::from(route.notify_on),
                 repeat_ms: Some(millis(route.repeat.get())).filter(|ms| *ms > 0),
             })

@@ -468,6 +468,13 @@ cuts the hub off from two of three locations yields "quorum lost", not
   `upstream:<id>` on the pusher, the same way. With no push succeeding
   for `push_interval + grace` it opens, alerting through the pusher's own
   notifiers, and the next push that succeeds resolves it.
+- **Routing them.** A `[[route]]`'s `heartbeats` can name either,
+  `node:<id>` or `upstream:<id>`, where `<id>` is a configured node that
+  is not retired and some node keeps the heartbeat for. The route matches
+  the alert's subject id exactly, as for any heartbeat, so it fires only
+  on the nodes that keep that heartbeat. Only those nodes page for it:
+  never one that receives the outage in a push, and a node outside
+  `alert_order` still pages for its own.
 - **Who reports the hub's death.** Any node that pushes to it and can
   reach a notifier on its own path. A DMZ spoke usually cannot: the point
   of the hub was that the spoke has no way out but to it.

@@ -180,9 +180,25 @@ A retired node, and a node whose `push_to` does not name this one, has no
 config check` and `config show` do not list them; they are on the
 internal page, never the public one, as they have no component. Their ids
 hold a colon, which no configured id may, so the ping API answers 404 for
-them and a `[[route]]` cannot name them; a route with no `checks`,
-`heartbeats`, `components` or `groups` filter does match them. A silence can name one, to quiet a node taken down on
-purpose.
+them. A route with no `checks`, `heartbeats`, `components` or `groups`
+filter matches them, and a route's `heartbeats` can name them, to send a
+node's outage to notifiers of its own:
+
+```toml
+[[route]]
+id = "edge-pushes"
+notifiers = ["oncall"]
+heartbeats = ["node:edge-1", "upstream:hub"]
+```
+
+The node after the colon must be a `[[node]]` that is not retired, and
+there must be a node that keeps the heartbeat: for `node:<id>`, `<id>`
+pushes to at least one node; for `upstream:<id>`, some node pushes to
+`<id>`. `tocsin config check` reports an unknown node, as for any other
+reference. As every node reads the same files, such a route matches only
+on the nodes that keep that heartbeat: `node:edge-1` on each node
+`edge-1` pushes to, `upstream:hub` on each node that pushes to `hub`. A
+silence can name one too, to quiet a node taken down on purpose.
 
 ## Uptime
 

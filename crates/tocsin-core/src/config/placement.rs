@@ -11,6 +11,10 @@ use super::{Check, Config, Heartbeat};
 /// `node:<id>`, pinged by its pushes.
 pub const LIVENESS_HEARTBEAT: &str = "node";
 
+/// The kind of the heartbeat a node keeps for each node it pushes to,
+/// `upstream:<id>`, pinged by the pushes that go through.
+pub const UPSTREAM_HEARTBEAT: &str = "upstream";
+
 /// The node a quorum check's evaluated results and outages are recorded
 /// under, since no one node saw them. No node id holds `*`.
 pub const QUORUM_NODE: &str = "*";

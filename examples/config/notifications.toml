@@ -27,6 +27,13 @@ api_token = "${ENV:TOCSIN_PUSHOVER_API_TOKEN}"
 # resolve cancels it.
 down_priority = 2
 
+# Overnight, every message arrives at priority -1, which makes no sound:
+# no emergency rings between 22:00 and 07:00 Berlin time.
+[notifier.pushover.quiet_hours]
+start = "22:00"
+end = "07:00"
+timezone = "Europe/Berlin"
+
 # Signed JSON for your own tooling; docs/alerting.md shows how to verify it.
 [[notifier]]
 id = "incident-bot"

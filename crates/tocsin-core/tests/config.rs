@@ -1212,6 +1212,61 @@ fn pushover_priorities_run_from_minus_two_to_two() {
 }
 
 #[test]
+fn pushover_quiet_hours_need_a_window_a_known_zone_and_a_priority_below_emergency() {
+    let pushover = |quiet: &str| {
+        format!(
+            "[[notifier]]\nid = \"phone\"\ntype = \"pushover\"\n[notifier.pushover]\nuser_key = \"${{ENV:TOKEN_A}}\"\napi_token = \"${{ENV:TOKEN_C}}\"\n[notifier.pushover.quiet_hours]\n{quiet}"
+        )
+    };
+    let config = run(&[(
+        "notify.toml",
+        &pushover("start = \"22:00\"\nend = \"07:00\"\ntimezone = \"America/Vancouver\"\n"),
+    )])
+    .expect("valid");
+    let quiet = config.notifiers[0]
+        .pushover
+        .as_ref()
+        .and_then(|settings| settings.quiet_hours.as_ref())
+        .expect("quiet hours");
+    assert_eq!(
+        (
+            quiet.start.to_string(),
+            quiet.end.to_string(),
+            quiet.timezone.as_str(),
+            quiet.priority
+        ),
+        (
+            "22:00".to_owned(),
+            "07:00".to_owned(),
+            "America/Vancouver",
+            -1
+        )
+    );
+    assert_eq!(
+        errors(&[(
+            "notify.toml",
+            &pushover(
+                "start = \"07:00\"\nend = \"07:00\"\ntimezone = \"Mars/Olympus\"\npriority = 2\n"
+            )
+        )]),
+        [
+            "notify.toml:9:7: quiet hours `start` and `end` must differ",
+            "notify.toml:10:12: unknown time zone `Mars/Olympus`",
+            "notify.toml:11:12: a quiet-hours priority is -2, -1, 0 or 1",
+        ]
+    );
+    let bad_time = errors(&[(
+        "notify.toml",
+        &pushover("start = \"24:00\"\nend = \"07:00\"\ntimezone = \"UTC\"\n"),
+    )]);
+    assert_eq!(bad_time.len(), 1, "{bad_time:?}");
+    assert!(
+        bad_time[0].contains("invalid time of day `24:00`"),
+        "{bad_time:?}"
+    );
+}
+
+#[test]
 fn a_heartbeat_may_not_reuse_a_check_id() {
     let diagnostic = only_error(&[
         (

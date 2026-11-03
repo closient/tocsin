@@ -359,7 +359,7 @@ scope. The MCP tools `create_silence`,
 | `slack`, `discord` | A message to the incoming webhook. | A message saying it recovered, and how long it lasted. |
 | `telegram` | `sendMessage` to `chat_id`. | The same, saying it recovered. |
 | `ntfy` | A POST to the topic with `Title`, `Priority` 4 when down (3 when degraded) and a tag. | Priority 3, tagged as resolved. |
-| `pushover` | `down_priority` (default 1) or `degraded_priority` (default 0). Priority 2 is an emergency: Pushover rings it every 60s until acknowledged, for up to an hour. | `resolved_priority` (default 0). An emergency still ringing is cancelled, below. |
+| `pushover` | `down_priority` (default 1) or `degraded_priority` (default 0). Priority 2 is an emergency: Pushover rings it every 60s until acknowledged, for up to an hour. | `resolved_priority` (default 0). An emergency still ringing is cancelled, below. Inside quiet hours, if set, both are held to the quiet priority. |
 | `email` | One message per alert from `[server.email]`'s `from`, with its `reply_to`. | A message in the same thread. |
 | `webhook` | Signed JSON, below. | The same JSON with `"event": "resolve"`. |
 | `alertmanager` | `POST /api/v2/alerts`, re-posted every 60s with `endsAt` 5 minutes ahead. | `endsAt` set to when the outage ended. |
@@ -384,6 +384,21 @@ message. Whether a message rings is decided when it is queued, so changing
 a priority in the config does not orphan a ring already going. A resolve
 sent at priority 2 (`resolved_priority = 2`) is not tagged and rings until
 acknowledged or it expires: pick a lower priority unless that is wanted.
+
+**Pushover quiet hours.** `[notifier.pushover.quiet_hours]` holds every
+message to a lower priority (default -1, which never makes a sound)
+inside a daily window of local time, so alerts still arrive overnight
+without waking anyone. The window runs from `start` up to but not
+including `end`, past midnight when `start` is the later time, and is
+read on the wall clock of `timezone`, so it follows daylight saving time
+and any change the time zone database records. A message keeps its usual
+priority when that is already lower. Inside the window nothing goes out
+at priority 2: a fire or repeat that would be an emergency is sent at the
+quiet priority, and an emergency already ringing for that alert is
+cancelled first. Outside it, an emergency's repeats are cut short so they
+stop before the window opens. Whether a message is quiet is decided at
+the moment of each delivery attempt, so a message held back by a retry
+until after `end` goes out at its usual priority.
 
 **Alertmanager.** Alertmanager resolves a firing alert on its own once its
 `endsAt` passes without a re-post. tocsin sets `endsAt` five minutes after

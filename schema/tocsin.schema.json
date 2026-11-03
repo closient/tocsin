@@ -1664,6 +1664,17 @@
           "minimum": -128,
           "type": "integer"
         },
+        "quiet_hours": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/QuietHours"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`[notifier.pushover.quiet_hours]`: a daily window in which no\nmessage is sent above a lower priority, so the phone stays silent."
+        },
         "resolved_priority": {
           "default": 0,
           "description": "The priority of a resolve.",
@@ -1684,6 +1695,46 @@
       "required": [
         "user_key",
         "api_token"
+      ],
+      "type": "object"
+    },
+    "QuietHours": {
+      "additionalProperties": false,
+      "description": "`[notifier.pushover.quiet_hours]`: every day from `start` until `end`,\nlocal time in `timezone`, each message (fire, repeat and resolve) is sent\nat no more than `priority`. A window whose `start` is later than its\n`end` runs past midnight: `\"22:00\"` to `\"07:00\"` is overnight. Alerts\nstill go out inside the window; only how loudly changes.",
+      "properties": {
+        "end": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TimeOfDay"
+            }
+          ],
+          "description": "When it closes, such as `\"07:00\"`. Exclusive: a message at exactly\nthis time is sent at its usual priority. Must differ from `start`."
+        },
+        "priority": {
+          "default": -1,
+          "description": "The most a message is sent at inside the window, -2 to 1. The\ndefault, -1, makes no sound or vibration. A message whose usual\npriority is already lower keeps it. An emergency (2) is never sent\ninside the window, and one already ringing for the same alert is\ncancelled when the alert next fires or repeats inside it.",
+          "format": "int8",
+          "maximum": 127,
+          "minimum": -128,
+          "type": "integer"
+        },
+        "start": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TimeOfDay"
+            }
+          ],
+          "description": "When the window opens each day, such as `\"22:00\"`. Inclusive."
+        },
+        "timezone": {
+          "description": "The IANA time zone `start` and `end` are read in, such as\n`\"America/Vancouver\"`; daylight saving time is followed.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "timezone"
       ],
       "type": "object"
     },
@@ -2167,6 +2218,11 @@
         }
       },
       "type": "object"
+    },
+    "TimeOfDay": {
+      "description": "A time of day, HH:MM on a 24-hour clock, such as \"07:00\" or \"22:30\".",
+      "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+      "type": "string"
     },
     "TlsSettings": {
       "additionalProperties": false,

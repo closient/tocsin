@@ -47,7 +47,7 @@ pub use load::{Environment, Source, closest, host_and_port, load};
 pub use node::{Federation, Node, NodeIdSource};
 pub use notifier::{
     AlertmanagerSettings, DiscordSettings, EmailSettings, Notifier, NotifierSettings, NotifierType,
-    NtfySettings, PushoverSettings, SlackSettings, TelegramSettings, WebhookSettings,
+    NtfySettings, PushoverSettings, QuietHours, SlackSettings, TelegramSettings, WebhookSettings,
 };
 pub use placement::{LIVENESS_HEARTBEAT, QUORUM_HEARTBEAT, QUORUM_NODE, UPSTREAM_HEARTBEAT};
 pub use slack::{MAX_APP_NAME, Slack};
@@ -56,8 +56,8 @@ pub use telemetry::{OWN_RESOURCE_ATTRIBUTES, Otlp, OtlpProtocol, Telemetry};
 pub use topology::Topology;
 pub use values::{
     BYTE_SIZE_PATTERN, ByteSize, Cidr, DURATION_PATTERN, Duration, HEARTBEAT_REF_PATTERN,
-    HeartbeatRef, ID_PATTERN, Id, SECRET_PATTERN, Secret, TOPOLOGY_NODE_MAX, TOPOLOGY_NODE_PATTERN,
-    Text, TopologyNode, email_address, is_unanswerable,
+    HeartbeatRef, ID_PATTERN, Id, SECRET_PATTERN, Secret, TIME_OF_DAY_PATTERN, TOPOLOGY_NODE_MAX,
+    TOPOLOGY_NODE_PATTERN, Text, TimeOfDay, TopologyNode, email_address, is_unanswerable,
 };
 
 /// One configuration file. Every key is optional in a single file; rules

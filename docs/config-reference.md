@@ -377,8 +377,22 @@ A destination for operator alerts. Every alert it sends is followed by a resolve
 | `api_token` | [`Secret`](#type-secret) | yes |  | The application's API token. Secret. |
 | `degraded_priority` | integer, -128–127 |  | `0` | The priority of an alert that is degraded. |
 | `down_priority` | integer, -128–127 |  | `1` | The Pushover priority, -2 to 2, of an alert that is down. 2 is an emergency, repeated until acknowledged and cancelled by the resolve. |
+| `quiet_hours` | [table](#table-quiethours) |  |  | `[notifier.pushover.quiet_hours]`: a daily window in which no message is sent above a lower priority, so the phone stays silent. |
 | `resolved_priority` | integer, -128–127 |  | `0` | The priority of a resolve. |
 | `user_key` | [`Secret`](#type-secret) | yes |  | The user or group key alerts go to. Secret. |
+
+<a id="table-quiethours"></a>
+
+##### `[notifier.pushover.quiet_hours]`
+
+`[notifier.pushover.quiet_hours]`: every day from `start` until `end`, local time in `timezone`, each message (fire, repeat and resolve) is sent at no more than `priority`. A window whose `start` is later than its `end` runs past midnight: `"22:00"` to `"07:00"` is overnight. Alerts still go out inside the window; only how loudly changes.
+
+| Key | Type | Required | Default | Description |
+|-----|------|----------|---------|-------------|
+| `end` | [`TimeOfDay`](#type-timeofday) | yes |  | When it closes, such as `"07:00"`. Exclusive: a message at exactly this time is sent at its usual priority. Must differ from `start`. |
+| `priority` | integer, -128–127 |  | `-1` | The most a message is sent at inside the window, -2 to 1. The default, -1, makes no sound or vibration. A message whose usual priority is already lower keeps it. An emergency (2) is never sent inside the window, and one already ringing for the same alert is cancelled when the alert next fires or repeats inside it. |
+| `start` | [`TimeOfDay`](#type-timeofday) | yes |  | When the window opens each day, such as `"22:00"`. Inclusive. |
+| `timezone` | string | yes |  | The IANA time zone `start` and `end` are read in, such as `"America/Vancouver"`; daylight saving time is followed. |
 
 <a id="table-slacksettings"></a>
 
@@ -817,6 +831,14 @@ A string matching `^\$\{ENV:[A-Za-z_][A-Za-z0-9_]*\}$`.
 A string, or a secret read from an environment variable: "${ENV:NAME}".
 
 A string.
+
+<a id="type-timeofday"></a>
+
+### `TimeOfDay`
+
+A time of day, HH:MM on a 24-hour clock, such as "07:00" or "22:30".
+
+A string matching `^([01][0-9]|2[0-3]):[0-5][0-9]$`.
 
 <a id="type-tokenscope"></a>
 

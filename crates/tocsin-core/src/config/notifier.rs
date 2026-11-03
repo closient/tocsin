@@ -8,7 +8,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::values::{Id, Secret};
+use super::values::{Id, Secret, TimeOfDay};
 
 /// A destination for operator alerts. Every alert it sends is followed by
 /// a resolve with the same identity.
@@ -243,10 +243,43 @@ pub struct PushoverSettings {
     /// The priority of a resolve.
     #[serde(default)]
     pub resolved_priority: i8,
+    /// `[notifier.pushover.quiet_hours]`: a daily window in which no
+    /// message is sent above a lower priority, so the phone stays silent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet_hours: Option<QuietHours>,
 }
 
 fn default_down_priority() -> i8 {
     1
+}
+
+/// `[notifier.pushover.quiet_hours]`: every day from `start` until `end`,
+/// local time in `timezone`, each message (fire, repeat and resolve) is sent
+/// at no more than `priority`. A window whose `start` is later than its
+/// `end` runs past midnight: `"22:00"` to `"07:00"` is overnight. Alerts
+/// still go out inside the window; only how loudly changes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuietHours {
+    /// When the window opens each day, such as `"22:00"`. Inclusive.
+    pub start: TimeOfDay,
+    /// When it closes, such as `"07:00"`. Exclusive: a message at exactly
+    /// this time is sent at its usual priority. Must differ from `start`.
+    pub end: TimeOfDay,
+    /// The IANA time zone `start` and `end` are read in, such as
+    /// `"America/Vancouver"`; daylight saving time is followed.
+    pub timezone: String,
+    /// The most a message is sent at inside the window, -2 to 1. The
+    /// default, -1, makes no sound or vibration. A message whose usual
+    /// priority is already lower keeps it. An emergency (2) is never sent
+    /// inside the window, and one already ringing for the same alert is
+    /// cancelled when the alert next fires or repeats inside it.
+    #[serde(default = "default_quiet_priority")]
+    pub priority: i8,
+}
+
+fn default_quiet_priority() -> i8 {
+    -1
 }
 
 /// `[notifier.email]`.

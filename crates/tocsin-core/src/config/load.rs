@@ -29,8 +29,8 @@ use super::telemetry::OWN_RESOURCE_ATTRIBUTES;
 use super::values::{HeartbeatRef, Id, Secret, Text, email_address, is_unanswerable};
 use super::{
     Auth, AuthMode, Check, Component, Config, Federation, Group, Heartbeat, Link, MAX_APP_NAME,
-    Node, NodeIdSource, Notifier, Page, Project, Route, Server, Slack, Subscribers, Telemetry,
-    Token, Topology, TopologyNode,
+    Node, NodeIdSource, Notifier, Page, Project, QuietHours, Route, Server, Slack, Subscribers,
+    Telemetry, Token, Topology, TopologyNode,
 };
 use crate::federation::{NodeKey, PublicKey};
 use crate::link::{http_url, site_path};
@@ -2315,6 +2315,9 @@ impl<'a> Loader<'a> {
                     );
                 }
             }
+            if let Some(quiet) = &pushover.quiet_hours {
+                self.validate_quiet_hours(origin, quiet);
+            }
         }
         if let Some(slack) = &value.slack
             && slack.webhook_url.is_some() == slack.connection.is_some()
@@ -2332,6 +2335,36 @@ impl<'a> Loader<'a> {
                 &origin.keys(&["telegram", "chat_id"]),
                 "`chat_id` must not be empty",
                 None,
+            );
+        }
+    }
+
+    /// `[notifier.pushover.quiet_hours]`: a window that is not empty, in a
+    /// time zone the bundled database knows, at a priority that never rings
+    /// until acknowledged.
+    fn validate_quiet_hours(&mut self, origin: &Origin, quiet: &QuietHours) {
+        if quiet.start == quiet.end {
+            self.report(
+                &origin.keys(&["pushover", "quiet_hours", "end"]),
+                "quiet hours `start` and `end` must differ",
+                Some("\"22:00\" to \"07:00\" is overnight; a window cannot be empty or the whole day".to_owned()),
+            );
+        }
+        if jiff::tz::TimeZone::get(&quiet.timezone).is_err() {
+            self.report(
+                &origin.keys(&["pushover", "quiet_hours", "timezone"]),
+                format!("unknown time zone `{}`", quiet.timezone),
+                Some("use an IANA name such as \"Europe/Berlin\", or \"UTC\"".to_owned()),
+            );
+        }
+        if !(-2..=1).contains(&quiet.priority) {
+            self.report(
+                &origin.keys(&["pushover", "quiet_hours", "priority"]),
+                "a quiet-hours priority is -2, -1, 0 or 1",
+                Some(
+                    "an emergency (2) rings until acknowledged, which quiet hours exist to prevent"
+                        .to_owned(),
+                ),
             );
         }
     }

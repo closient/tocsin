@@ -72,13 +72,21 @@ pub fn build(
             settings.bot_token.expose(),
             settings.chat_id.clone(),
         )),
-        NotifierSettings::Pushover(settings) => Arc::new(pushover::Pushover::new(
-            client,
-            pushover::API_BASE,
-            settings.api_token.expose().to_owned(),
-            settings.user_key.expose().to_owned(),
-            pushover::Priorities::from(settings),
-        )),
+        NotifierSettings::Pushover(settings) => {
+            let pushover = pushover::Pushover::new(
+                client,
+                pushover::API_BASE,
+                settings.api_token.expose().to_owned(),
+                settings.user_key.expose().to_owned(),
+                pushover::Priorities::from(settings),
+            );
+            match &settings.quiet_hours {
+                Some(quiet_hours) => Arc::new(
+                    pushover.with_quiet_hours(pushover::QuietHours::from_settings(quiet_hours)?),
+                ),
+                None => Arc::new(pushover),
+            }
+        }
         NotifierSettings::Webhook(settings) => Arc::new(webhook::Webhook::new(
             client,
             settings.url.clone(),

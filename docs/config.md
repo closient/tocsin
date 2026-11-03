@@ -389,7 +389,7 @@ Every notifier has an `id`, an optional display `name`, and a `type`.
 | `type` | Settings |
 |--------|----------|
 | `slack` | `connection`, a channel connected on `/admin/slack` (needs [`[slack]`](#slack)), or `webhook_url` (secret), one you made yourself; exactly one of the two |
-| `pushover` | `user_key` (secret), `api_token` (secret), and the priorities `down_priority` (default 1), `degraded_priority` (0) and `resolved_priority` (0), each -2 to 2. 2 is an emergency, repeated until acknowledged, and cancelled when the alert resolves or drops to a priority below 2. |
+| `pushover` | `user_key` (secret), `api_token` (secret), and the priorities `down_priority` (default 1), `degraded_priority` (0) and `resolved_priority` (0), each -2 to 2. 2 is an emergency, repeated until acknowledged, and cancelled when the alert resolves or drops to a priority below 2. Optional `quiet_hours`: `start` and `end` (`HH:MM`, 24-hour), `timezone` (an IANA name) and `priority` (-2 to 1, default -1); inside that daily window no message goes out above `priority` ([alerting.md](alerting.md#notifiers)). |
 | `email` | `to`: a list of addresses. Sender settings come from `[server.email]`; `smtp_url` is `smtps://` for TLS, or `smtp://`, which requires STARTTLS unless it ends `?tls=none`. |
 | `ntfy` | `url` (the topic URL), `token` (secret, optional) |
 | `discord` | `webhook_url` (secret) |

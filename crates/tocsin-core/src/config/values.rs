@@ -387,6 +387,82 @@ impl JsonSchema for Duration {
     }
 }
 
+/// A wall-clock time of day, written `"HH:MM"` on a 24-hour clock, from
+/// `"00:00"` to `"23:59"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TimeOfDay(u16);
+
+/// The pattern every [`TimeOfDay`] matches, as published in the JSON Schema.
+pub const TIME_OF_DAY_PATTERN: &str = "^([01][0-9]|2[0-3]):[0-5][0-9]$";
+
+impl TimeOfDay {
+    /// Parses `"22:00"` and the like.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when `text` is not `HH:MM` between `00:00` and
+    /// `23:59`.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let invalid = || {
+            format!(
+                "invalid time of day `{text}`: write HH:MM on a 24-hour clock, such as \"07:00\" or \"22:30\""
+            )
+        };
+        let (hours, minutes) = text.split_once(':').ok_or_else(invalid)?;
+        let two_digits = |part: &str| -> Result<u16, String> {
+            if part.len() == 2 && part.bytes().all(|byte| byte.is_ascii_digit()) {
+                part.parse().map_err(|_| invalid())
+            } else {
+                Err(invalid())
+            }
+        };
+        let (hours, minutes) = (two_digits(hours)?, two_digits(minutes)?);
+        if hours > 23 || minutes > 59 {
+            return Err(invalid());
+        }
+        Ok(TimeOfDay(hours * 60 + minutes))
+    }
+
+    /// Minutes since midnight, 0 to 1439.
+    #[must_use]
+    pub const fn minutes(self) -> u16 {
+        self.0
+    }
+}
+
+impl fmt::Display for TimeOfDay {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{:02}:{:02}", self.0 / 60, self.0 % 60)
+    }
+}
+
+impl Serialize for TimeOfDay {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for TimeOfDay {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        TimeOfDay::parse(&text).map_err(serde::de::Error::custom)
+    }
+}
+
+impl JsonSchema for TimeOfDay {
+    fn schema_name() -> Cow<'static, str> {
+        "TimeOfDay".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "pattern": TIME_OF_DAY_PATTERN,
+            "description": "A time of day, HH:MM on a 24-hour clock, such as \"07:00\" or \"22:30\"."
+        })
+    }
+}
+
 /// An amount of data, written as a number and a binary unit: `"512B"`,
 /// `"64KiB"` or `"1MiB"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -900,6 +976,25 @@ mod tests {
                 TopologyNode::parse(text).is_ok(),
                 "{text:?}"
             );
+        }
+    }
+
+    #[test]
+    fn times_of_day_parse_and_print_as_hh_mm() {
+        for (text, minutes) in [
+            ("00:00", 0),
+            ("07:00", 420),
+            ("22:30", 1350),
+            ("23:59", 1439),
+        ] {
+            let time = TimeOfDay::parse(text).unwrap();
+            assert_eq!(time.minutes(), minutes, "{text}");
+            assert_eq!(time.to_string(), text);
+        }
+        for bad in [
+            "", "7:00", "07:0", "24:00", "23:60", "07-00", "0700", "+7:00", "07:00:00", " 7:00",
+        ] {
+            assert!(TimeOfDay::parse(bad).is_err(), "{bad:?} should be rejected");
         }
     }
 

@@ -15,11 +15,12 @@ use tocsin_alert::notifiers::alertmanager::{self, Alertmanager};
 use tocsin_alert::notifiers::discord::Discord;
 use tocsin_alert::notifiers::email::Email;
 use tocsin_alert::notifiers::ntfy::Ntfy;
-use tocsin_alert::notifiers::pushover::{Priorities, Pushover};
+use tocsin_alert::notifiers::pushover::{Priorities, Pushover, QuietHours};
 use tocsin_alert::notifiers::slack::{Slack, SlackConnection};
 use tocsin_alert::notifiers::telegram::Telegram;
 use tocsin_alert::notifiers::webhook::{self, SIGNATURE_HEADER, TIMESTAMP_HEADER, Webhook};
 use tocsin_alert::{Alert, AlertEvent, Notifier, SlackHooks};
+use tocsin_core::config::TimeOfDay;
 use tocsin_core::{Health, config};
 use tocsin_store::{
     EndedBy, NewSlackConnection, Preferences, SlackHook, SlackPurpose, Store, SubjectKind,
@@ -353,6 +354,221 @@ async fn a_pushover_tag_belongs_to_one_user_and_one_alert() {
     assert_eq!(
         pushover("alice").tag(&api),
         pushover("alice").tag(&alert(AlertEvent::Resolve))
+    );
+}
+
+/// The next request, failing rather than waiting forever for one that
+/// never comes.
+async fn next(receiver: &mut mpsc::UnboundedReceiver<Request>) -> Request {
+    tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+        .await
+        .expect("no request within 5s")
+        .unwrap()
+}
+
+/// Quiet from 22:00 until 07:00 in Vancouver, at priority -1.
+fn overnight() -> QuietHours {
+    QuietHours::new(
+        TimeOfDay::parse("22:00").unwrap(),
+        TimeOfDay::parse("07:00").unwrap(),
+        jiff::tz::TimeZone::get("America/Vancouver").unwrap(),
+        -1,
+    )
+}
+
+/// The instant a Vancouver wall clock shows `local` (`YYYY-MM-DDTHH:MM`).
+fn vancouver(local: &str) -> i64 {
+    format!("{local}[America/Vancouver]")
+        .parse::<jiff::Zoned>()
+        .unwrap()
+        .timestamp()
+        .as_millisecond()
+}
+
+/// The instant `utc` (`YYYY-MM-DDTHH:MMZ`), with no zone in play.
+fn utc(utc: &str) -> i64 {
+    utc.parse::<jiff::Timestamp>().unwrap().as_millisecond()
+}
+
+#[test]
+fn quiet_hours_hold_from_their_start_until_just_before_their_end() {
+    let quiet = overnight();
+    for local in ["2026-07-15T22:00", "2026-07-16T03:55", "2026-07-16T06:59"] {
+        assert!(quiet.contains(vancouver(local)), "{local} should be quiet");
+        assert_eq!(quiet.hold(1, vancouver(local)), -1, "{local}");
+    }
+    for local in ["2026-07-16T07:00", "2026-07-16T21:59", "2026-07-16T12:00"] {
+        assert!(!quiet.contains(vancouver(local)), "{local} should ring");
+        assert_eq!(quiet.hold(1, vancouver(local)), 1, "{local}");
+    }
+    // Held down, never raised: a quieter usual priority stays as it is.
+    assert_eq!(quiet.hold(-2, vancouver("2026-07-16T03:55")), -2);
+}
+
+#[test]
+fn quiet_hours_follow_the_wall_clock_across_daylight_saving_time() {
+    let quiet = overnight();
+    // Vancouver left PST (UTC-8) for PDT (UTC-7) on 2026-03-08: the same
+    // 14:30 UTC is 06:30 the day before, inside the window, and 07:30 that
+    // day, past it.
+    assert!(quiet.contains(utc("2026-03-07T14:30Z")));
+    assert!(!quiet.contains(utc("2026-03-08T14:30Z")));
+    // The window opens at 22:00 local on either side of the change.
+    assert!(!quiet.contains(utc("2026-03-08T05:59Z")));
+    assert!(quiet.contains(utc("2026-03-08T06:00Z")));
+    assert!(!quiet.contains(utc("2026-03-09T04:59Z")));
+    assert!(quiet.contains(utc("2026-03-09T05:00Z")));
+    // British Columbia stays on UTC-7 from 2026-11-01 rather than falling
+    // back: the window is read from the time zone database, not from a
+    // fixed offset or a rule of its own.
+    assert!(!quiet.contains(utc("2026-11-01T14:00Z")));
+    assert!(quiet.contains(utc("2026-11-01T13:59Z")));
+    assert!(quiet.contains(utc("2026-11-02T05:00Z")));
+}
+
+#[test]
+fn quiet_hours_within_one_day_do_not_wrap() {
+    let quiet = QuietHours::new(
+        TimeOfDay::parse("09:00").unwrap(),
+        TimeOfDay::parse("17:00").unwrap(),
+        jiff::tz::TimeZone::UTC,
+        -2,
+    );
+    assert!(!quiet.contains(utc("2026-07-16T08:59Z")));
+    assert!(quiet.contains(utc("2026-07-16T09:00Z")));
+    assert!(quiet.contains(utc("2026-07-16T16:59Z")));
+    assert!(!quiet.contains(utc("2026-07-16T17:00Z")));
+    assert!(!quiet.contains(utc("2026-07-16T23:00Z")));
+}
+
+#[tokio::test]
+async fn pushover_inside_quiet_hours_sends_at_the_quiet_priority() {
+    let (base, mut requests) = accepting().await;
+    let pushover = Pushover::new(
+        client(),
+        &base,
+        "app-token".into(),
+        "user-key".into(),
+        Priorities {
+            down: 1,
+            degraded: 0,
+            resolved: 0,
+        },
+    )
+    .with_quiet_hours(overnight());
+    let at = |sent_at: &str, event| Alert {
+        sent_at_ms: vancouver(sent_at),
+        ..alert(event)
+    };
+    pushover
+        .send(&at("2026-07-16T03:55", AlertEvent::Fire))
+        .await
+        .unwrap();
+    pushover
+        .send(&at("2026-07-16T06:59", AlertEvent::Resolve))
+        .await
+        .unwrap();
+    pushover
+        .send(&at("2026-07-16T07:00", AlertEvent::Fire))
+        .await
+        .unwrap();
+
+    let (night, dawn) = (next(&mut requests).await, next(&mut requests).await);
+    let day = next(&mut requests).await;
+    assert_eq!(night.field("priority"), "-1");
+    assert_eq!(dawn.field("priority"), "-1");
+    assert_eq!(day.field("priority"), "1");
+    for request in [&night, &dawn, &day] {
+        assert_eq!(request.path, "/1/messages.json");
+    }
+}
+
+#[tokio::test]
+async fn an_emergency_inside_quiet_hours_is_held_quiet_and_its_ringing_cancelled() {
+    let (base, mut requests) = accepting().await;
+    let pushover = Pushover::new(
+        client(),
+        &base,
+        "app-token".into(),
+        "user-key".into(),
+        Priorities {
+            down: 2,
+            degraded: 0,
+            resolved: 0,
+        },
+    )
+    .with_quiet_hours(overnight());
+    let fire = Alert {
+        sent_at_ms: vancouver("2026-07-16T03:55"),
+        ..alert(AlertEvent::Fire)
+    };
+    pushover.send(&fire).await.unwrap();
+
+    // An emergency rung before 22:00 stops ringing first; then the message
+    // goes out with nothing that makes it ring.
+    let (cancel, message) = (next(&mut requests).await, next(&mut requests).await);
+    let tag = pushover.tag(&fire);
+    assert_eq!(cancel.path, format!("/1/receipts/cancel_by_tag/{tag}.json"));
+    assert_eq!(message.path, "/1/messages.json");
+    assert_eq!(message.field("priority"), "-1");
+    for field in ["retry", "expire", "tags", "sound"] {
+        assert!(
+            url::form_urlencoded::parse(&message.body).all(|(key, _)| key != field),
+            "a quiet message carries no {field}"
+        );
+    }
+
+    // Outside the window the same alert is an emergency again.
+    let day = Alert {
+        sent_at_ms: vancouver("2026-07-16T07:00"),
+        ..alert(AlertEvent::Fire)
+    };
+    pushover.send(&day).await.unwrap();
+    let rung = next(&mut requests).await;
+    assert_eq!(rung.path, "/1/messages.json");
+    assert_eq!(rung.field("priority"), "2");
+    assert_eq!(rung.field("tags"), tag);
+    assert_eq!(rung.field("expire"), "3600");
+
+    // Nearer the window, it stops ringing before the window opens: at
+    // 21:30 it repeats for half an hour, and in the last seconds it rings
+    // only the once.
+    for (sent_at, expire) in [
+        (vancouver("2026-07-16T21:30"), "1800"),
+        (vancouver("2026-07-16T22:00") - 5_000, "30"),
+    ] {
+        let evening = Alert {
+            sent_at_ms: sent_at,
+            ..alert(AlertEvent::Fire)
+        };
+        pushover.send(&evening).await.unwrap();
+        let rung = next(&mut requests).await;
+        assert_eq!(rung.field("priority"), "2");
+        assert_eq!(rung.field("expire"), expire);
+        assert!(rung.field("retry").parse::<i64>().unwrap() > 30);
+    }
+}
+
+#[test]
+fn quiet_hours_know_when_they_next_open() {
+    let quiet = overnight();
+    assert_eq!(
+        quiet.seconds_until_open(vancouver("2026-07-16T21:30")),
+        Some(1800)
+    );
+    assert_eq!(
+        quiet.seconds_until_open(vancouver("2026-07-16T07:00")),
+        Some(15 * 3600)
+    );
+    // Inside the window, the next opening is tomorrow's.
+    assert_eq!(
+        quiet.seconds_until_open(vancouver("2026-07-16T22:00")),
+        Some(24 * 3600)
+    );
+    // Across the spring change the day is 23 hours long.
+    assert_eq!(
+        quiet.seconds_until_open(vancouver("2026-03-07T22:00")),
+        Some(23 * 3600)
     );
 }
 
